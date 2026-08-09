@@ -65,9 +65,25 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     };
 
     // Columns are dropped from the right as the table narrows, so a resize
-    // costs detail rather than breaking the alignment.
+    // costs detail rather than breaking the alignment. Decided before the area
+    // is centred, or the narrowing would feed back into the column choice.
     let show_conditions = table_area.width >= TABLE_COMPACT;
     let show_all = table_area.width >= TABLE_FULL;
+
+    // Centre the block rather than the lines: Alignment::Center would centre
+    // each row on its own width, and the emoji ending every row varies in cell
+    // width, so the columns would wobble line to line. Side by side this is a
+    // no-op, the column already being exactly the table's width.
+    let block_width = if show_all {
+        TABLE_FULL
+    } else if show_conditions {
+        TABLE_COMPACT
+    } else {
+        TABLE_MINIMAL
+    };
+    let [table_area] = Layout::horizontal([Constraint::Length(block_width.min(table_area.width))])
+        .flex(Flex::Center)
+        .areas(table_area);
 
     // Emoji cell widths vary between glyphs, so the icon sits at the end of the
     // row where it cannot push the numeric columns out of alignment.
@@ -203,6 +219,7 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
 }
 
 /// Rendered width of the table at each level of detail, emoji included.
+const TABLE_MINIMAL: u16 = 26;
 const TABLE_COMPACT: u16 = 42;
 const TABLE_FULL: u16 = 68;
 /// Bars thinner than this read as a comb rather than a chart.
