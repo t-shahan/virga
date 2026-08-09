@@ -77,7 +77,10 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
         while let Ok(message) = message_rx.try_recv() {
             dirty = true;
             match message {
-                Message::Loaded(w) => app.weather = Fetch::Ready(w),
+                Message::Loaded(w) => {
+                    app.selected_day = w.today_index;
+                    app.weather = Fetch::Ready(w);
+                }
                 Message::LoadFailed(e) => app.weather = Fetch::Failed(e),
                 Message::Located(l) => app.results = Fetch::Ready(l),
                 Message::SearchFailed(e) => app.results = Fetch::Failed(e),
@@ -116,6 +119,9 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 app.screen = Screen::Search;
                                 app.query.clear();
                             }
+                            KeyCode::Left => app.select_prev_day(),
+                            KeyCode::Right => app.select_next_day(),
+                            KeyCode::Char('n') | KeyCode::Home => app.select_today(),
                             _ => {}
                         },
                         Screen::Search => match key.code {

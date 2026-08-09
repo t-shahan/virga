@@ -10,7 +10,7 @@ mod search;
 mod top;
 
 use current::current_area_render;
-use forecast::forecast_area_render;
+use forecast::{chart_area_render, forecast_area_render};
 use legend::keybind_legend_render;
 use search::search_render;
 use top::top_area_render;
@@ -29,18 +29,55 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Weather => match &app.weather {
             Fetch::Ready(w) => {
-                // The forecast pane takes only the rows it needs out of what is
-                // left, so the slack collects above the legend.
-                let [top_area, current_area, forecast_area] = Layout::vertical([
+                let [top_area, current_area, rest] = Layout::vertical([
                     Constraint::Length(4),
                     Constraint::Length(7),
                     Constraint::Fill(1),
                 ])
                 .areas(content);
 
+                // Table and chart are separate boxes now. Side by side buys
+                // rows at the cost of chart width, so it is a fallback for
+                // short windows rather than a reward for wide ones.
+                let table_rows = w.daily.len().saturating_sub(w.today_index) as u16 + 1;
+                let table_box = table_rows + 2;
+                let side_by_side = rest.width >= forecast::SIDE_BY_SIDE_MIN
+                    && rest.height < table_box + forecast::CHART_MIN + 2;
+
+                let (forecast_area, chart_area) = if side_by_side {
+                    let [left, _gutter, right] = Layout::horizontal([
+                        Constraint::Length(forecast::TABLE_FULL + 2),
+                        Constraint::Length(forecast::GUTTER),
+                        Constraint::Fill(1),
+                    ])
+                    .areas(rest);
+                    (
+                        Rect {
+                            height: table_box.min(left.height),
+                            ..left
+                        },
+                        Rect {
+                            height: table_box.min(right.height),
+                            ..right
+                        },
+                    )
+                } else {
+                    let [table, chart] =
+                        Layout::vertical([Constraint::Length(table_box), Constraint::Fill(1)])
+                            .areas(rest);
+                    (
+                        table,
+                        Rect {
+                            height: chart.height.min(forecast::CHART_MAX + 2),
+                            ..chart
+                        },
+                    )
+                };
+
                 top_area_render(frame, app, w, top_area);
-                current_area_render(frame, w, current_area, app.unit);
-                forecast_area_render(frame, w, forecast_area, app.unit);
+                current_area_render(frame, w, current_area, app.unit, app.selected_day);
+                forecast_area_render(frame, w, forecast_area, app.unit, app.selected_day);
+                chart_area_render(frame, w, chart_area, app.unit, app.selected_day);
             }
             Fetch::Loading => popup_render(
                 frame,
