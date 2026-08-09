@@ -81,24 +81,26 @@ pub(super) fn current_area_render(frame: &mut Frame, weather: &Weather, area: Re
 
 const DIGIT_ROWS: usize = 5;
 /// Widths of the two columns in the "Now" pane, centred as a pair.
-const HERO_WIDTH: u16 = 16;
+const HERO_WIDTH: u16 = 26;
 const DETAIL_WIDTH: u16 = 30;
 
-/// One 3x5 block glyph. Only digits and a minus sign are needed for temperatures.
+/// One 7x5 block glyph. At three cells wide the digits rendered far taller
+/// than they were broad, since terminal cells are roughly twice as tall as
+/// they are wide. Only digits and a minus sign are needed for temperatures.
 fn glyph(c: char) -> [&'static str; DIGIT_ROWS] {
     match c {
-        '0' => ["███", "█ █", "█ █", "█ █", "███"],
-        '1' => ["  █", "  █", "  █", "  █", "  █"],
-        '2' => ["███", "  █", "███", "█  ", "███"],
-        '3' => ["███", "  █", "███", "  █", "███"],
-        '4' => ["█ █", "█ █", "███", "  █", "  █"],
-        '5' => ["███", "█  ", "███", "  █", "███"],
-        '6' => ["███", "█  ", "███", "█ █", "███"],
-        '7' => ["███", "  █", "  █", "  █", "  █"],
-        '8' => ["███", "█ █", "███", "█ █", "███"],
-        '9' => ["███", "█ █", "███", "  █", "███"],
-        '-' => ["   ", "   ", "███", "   ", "   "],
-        _ => ["   ", "   ", "   ", "   ", "   "],
+        '0' => ["███████", "██   ██", "██   ██", "██   ██", "███████"],
+        '1' => ["   ██  ", "   ██  ", "   ██  ", "   ██  ", "   ██  "],
+        '2' => ["███████", "     ██", "███████", "██     ", "███████"],
+        '3' => ["███████", "     ██", "███████", "     ██", "███████"],
+        '4' => ["██   ██", "██   ██", "███████", "     ██", "     ██"],
+        '5' => ["███████", "██     ", "███████", "     ██", "███████"],
+        '6' => ["███████", "██     ", "███████", "██   ██", "███████"],
+        '7' => ["███████", "     ██", "     ██", "     ██", "     ██"],
+        '8' => ["███████", "██   ██", "███████", "██   ██", "███████"],
+        '9' => ["███████", "██   ██", "███████", "     ██", "███████"],
+        '-' => ["       ", "       ", "███████", "       ", "       "],
+        _ => ["       "; DIGIT_ROWS],
     }
 }
 

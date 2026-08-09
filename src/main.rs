@@ -20,7 +20,7 @@ struct Place {
 }
 
 const DEFAULT_LOCATION: Place = Place {
-    name: "Frederick, Maryland",
+    name: "Frederick, Maryland, United States",
     lat: 39.41427,
     lon: -77.41054,
 };

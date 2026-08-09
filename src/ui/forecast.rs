@@ -13,15 +13,17 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [list_area, caption_area, chart_area] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(7),
-    ])
-    .areas(inner);
-
     // Today onwards. The past stays exclusive to the chart.
     let upcoming = weather.daily.get(weather.today_index..).unwrap_or(&[]);
+
+    // The table is fixed-size and cannot use spare rows; the chart gains
+    // resolution from every one it gets, so the chart is what flexes.
+    let [list_area, caption_area, chart_area] = Layout::vertical([
+        Constraint::Length(upcoming.len() as u16 + 1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
 
     // Emoji cell widths vary between glyphs, so the icon sits at the end of the
     // row where it cannot push the numeric columns out of alignment.
@@ -29,8 +31,8 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
         // The high/low widths here are the value width plus the two-cell unit
         // symbol the rows append, so the headings sit over their own columns.
         Line::from(format!(
-            "  {:<5}{:>7}{:>8}{:>7}{:>8}{:>7}",
-            "day", "high", "low", "rain", "wind", "uv"
+            "  {:<5}{:>7}{:>8}{:>7}{:>8}{:>7}{:>10}{:>9}",
+            "day", "high", "low", "rain", "wind", "uv", "sunrise", "sunset"
         ))
         .dark_gray(),
     ];
@@ -48,6 +50,9 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             .uv_index
             .map_or_else(|| "–".to_string(), |uv| format!("{uv:.0}"));
 
+        let sunrise = d.sunrise.as_deref().map_or("–", clock).to_string();
+        let sunset = d.sunset.as_deref().map_or("–", clock).to_string();
+
         let day = if is_today {
             "Today".to_string()
         } else {
@@ -55,7 +60,7 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
         };
 
         let line = Line::from(format!(
-            "  {:<5}{:>5.0}{}{:>6.0}{}{:>7}{:>8}{:>7}   {}",
+            "  {:<5}{:>5.0}{}{:>6.0}{}{:>7}{:>8}{:>7}{:>10}{:>9}   {}",
             day,
             unit.temp(d.high_c),
             unit.temp_symbol(),
@@ -64,6 +69,8 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             rain,
             wind,
             uv,
+            sunrise,
+            sunset,
             emoji(d.code),
         ));
 
@@ -146,6 +153,12 @@ const BAR_GAP: u16 = 1;
 /// Shortest bar, as a proportion of `BAR_CEILING`. Keeps the coolest day visible.
 const BAR_FLOOR: u64 = 15;
 const BAR_CEILING: u64 = 100;
+
+/// "2026-08-09T06:17" -> "06:17". Falls back to the raw value if the shape
+/// is not what we expect, rather than guessing.
+fn clock(stamp: &str) -> &str {
+    stamp.get(11..16).unwrap_or(stamp)
+}
 
 fn weekday(date: &str) -> String {
     match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
