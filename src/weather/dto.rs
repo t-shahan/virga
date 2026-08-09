@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use crate::weather::model::{Current, DailyForecast, Location, Weather, AirQuality};
+use crate::weather::model::{Current, DailyForecast, Location, Weather};
 
 #[derive(Debug, Deserialize)]
 pub struct GeocodeResultDto {
@@ -30,7 +30,7 @@ impl From<GeocodeResultDto> for Location {
 
 #[derive(Debug, Deserialize)]
 pub struct CurrentDto {
-    pub time: String,
+    pub time: String, // Keeping this to add a 'Last Updated: {time}' field to the current weather
     pub temperature_2m: f64,
     pub apparent_temperature: f64,
     pub weather_code: u8,

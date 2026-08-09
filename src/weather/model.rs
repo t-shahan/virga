@@ -30,7 +30,7 @@ pub struct DailyForecast {
     pub date: String,
     pub high_c: f64,
     pub low_c: f64,
-    pub code: u8,
+    pub code: u8, // Holding on to this for later when adding emoji() in the 5 day forecast
 }
 
 pub struct Weather {
@@ -42,23 +42,6 @@ pub struct Weather {
 
 pub struct AirQuality {
     pub us_aqi: u16,
-}
-
-impl AirQuality {
-    pub fn new(us_aqi: u16) -> Self {
-        Self { us_aqi }
-    }
-}
-
-impl DailyForecast {
-    pub fn new(date: String, high_c: f64, low_c: f64, code: u8) -> Self {
-        Self {
-            date,
-            high_c,
-            low_c,
-            code,
-        }
-    }
 }
 
 impl Weather {
@@ -73,11 +56,11 @@ impl Weather {
                 wind_kph: 5.0,
             },
             daily: vec![
-                DailyForecast::new("Mon".to_string(), 32.0, 28.0, 1),
-                DailyForecast::new("Tue".to_string(), 35.0, 30.0, 1),
-                DailyForecast::new("Wed".to_string(), 30.0, 25.0, 1),
-                DailyForecast::new("Thu".to_string(), 28.0, 23.0, 1),
-                DailyForecast::new("Fri".to_string(), 26.0, 22.0, 1),
+                DailyForecast { date: "Mon".to_string(), high_c: 32.0, low_c: 28.0, code: 1 },
+                DailyForecast { date: "Tue".to_string(), high_c: 35.0, low_c: 30.0, code: 1 },
+                DailyForecast { date: "Wed".to_string(), high_c: 30.0, low_c: 25.0, code: 1 },
+                DailyForecast { date: "Thu".to_string(), high_c: 28.0, low_c: 23.0, code: 1 },
+                DailyForecast { date: "Fri".to_string(), high_c: 26.0, low_c: 22.0, code: 1 },
             ],
             air_quality: None,
         }
