@@ -353,7 +353,7 @@ fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [list_area, label_area, chart_area] = Layout::vertical([
+    let [list_area, caption_area, chart_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(7),
@@ -379,20 +379,28 @@ fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: 
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
 
-    // Widen the bars if there's room, but never below 2 columns. Whatever still
-    // doesn't fit drops the oldest history first, so the forecast always shows.
+    // Widen the bars if there's room. Anything that still doesn't fit drops the
+    // oldest history first, so the forecast is never what gets clipped.
     let count = weather.daily.len().max(1);
-    let stride = ((chart_area.width as usize + BAR_GAP as usize) / count).clamp(3, 6);
+    let stride = ((chart_area.width as usize + BAR_GAP as usize) / count).clamp(2, 4);
     let capacity = ((chart_area.width as usize + BAR_GAP as usize) / stride).max(1);
     let start = weather.daily.len().saturating_sub(capacity);
     let visible = &weather.daily[start..];
 
-    // Bars are drawn relative to the coolest day, otherwise a run of similar
-    // highs all render as full-height bars and the trend is invisible.
     let coolest = visible
         .iter()
         .map(|d| d.high_c)
         .fold(f64::INFINITY, f64::min);
+    let warmest = visible
+        .iter()
+        .map(|d| d.high_c)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    // Map the observed range onto BAR_FLOOR..=BAR_CEILING rather than 0..=max.
+    // Scaling from zero flattens a week of similar highs into identical bars,
+    // and a bar worth a few percent of the tallest rounds down to nothing.
+    let span = (warmest - coolest).max(0.1);
+    let scale = (BAR_CEILING - BAR_FLOOR) as f64;
 
     let bars: Vec<Bar> = visible
         .iter()
@@ -403,30 +411,36 @@ fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: 
             } else {
                 Color::Cyan
             };
+            let value = BAR_FLOOR + (((d.high_c - coolest) / span) * scale).round() as u64;
             Bar::default()
-                .value((((d.high_c - coolest) * 10.0).round().max(0.0) as u64) + 1)
+                .value(value)
                 .text_value(String::new())
                 .style(Style::new().fg(color))
         })
         .collect();
 
-    let labels: Vec<Span> = visible
-        .iter()
-        .enumerate()
-        .map(|(i, d)| {
-            let text = format!("{:<stride$}", day_label(&d.date, stride >= 6));
-            if start + i == weather.today_index {
-                Span::from(text).yellow().bold()
-            } else {
-                Span::from(text).dark_gray()
-            }
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(Line::from(labels)), label_area);
+    let caption = format!(
+        "daily high · {:.0}–{:.0}{}",
+        unit.temp(coolest),
+        unit.temp(warmest),
+        unit.temp_symbol(),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(caption).dark_gray()).alignment(Alignment::Center),
+        caption_area,
+    );
+
+    // Centre the chart on its own measured width; left-aligned looked lopsided
+    // once the bars stopped filling the pane.
+    let chart_width = (visible.len() * stride).saturating_sub(BAR_GAP as usize) as u16;
+    let [chart_area] = Layout::horizontal([Constraint::Length(chart_width)])
+        .flex(Flex::Center)
+        .areas(chart_area);
 
     frame.render_widget(
         BarChart::default()
             .data(BarGroup::default().bars(&bars))
+            .max(BAR_CEILING)
             .bar_width(stride as u16 - BAR_GAP)
             .bar_gap(BAR_GAP),
         chart_area,
@@ -434,19 +448,9 @@ fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: 
 }
 
 const BAR_GAP: u16 = 1;
-
-/// `mm/dd` when the columns are wide enough for it, otherwise just the day.
-fn day_label(date: &str, wide: bool) -> String {
-    let Ok(parsed) = NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
-        return date.to_string();
-    };
-
-    if wide {
-        parsed.format("%m/%d").to_string()
-    } else {
-        parsed.format("%d").to_string()
-    }
-}
+/// Shortest bar, as a proportion of `BAR_CEILING`. Keeps the coolest day visible.
+const BAR_FLOOR: u64 = 15;
+const BAR_CEILING: u64 = 100;
 
 fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
     let binds: &[(&str, &str)] = match app.screen {
