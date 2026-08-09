@@ -11,8 +11,6 @@ use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
-use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{self, SetSize};
 use ratatui::layout::Alignment;
 use ratatui::layout::Flex;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -21,7 +19,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Bar, BarChart, BarGroup, Block, Paragraph};
 use ratatui::widgets::{Borders, Clear};
 use ratatui::{DefaultTerminal, Frame};
-use std::io::stdout;
 use std::sync::mpsc;
 use std::time::Duration;
 mod app;
@@ -41,24 +38,10 @@ const DEFAULT_LOCATION: Place = Place {
     lon: -77.41054,
 };
 
-/// The layout is tuned for this size. Terminals may refuse the resize — window
-/// manipulation is commonly disabled — so this is a request, not a guarantee.
-const WINDOW_COLS: u16 = 100;
-const WINDOW_ROWS: u16 = 30;
-
 fn main() -> Result<()> {
-    let original_size = terminal::size().ok();
-    let _ = execute!(stdout(), SetSize(WINDOW_COLS, WINDOW_ROWS));
-
     let terminal = ratatui::init();
     let result = run(terminal);
     ratatui::restore();
-
-    // Leave the terminal the size we found it.
-    if let Some((cols, rows)) = original_size {
-        let _ = execute!(stdout(), SetSize(cols, rows));
-    }
-
     result
 }
 
