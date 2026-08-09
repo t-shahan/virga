@@ -32,7 +32,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                 let [top_area, current_area, forecast_area, _spare] = Layout::vertical([
                     Constraint::Length(4),
                     Constraint::Length(7),
-                    Constraint::Length(forecast::height(w, content.width)),
+                    Constraint::Max(forecast::max_height(w, content.width)),
                     Constraint::Fill(1),
                 ])
                 .areas(content);
