@@ -1,6 +1,6 @@
-use crate::Location;
 use crate::weather::client::fetch_forecast;
 use crate::weather::client::search_locations;
+use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
