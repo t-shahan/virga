@@ -7,7 +7,7 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui::widgets::Clear;
 use ratatui::layout::Alignment;
 use ratatui::style::Stylize;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use anyhow::Result;
 use crate::app::App;
 use crate::app::Screen;
@@ -127,10 +127,11 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
 fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let [top_area, current_area, forecast_area] = Layout::vertical([
+    let [top_area, current_area, forecast_area, legend_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(7),
-        Constraint::Fill(1)
+        Constraint::Fill(1),
+        Constraint::Length(1),
     ])
     .areas(area);
 
@@ -140,6 +141,7 @@ fn render(frame: &mut Frame, app: &App) {
                 top_area_render(frame, app, w, top_area);
                 current_area_render(frame, w, current_area, app.unit);
                 forecast_area_render(frame, w, forecast_area, app.unit);
+                keybind_legend_render(frame, app, legend_area);
             }
             Fetch::Loading => popup_render(
                 frame,
@@ -252,8 +254,31 @@ fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: 
     frame.render_widget(forecast, area);
 }
 
-fn keybind_legend_render(frame: &mut Frame, area: Rect, unit: Unit) {
-    todo!("Add a small section at the bottom with quick keybind help, no title, just something like 'quit' with q in a different color than the rest of the word and similar style for the other commands. No border or background color. Should be modern and stylish.")
+fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
+    let binds: &[(&str, &str)] = match app.screen {
+        Screen::Weather => &[
+            ("q", "quit"),
+            ("r", "refresh"),
+            ("t", "units"),
+            ("l", "location"),
+        ],
+        Screen::Search => match &app.results {
+            Fetch::Ready(l) if !l.is_empty() => &[
+                ("↑↓", "navigate"),
+                ("enter", "select"),
+                ("esc", "cancel"),
+            ],
+            _ => &[("enter", "search"), ("esc", "cancel")],
+        },
+    };
+
+    let mut spans = vec![Span::from("  ")];
+    for (key, label) in binds {
+        spans.push(Span::from(format!("[{key}]")).yellow());
+        spans.push(Span::from(format!(" {label}   ")).dark_gray());
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
