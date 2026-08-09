@@ -52,6 +52,12 @@ pub struct DailyDto {
     pub weather_code: Vec<Option<u8>>,
     pub temperature_2m_max: Vec<Option<f64>>,
     pub temperature_2m_min: Vec<Option<f64>>,
+    #[serde(default)]
+    pub precipitation_probability_max: Vec<Option<u8>>,
+    #[serde(default)]
+    pub wind_speed_10m_max: Vec<Option<f64>>,
+    #[serde(default)]
+    pub uv_index_max: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +66,12 @@ pub struct ForecastDto {
     pub timezone: String,
     pub current: CurrentDto,
     pub daily: DailyDto,
+}
+
+/// `values[i]`, collapsing "index out of range" and "value was null" into the
+/// same `None` — the caller cares about neither distinction.
+fn at<T: Copy>(values: &[Option<T>], i: usize) -> Option<T> {
+    values.get(i).copied().flatten()
 }
 
 impl From<ForecastDto> for Weather {
@@ -78,21 +90,23 @@ impl From<ForecastDto> for Weather {
             .map(str::to_string)
             .unwrap_or_else(|| Local::now().date_naive().to_string());
 
-        // `?` inside filter_map drops any day missing a measurement instead of
-        // failing the entire forecast.
-        let daily: Vec<DailyForecast> = dto
-            .daily
-            .time
-            .into_iter()
-            .zip(dto.daily.temperature_2m_max)
-            .zip(dto.daily.temperature_2m_min)
-            .zip(dto.daily.weather_code)
-            .filter_map(|(((date, high), low), code)| {
+        // Seven parallel arrays would make a zip chain unreadable — the pattern
+        // becomes ((((((a, b), c), d), e), f), g) — so index instead. Costs a
+        // clone per date string, which is nothing against the legibility.
+        //
+        // `?` on the core four drops a day that is missing them; the
+        // supplementary readings stay Option, so a null UV only blanks a cell.
+        let day = &dto.daily;
+        let daily: Vec<DailyForecast> = (0..day.time.len())
+            .filter_map(|i| {
                 Some(DailyForecast {
-                    date,
-                    high_c: high?,
-                    low_c: low?,
-                    code: code?,
+                    date: day.time.get(i)?.clone(),
+                    high_c: at(&day.temperature_2m_max, i)?,
+                    low_c: at(&day.temperature_2m_min, i)?,
+                    code: at(&day.weather_code, i)?,
+                    rain_chance: at(&day.precipitation_probability_max, i),
+                    wind_kph: at(&day.wind_speed_10m_max, i),
+                    uv_index: at(&day.uv_index_max, i),
                 })
             })
             .collect();

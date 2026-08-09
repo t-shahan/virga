@@ -20,7 +20,7 @@ pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
         )
         .query(
             "daily",
-            "weather_code,temperature_2m_max,temperature_2m_min",
+            "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max",
         )
         .query("timezone", "auto")
         .query("forecast_days", "8")
