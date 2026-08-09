@@ -29,6 +29,20 @@ impl Unit {
             Unit::Imperial => kph_to_mph(kph),
         }
     }
+    pub fn precip(self, mm: f64) -> f64 {
+        match self {
+            Unit::Metric => mm,
+            Unit::Imperial => mm / 25.4,
+        }
+    }
+
+    pub fn precip_label(self) -> &'static str {
+        match self {
+            Unit::Metric => "mm",
+            Unit::Imperial => "in",
+        }
+    }
+
     pub fn speed_label(self) -> &'static str {
         match self {
             Unit::Metric => "km/h",

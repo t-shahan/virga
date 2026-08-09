@@ -62,6 +62,20 @@ pub struct DailyDto {
     pub sunrise: Vec<Option<String>>,
     #[serde(default)]
     pub sunset: Vec<Option<String>>,
+    #[serde(default)]
+    pub apparent_temperature_max: Vec<Option<f64>>,
+    #[serde(default)]
+    pub apparent_temperature_min: Vec<Option<f64>>,
+    #[serde(default)]
+    pub precipitation_sum: Vec<Option<f64>>,
+    #[serde(default)]
+    pub precipitation_hours: Vec<Option<f64>>,
+    #[serde(default)]
+    pub wind_gusts_10m_max: Vec<Option<f64>>,
+    #[serde(default)]
+    pub wind_direction_10m_dominant: Vec<Option<f64>>,
+    #[serde(default)]
+    pub daylight_duration: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +132,13 @@ impl From<ForecastDto> for Weather {
                     uv_index: at(&day.uv_index_max, i),
                     sunrise: at_owned(&day.sunrise, i),
                     sunset: at_owned(&day.sunset, i),
+                    feels_max_c: at(&day.apparent_temperature_max, i),
+                    feels_min_c: at(&day.apparent_temperature_min, i),
+                    precip_mm: at(&day.precipitation_sum, i),
+                    precip_hours: at(&day.precipitation_hours, i),
+                    gust_kph: at(&day.wind_gusts_10m_max, i),
+                    wind_dir_deg: at(&day.wind_direction_10m_dominant, i),
+                    daylight_secs: at(&day.daylight_duration, i),
                 })
             })
             .collect();

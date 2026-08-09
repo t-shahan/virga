@@ -21,6 +21,9 @@ pub struct App {
     pub unit: Unit,
     pub tick: usize,
     pub selected: usize,
+    /// Index into `Weather::daily` of the day being inspected. Distinct from
+    /// `selected`, which tracks the search results list.
+    pub selected_day: usize,
     pub location: Option<String>,
 }
 
@@ -34,7 +37,28 @@ impl App {
             unit: Unit::Imperial,
             tick: 0,
             selected: 0,
+            selected_day: 0,
             location: None,
+        }
+    }
+
+    pub fn select_prev_day(&mut self) {
+        self.selected_day = self.selected_day.saturating_sub(1);
+    }
+
+    pub fn select_next_day(&mut self) {
+        if let Fetch::Ready(weather) = &self.weather
+            && self.selected_day + 1 < weather.daily.len()
+        {
+            self.selected_day += 1;
+        }
+    }
+
+    /// Jump back to today. Arrowing home from two weeks out is not a journey
+    /// anyone should have to make.
+    pub fn select_today(&mut self) {
+        if let Fetch::Ready(weather) = &self.weather {
+            self.selected_day = weather.today_index;
         }
     }
 

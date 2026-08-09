@@ -42,6 +42,13 @@ pub struct DailyForecast {
     /// ISO timestamps, e.g. "2026-08-09T06:17".
     pub sunrise: Option<String>,
     pub sunset: Option<String>,
+    pub feels_max_c: Option<f64>,
+    pub feels_min_c: Option<f64>,
+    pub precip_mm: Option<f64>,
+    pub precip_hours: Option<f64>,
+    pub gust_kph: Option<f64>,
+    pub wind_dir_deg: Option<f64>,
+    pub daylight_secs: Option<f64>,
 }
 
 pub struct Weather {

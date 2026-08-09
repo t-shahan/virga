@@ -9,6 +9,8 @@ pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
     let binds: &[(&str, &str)] = match app.screen {
         Screen::Weather => &[
             ("q", "quit"),
+            ("←→", "day"),
+            ("n", "now"),
             ("r", "refresh"),
             ("t", "units"),
             ("l", "location"),
