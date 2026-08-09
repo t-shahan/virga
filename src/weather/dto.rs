@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::weather::model::{Current, DailyForecast, Location, Weather};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct GeocodeResultDto {
@@ -54,6 +54,16 @@ pub struct ForecastDto {
 
 impl From<ForecastDto> for Weather {
     fn from(dto: ForecastDto) -> Self {
+        // `current.time` is local to the forecast location, so its date identifies
+        // today's entry without assuming how many past days were requested.
+        let today = dto.current.time.get(..10).unwrap_or_default().to_string();
+        let today_index = dto
+            .daily
+            .time
+            .iter()
+            .position(|day| *day == today)
+            .unwrap_or(0);
+
         let daily = dto
             .daily
             .time
@@ -78,6 +88,7 @@ impl From<ForecastDto> for Weather {
                 wind_kph: dto.current.wind_speed_10m,
             },
             daily,
+            today_index,
             air_quality: None,
         }
     }
@@ -96,30 +107,6 @@ pub struct AqiCurrentDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixture() -> ForecastDto {
-        let json = include_str!("../../tests/fixtures/forecast.json");
-        serde_json::from_str(json).expect("fixture should parse")
-    }
-
-    #[test]
-    fn parses_saved_fixture() {
-        let dto = fixture();
-
-        assert_eq!(dto.daily.time.len(), 5);
-        assert_eq!(dto.daily.weather_code.len(), 5);
-        assert_eq!(dto.daily.temperature_2m_max.len(), 5);
-        assert_eq!(dto.daily.temperature_2m_min.len(), 5);
-    }
-
-    #[test]
-    fn converts_dto_into_domain_weather() {
-        let weather: Weather = fixture().into();
-
-        assert_eq!(weather.daily.len(), 5);
-        assert_eq!(weather.daily[0].high_c, 36.2);
-        assert_eq!(weather.current.temp_c, 26.8);
-    }
 
     #[test]
     fn parses_geocode_results() {

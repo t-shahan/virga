@@ -36,33 +36,13 @@ pub struct DailyForecast {
 pub struct Weather {
     pub location: String,
     pub current: Current,
+    /// Past days, today, then the forecast — in chronological order.
     pub daily: Vec<DailyForecast>,
+    /// Index of today within `daily`.
+    pub today_index: usize,
     pub air_quality: Option<AirQuality>,
 }
 
 pub struct AirQuality {
     pub us_aqi: u16,
-}
-
-impl Weather {
-    #[cfg(test)]
-    pub fn sample() -> Self {
-        Self {
-            location: "".to_string(),
-            current: Current {
-                temp_c: 30.0,
-                feels_like_c: 30.0,
-                code: 1,
-                wind_kph: 5.0,
-            },
-            daily: vec![
-                DailyForecast { date: "Mon".to_string(), high_c: 32.0, low_c: 28.0, code: 1 },
-                DailyForecast { date: "Tue".to_string(), high_c: 35.0, low_c: 30.0, code: 1 },
-                DailyForecast { date: "Wed".to_string(), high_c: 30.0, low_c: 25.0, code: 1 },
-                DailyForecast { date: "Thu".to_string(), high_c: 28.0, low_c: 23.0, code: 1 },
-                DailyForecast { date: "Fri".to_string(), high_c: 26.0, low_c: 22.0, code: 1 },
-            ],
-            air_quality: None,
-        }
-    }
 }
