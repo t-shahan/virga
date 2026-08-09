@@ -20,8 +20,8 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     ])
     .areas(inner);
 
-    // The list is the forecast only; today and the past belong to the chart.
-    let upcoming = weather.daily.get(weather.today_index + 1..).unwrap_or(&[]);
+    // Today onwards. The past stays exclusive to the chart.
+    let upcoming = weather.daily.get(weather.today_index..).unwrap_or(&[]);
 
     // Emoji cell widths vary between glyphs, so the icon sits at the end of the
     // row where it cannot push the numeric columns out of alignment.
@@ -35,7 +35,8 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
         .dark_gray(),
     ];
 
-    lines.extend(upcoming.iter().map(|d| {
+    lines.extend(upcoming.iter().enumerate().map(|(i, d)| {
+        let is_today = i == 0;
         let rain = d
             .rain_chance
             .map_or_else(|| "–".to_string(), |p| format!("{p}%"));
@@ -47,9 +48,15 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             .uv_index
             .map_or_else(|| "–".to_string(), |uv| format!("{uv:.0}"));
 
-        Line::from(format!(
+        let day = if is_today {
+            "Today".to_string()
+        } else {
+            weekday(&d.date)
+        };
+
+        let line = Line::from(format!(
             "  {:<5}{:>5.0}{}{:>6.0}{}{:>7}{:>8}{:>7}   {}",
-            weekday(&d.date),
+            day,
             unit.temp(d.high_c),
             unit.temp_symbol(),
             unit.temp(d.low_c),
@@ -58,7 +65,11 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             wind,
             uv,
             emoji(d.code),
-        ))
+        ));
+
+        // Same yellow as today's bar in the chart below, so the two read as
+        // the same day.
+        if is_today { line.yellow() } else { line }
     }));
 
     frame.render_widget(Paragraph::new(lines), list_area);
