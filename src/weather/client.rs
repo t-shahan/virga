@@ -6,12 +6,24 @@ use crate::weather::model::AirQuality;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use anyhow::Result;
+use std::sync::OnceLock;
 use std::thread;
+use ureq::Agent;
+
+/// One shared agent for the whole process. `ureq::get()` builds a fresh Agent
+/// per call, and a fresh Agent means a fresh connection pool — so every request
+/// re-paid a full TCP + TLS handshake. Measured against Open-Meteo that was
+/// ~360ms of the ~480ms round trip. Sharing one agent lets repeat requests to
+/// the same host reuse the connection.
+fn agent() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
+    AGENT.get_or_init(Agent::new_with_defaults)
+}
 
 pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
     let aqi = thread::spawn(move || fetch_air_quality(lat, lon));
 
-    let mut response = ureq::get("https://api.open-meteo.com/v1/forecast")
+    let mut response = agent().get("https://api.open-meteo.com/v1/forecast")
         .query("latitude", lat.to_string())
         .query("longitude", lon.to_string())
         .query(
@@ -38,7 +50,8 @@ pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
 }
 
 pub fn search_locations(query: &str) -> Result<Vec<Location>> {
-    let mut response = ureq::get("https://geocoding-api.open-meteo.com/v1/search")
+    let mut response = agent()
+        .get("https://geocoding-api.open-meteo.com/v1/search")
         .query("name", query)
         .query("count", "5")
         .query("language", "en")
@@ -59,7 +72,7 @@ pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<Option<AirQuality>> {
         "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=us_aqi&current=us_aqi&domains=cams_global"
     );
 
-    let mut response = ureq::get(&url).call()?;
+    let mut response = agent().get(&url).call()?;
     let dto: AqiDto = response.body_mut().read_json()?;
 
     Ok(dto

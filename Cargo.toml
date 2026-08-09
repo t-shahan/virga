@@ -15,3 +15,10 @@ ureq = { version = "3.3.0", features = ["json"] }
 [[bin]]
 name = "weather"
 path = "src/main.rs"
+
+[profile.release]
+# LTO and a single codegen unit let the optimiser work across crate boundaries;
+# strip drops debug symbols. Costs noticeably longer release builds.
+lto = true
+codegen-units = 1
+strip = true

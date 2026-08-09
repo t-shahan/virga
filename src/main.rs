@@ -45,11 +45,25 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
     let mut app = App::new();
     app.location = Some(DEFAULT_LOCATION.name.to_string());
 
+    let mut dirty = true;
+
     loop {
-        app.tick = app.tick.wrapping_add(1);
-        terminal.draw(|frame| ui::render(frame, &app))?;
+        // Only the spinner and the search cursor change on their own. With
+        // neither on screen there is nothing to redraw until input or a worker
+        // message arrives, so an idle app costs no CPU instead of ten frames a
+        // second.
+        let animating = matches!(app.weather, Fetch::Loading)
+            || matches!(app.results, Fetch::Loading)
+            || matches!(app.screen, Screen::Search);
+
+        if dirty || animating {
+            app.tick = app.tick.wrapping_add(1);
+            terminal.draw(|frame| ui::render(frame, &app))?;
+            dirty = false;
+        }
 
         while let Ok(message) = message_rx.try_recv() {
+            dirty = true;
             match message {
                 Message::Loaded(w) => app.weather = Fetch::Ready(w),
                 Message::LoadFailed(e) => app.weather = Fetch::Failed(e),
@@ -64,6 +78,8 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 break Ok(());
             }
+
+            dirty = true;
 
             match app.screen {
                 Screen::Weather => match key.code {
