@@ -104,6 +104,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                     KeyCode::Esc => app.screen = Screen::Weather,
                     KeyCode::Backspace => {
                         app.query.pop();
+                        app.invalidate_results();
                     }
                     KeyCode::Enter => {
                         let picked = match &app.results {
@@ -127,6 +128,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                     }
                     KeyCode::Char(c) => {
                         app.query.push(c);
+                        app.invalidate_results();
                     }
                     KeyCode::Up => app.selected = app.selected.saturating_sub(1),
                     KeyCode::Down => {
