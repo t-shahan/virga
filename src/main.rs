@@ -292,6 +292,11 @@ fn current_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: U
         .temp_c
         .map_or_else(|| "--".to_string(), |c| format!("{:.0}", unit.temp(c)));
 
+    // Alignment::Center centres each line on its own width, so the row carrying
+    // the unit symbol would sit offset from the rest. Pad the others to match.
+    let symbol = unit.temp_symbol();
+    let symbol_pad = " ".repeat(symbol.chars().count());
+
     let hero: Vec<Line> = big_digits(&temp)
         .iter()
         .enumerate()
@@ -300,10 +305,10 @@ fn current_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: U
             if i == DIGIT_ROWS / 2 {
                 Line::from(vec![
                     Span::from(row.clone()).bold().cyan(),
-                    Span::from(unit.temp_symbol().to_string()).cyan(),
+                    Span::from(symbol.to_string()).cyan(),
                 ])
             } else {
-                Line::from(row.clone()).bold().cyan()
+                Line::from(format!("{row}{symbol_pad}")).bold().cyan()
             }
         })
         .collect();
