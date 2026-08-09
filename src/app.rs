@@ -37,4 +37,13 @@ impl App {
             location: None,
         }
     }
+
+    /// Results only describe the query that produced them, so any edit to the
+    /// query discards them. Without this, Enter keeps taking the "select"
+    /// branch and opens a city from the previous search instead of running a
+    /// new one.
+    pub fn invalidate_results(&mut self) {
+        self.results = Fetch::Idle;
+        self.selected = 0;
+    }
 }
