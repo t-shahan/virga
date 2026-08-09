@@ -16,42 +16,57 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     // Today onwards. The past stays exclusive to the chart.
     let upcoming = weather.daily.get(weather.today_index..).unwrap_or(&[]);
 
-    // The table is fixed-size and cannot use spare rows; the chart gains
-    // resolution from every one it gets, so the chart is what flexes.
-    let [list_area, caption_area, chart_area] = Layout::vertical([
-        Constraint::Length(upcoming.len() as u16 + 1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(inner);
+    let table_rows = upcoming.len() as u16 + 1;
+
+    // Side by side once both halves can be useful, otherwise stack. The table
+    // takes its full column set only when the chart can still show every day;
+    // below that the chart is the better use of the width, so the table drops
+    // to its compact form.
+    let (table_area, caption_area, chart_area) = if inner.width >= SIDE_BY_SIDE_MIN {
+        let table_width = if inner.width >= FULL_TABLE_AND_CHART {
+            TABLE_FULL
+        } else {
+            TABLE_COMPACT
+        };
+
+        let [left, right] =
+            Layout::horizontal([Constraint::Length(table_width), Constraint::Fill(1)]).areas(inner);
+        let [caption, chart] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(right);
+
+        (left, caption, chart)
+    } else {
+        // The table is fixed-size and cannot use spare rows; the chart gains
+        // resolution from every one it gets, so the chart is what flexes.
+        let [table, caption, chart] = Layout::vertical([
+            Constraint::Length(table_rows),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(inner);
+
+        (table, caption, chart)
+    };
+
+    // Columns are dropped from the right as the table narrows, so a resize
+    // costs detail rather than breaking the alignment.
+    let show_conditions = table_area.width >= TABLE_COMPACT;
+    let show_all = table_area.width >= TABLE_FULL;
 
     // Emoji cell widths vary between glyphs, so the icon sits at the end of the
     // row where it cannot push the numeric columns out of alignment.
-    let mut lines = vec![
-        // The high/low widths here are the value width plus the two-cell unit
-        // symbol the rows append, so the headings sit over their own columns.
-        Line::from(format!(
-            "  {:<5}{:>7}{:>8}{:>7}{:>8}{:>7}{:>10}{:>9}",
-            "day", "high", "low", "rain", "wind", "uv", "sunrise", "sunset"
-        ))
-        .dark_gray(),
-    ];
+    let mut header = format!("  {:<5}{:>7}{:>8}", "day", "high", "low");
+    if show_conditions {
+        header += &format!("{:>7}{:>8}", "rain", "wind");
+    }
+    if show_all {
+        header += &format!("{:>7}{:>10}{:>9}", "uv", "sunrise", "sunset");
+    }
+
+    let mut lines = vec![Line::from(header).dark_gray()];
 
     lines.extend(upcoming.iter().enumerate().map(|(i, d)| {
         let is_today = i == 0;
-        let rain = d
-            .rain_chance
-            .map_or_else(|| "–".to_string(), |p| format!("{p}%"));
-        let wind = d.wind_kph.map_or_else(
-            || "–".to_string(),
-            |kph| format!("{:.0} {}", unit.speed(kph), unit.speed_label()),
-        );
-        let uv = d
-            .uv_index
-            .map_or_else(|| "–".to_string(), |uv| format!("{uv:.0}"));
-
-        let sunrise = d.sunrise.as_deref().map_or("–", clock).to_string();
-        let sunset = d.sunset.as_deref().map_or("–", clock).to_string();
 
         let day = if is_today {
             "Today".to_string()
@@ -59,27 +74,46 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             weekday(&d.date)
         };
 
-        let line = Line::from(format!(
-            "  {:<5}{:>5.0}{}{:>6.0}{}{:>7}{:>8}{:>7}{:>10}{:>9}   {}",
+        // The high/low widths in the heading are these value widths plus the
+        // two-cell unit symbol, so the headings sit over their own columns.
+        let mut row = format!(
+            "  {:<5}{:>5.0}{}{:>6.0}{}",
             day,
             unit.temp(d.high_c),
             unit.temp_symbol(),
             unit.temp(d.low_c),
             unit.temp_symbol(),
-            rain,
-            wind,
-            uv,
-            sunrise,
-            sunset,
-            emoji(d.code),
-        ));
+        );
 
-        // Same yellow as today's bar in the chart below, so the two read as
-        // the same day.
+        if show_conditions {
+            let rain = d
+                .rain_chance
+                .map_or_else(|| DASH.to_string(), |p| format!("{p}%"));
+            let wind = d.wind_kph.map_or_else(
+                || DASH.to_string(),
+                |kph| format!("{:.0} {}", unit.speed(kph), unit.speed_label()),
+            );
+            row += &format!("{rain:>7}{wind:>8}");
+        }
+
+        if show_all {
+            let uv = d
+                .uv_index
+                .map_or_else(|| DASH.to_string(), |uv| format!("{uv:.0}"));
+            let sunrise = d.sunrise.as_deref().map_or(DASH, clock);
+            let sunset = d.sunset.as_deref().map_or(DASH, clock);
+            row += &format!("{uv:>7}{sunrise:>10}{sunset:>9}");
+        }
+
+        row += &format!("   {}", emoji(d.code));
+
+        // Same yellow as today's bar in the chart, so the two read as the
+        // same day.
+        let line = Line::from(row);
         if is_today { line.yellow() } else { line }
     }));
 
-    frame.render_widget(Paragraph::new(lines), list_area);
+    frame.render_widget(Paragraph::new(lines), table_area);
 
     // Widen the bars if there's room. Anything that still doesn't fit drops the
     // oldest history first, so the forecast is never what gets clipped.
@@ -148,6 +182,16 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
         chart_area,
     );
 }
+
+/// Rendered width of the table at each level of detail, emoji included.
+const TABLE_COMPACT: u16 = 42;
+const TABLE_FULL: u16 = 68;
+/// Below this the table and chart stack instead of sitting side by side.
+const SIDE_BY_SIDE_MIN: u16 = 70;
+/// Enough for the full table beside a chart that can still show every day.
+const FULL_TABLE_AND_CHART: u16 = 113;
+
+const DASH: &str = "–";
 
 const BAR_GAP: u16 = 1;
 /// Shortest bar, as a proportion of `BAR_CEILING`. Keeps the coolest day visible.
