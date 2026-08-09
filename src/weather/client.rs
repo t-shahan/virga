@@ -1,6 +1,7 @@
 use crate::weather::dto::AqiDto;
 use crate::weather::dto::ForecastDto;
 use crate::weather::dto::GeocodeDto;
+use crate::weather::dto::GeocodeResultDto;
 use crate::weather::model::AirQuality;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
@@ -46,7 +47,11 @@ pub fn search_locations(query: &str) -> Result<Vec<Location>> {
 
     let dto: GeocodeDto = response.body_mut().read_json()?;
 
-    Ok(dto.results.into_iter().map(Location::from).collect())
+    Ok(dto
+        .results
+        .into_iter()
+        .filter_map(GeocodeResultDto::into_location)
+        .collect())
 }
 
 pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<Option<AirQuality>> {
@@ -57,5 +62,8 @@ pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<Option<AirQuality>> {
     let mut response = ureq::get(&url).call()?;
     let dto: AqiDto = response.body_mut().read_json()?;
 
-    Ok(dto.current.us_aqi.map(|us_aqi| AirQuality { us_aqi }))
+    Ok(dto
+        .current
+        .and_then(|current| current.us_aqi)
+        .map(|us_aqi| AirQuality { us_aqi }))
 }
