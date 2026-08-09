@@ -23,20 +23,44 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     // The list is the forecast only; today and the past belong to the chart.
     let upcoming = weather.daily.get(weather.today_index + 1..).unwrap_or(&[]);
 
-    let lines: Vec<Line> = upcoming
-        .iter()
-        .map(|d| {
-            Line::from(format!(
-                "{}  {}  {:>3.0}{} / {:>3.0}{}",
-                weekday(&d.date),
-                emoji(d.code),
-                unit.temp(d.high_c),
-                unit.temp_symbol(),
-                unit.temp(d.low_c),
-                unit.temp_symbol(),
-            ))
-        })
-        .collect();
+    // Emoji cell widths vary between glyphs, so the icon sits at the end of the
+    // row where it cannot push the numeric columns out of alignment.
+    let mut lines = vec![
+        // The high/low widths here are the value width plus the two-cell unit
+        // symbol the rows append, so the headings sit over their own columns.
+        Line::from(format!(
+            "  {:<5}{:>7}{:>8}{:>7}{:>8}{:>7}",
+            "day", "high", "low", "rain", "wind", "uv"
+        ))
+        .dark_gray(),
+    ];
+
+    lines.extend(upcoming.iter().map(|d| {
+        let rain = d
+            .rain_chance
+            .map_or_else(|| "–".to_string(), |p| format!("{p}%"));
+        let wind = d.wind_kph.map_or_else(
+            || "–".to_string(),
+            |kph| format!("{:.0} {}", unit.speed(kph), unit.speed_label()),
+        );
+        let uv = d
+            .uv_index
+            .map_or_else(|| "–".to_string(), |uv| format!("{uv:.0}"));
+
+        Line::from(format!(
+            "  {:<5}{:>5.0}{}{:>6.0}{}{:>7}{:>8}{:>7}   {}",
+            weekday(&d.date),
+            unit.temp(d.high_c),
+            unit.temp_symbol(),
+            unit.temp(d.low_c),
+            unit.temp_symbol(),
+            rain,
+            wind,
+            uv,
+            emoji(d.code),
+        ))
+    }));
+
     frame.render_widget(Paragraph::new(lines), list_area);
 
     // Widen the bars if there's room. Anything that still doesn't fit drops the

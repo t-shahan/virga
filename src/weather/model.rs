@@ -33,7 +33,12 @@ pub struct DailyForecast {
     pub date: String,
     pub high_c: f64,
     pub low_c: f64,
-    pub code: u8, // Holding on to this for later when adding emoji() in the 5 day forecast
+    pub code: u8,
+    /// Supplementary readings. Unlike the four above, a missing value here
+    /// leaves a blank cell rather than dropping the whole day.
+    pub rain_chance: Option<u8>,
+    pub wind_kph: Option<f64>,
+    pub uv_index: Option<f64>,
 }
 
 pub struct Weather {
