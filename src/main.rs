@@ -4,9 +4,9 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::event;
 use ratatui::layout::Flex;
 use ratatui::{DefaultTerminal, Frame};
-use ratatui::widgets::Clear;
+use ratatui::widgets::{Clear, Borders};
 use ratatui::layout::Alignment;
-use ratatui::style::Stylize;
+use ratatui::style::{Stylize, Style, Color};
 use ratatui::text::{Line, Span};
 use anyhow::Result;
 use crate::app::App;
@@ -141,7 +141,6 @@ fn render(frame: &mut Frame, app: &App) {
                 top_area_render(frame, app, w, top_area);
                 current_area_render(frame, w, current_area, app.unit);
                 forecast_area_render(frame, w, forecast_area, app.unit);
-                keybind_legend_render(frame, app, legend_area);
             }
             Fetch::Loading => popup_render(
                 frame,
@@ -159,23 +158,44 @@ fn render(frame: &mut Frame, app: &App) {
         },
         Screen::Search => search_render(frame, app, area),
     }
+    keybind_legend_render(frame, app, legend_area);
 }
 
 fn search_render(frame: &mut Frame, app: &App, area: Rect) {
     let area = centered(area, 50, 12);
     frame.render_widget(Clear, area);
 
-    let block = Block::bordered().title("Search City (Enter to search, Esc to cancel");
+    let block = Block::bordered().title("Search");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let [input_area, list_area] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),   // text row + underline
         Constraint::Fill(1),
     ])
     .areas(inner);
 
-    frame.render_widget(Paragraph::new(app.query.as_str()).yellow(), input_area);
+    let input_block = Block::new()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::new().fg(Color::DarkGray));
+    let input_inner = input_block.inner(input_area);
+    frame.render_widget(input_block, input_area);
+
+    let input_line = if app.query.is_empty() {
+        Line::from(vec![
+            Span::from("❯ ").cyan(),
+            Span::from("search for a city").dark_gray().italic(),
+        ])
+    } else {
+        let cursor = if (app.tick / 5) % 2 == 0 { "▏" } else { " " };
+        Line::from(vec![
+            Span::from("❯ ").cyan(),
+            Span::from(app.query.as_str()).white(),
+            Span::from(cursor).cyan(),
+        ])
+    };
+
+    frame.render_widget(Paragraph::new(input_line), input_inner);
 
     let body: Vec<Line> = match &app.results {
         Fetch::Idle => Vec::new(),
