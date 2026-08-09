@@ -32,7 +32,8 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
         let [left, right] =
             Layout::horizontal([Constraint::Length(table_width), Constraint::Fill(1)]).areas(inner);
         let [caption, chart] =
-            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(right);
+            Layout::vertical([Constraint::Length(1), Constraint::Length(CHART_HEIGHT)])
+                .areas(right);
 
         (left, caption, chart)
     } else {
@@ -41,7 +42,7 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
         let [table, caption, chart] = Layout::vertical([
             Constraint::Length(table_rows),
             Constraint::Length(1),
-            Constraint::Fill(1),
+            Constraint::Length(CHART_HEIGHT),
         ])
         .areas(inner);
 
@@ -183,6 +184,20 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     );
 }
 
+/// Rows the pane needs including its border, so the caller can size it to its
+/// content. Left to Fill it swallowed every spare row on a tall window, which
+/// stretched the bars into towers and left a void beneath the table.
+pub(super) fn height(weather: &Weather, width: u16) -> u16 {
+    let table_rows = weather.daily.len().saturating_sub(weather.today_index) as u16 + 1;
+    let inner = if width.saturating_sub(2) >= SIDE_BY_SIDE_MIN {
+        table_rows.max(1 + CHART_HEIGHT)
+    } else {
+        table_rows + 1 + CHART_HEIGHT
+    };
+
+    inner + 2
+}
+
 /// Rendered width of the table at each level of detail, emoji included.
 const TABLE_COMPACT: u16 = 42;
 const TABLE_FULL: u16 = 68;
@@ -192,6 +207,8 @@ const SIDE_BY_SIDE_MIN: u16 = 70;
 const FULL_TABLE_AND_CHART: u16 = 113;
 
 const DASH: &str = "–";
+
+const CHART_HEIGHT: u16 = 10;
 
 const BAR_GAP: u16 = 1;
 /// Shortest bar, as a proportion of `BAR_CEILING`. Keeps the coolest day visible.

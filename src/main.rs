@@ -72,74 +72,83 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
             }
         }
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                break Ok(());
-            }
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                // A resize invalidates the whole buffer. The old loop redrew ten
+                // times a second and papered over this; now that it only draws on
+                // change, the resize has to say so itself.
+                Event::Resize(_, _) => dirty = true,
+                Event::Key(key) => {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        break Ok(());
+                    }
 
-            dirty = true;
+                    dirty = true;
 
-            match app.screen {
-                Screen::Weather => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                    KeyCode::Char('r') => {
-                        app.weather = Fetch::Loading;
-                        request_tx.send(Request::Fetch {
-                            lat: DEFAULT_LOCATION.lat,
-                            lon: DEFAULT_LOCATION.lon,
-                        })?;
-                    }
-                    KeyCode::Char('t') => {
-                        app.unit = app.unit.toggle();
-                    }
-                    KeyCode::Char('l') => {
-                        app.screen = Screen::Search;
-                        app.query.clear();
-                    }
-                    _ => {}
-                },
-                Screen::Search => match key.code {
-                    KeyCode::Esc => app.screen = Screen::Weather,
-                    KeyCode::Backspace => {
-                        app.query.pop();
-                        app.invalidate_results();
-                    }
-                    KeyCode::Enter => {
-                        let picked = match &app.results {
-                            Fetch::Ready(locations) => locations
-                                .get(app.selected)
-                                .map(|l| (l.lat, l.lon, l.label())),
-                            _ => None,
-                        };
+                    match app.screen {
+                        Screen::Weather => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
+                            KeyCode::Char('r') => {
+                                app.weather = Fetch::Loading;
+                                request_tx.send(Request::Fetch {
+                                    lat: DEFAULT_LOCATION.lat,
+                                    lon: DEFAULT_LOCATION.lon,
+                                })?;
+                            }
+                            KeyCode::Char('t') => {
+                                app.unit = app.unit.toggle();
+                            }
+                            KeyCode::Char('l') => {
+                                app.screen = Screen::Search;
+                                app.query.clear();
+                            }
+                            _ => {}
+                        },
+                        Screen::Search => match key.code {
+                            KeyCode::Esc => app.screen = Screen::Weather,
+                            KeyCode::Backspace => {
+                                app.query.pop();
+                                app.invalidate_results();
+                            }
+                            KeyCode::Enter => {
+                                let picked = match &app.results {
+                                    Fetch::Ready(locations) => locations
+                                        .get(app.selected)
+                                        .map(|l| (l.lat, l.lon, l.label())),
+                                    _ => None,
+                                };
 
-                        if let Some((lat, lon, label)) = picked {
-                            app.weather = Fetch::Loading;
-                            app.results = Fetch::Idle;
-                            app.screen = Screen::Weather;
-                            app.location = Some(label);
-                            request_tx.send(Request::Fetch { lat, lon })?;
-                        } else if !app.query.is_empty() {
-                            app.results = Fetch::Loading;
-                            app.selected = 0;
-                            request_tx.send(Request::Search(app.query.clone()))?;
-                        }
+                                if let Some((lat, lon, label)) = picked {
+                                    app.weather = Fetch::Loading;
+                                    app.results = Fetch::Idle;
+                                    app.screen = Screen::Weather;
+                                    app.location = Some(label);
+                                    request_tx.send(Request::Fetch { lat, lon })?;
+                                } else if !app.query.is_empty() {
+                                    app.results = Fetch::Loading;
+                                    app.selected = 0;
+                                    request_tx.send(Request::Search(app.query.clone()))?;
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                app.query.push(c);
+                                app.invalidate_results();
+                            }
+                            KeyCode::Up => app.selected = app.selected.saturating_sub(1),
+                            KeyCode::Down => {
+                                if let Fetch::Ready(locations) = &app.results
+                                    && app.selected + 1 < locations.len()
+                                {
+                                    app.selected += 1;
+                                }
+                            }
+                            _ => {}
+                        },
                     }
-                    KeyCode::Char(c) => {
-                        app.query.push(c);
-                        app.invalidate_results();
-                    }
-                    KeyCode::Up => app.selected = app.selected.saturating_sub(1),
-                    KeyCode::Down => {
-                        if let Fetch::Ready(locations) = &app.results
-                            && app.selected + 1 < locations.len()
-                        {
-                            app.selected += 1;
-                        }
-                    }
-                    _ => {}
-                },
+                }
+                _ => {}
             }
         }
     }

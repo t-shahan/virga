@@ -21,17 +21,22 @@ const UNKNOWN: &str = "unavailable";
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let [top_area, current_area, forecast_area, legend_area] = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Length(7),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    // The legend is pinned to the bottom; everything else is laid out inside
+    // what remains so panes can be sized to their content.
+    let [content, legend_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
 
     match app.screen {
         Screen::Weather => match &app.weather {
             Fetch::Ready(w) => {
+                let [top_area, current_area, forecast_area, _spare] = Layout::vertical([
+                    Constraint::Length(4),
+                    Constraint::Length(7),
+                    Constraint::Length(forecast::height(w, content.width)),
+                    Constraint::Fill(1),
+                ])
+                .areas(content);
+
                 top_area_render(frame, app, w, top_area);
                 current_area_render(frame, w, current_area, app.unit);
                 forecast_area_render(frame, w, forecast_area, app.unit);
