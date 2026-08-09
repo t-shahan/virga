@@ -115,7 +115,10 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
     // Widen the bars if there's room. Anything that still doesn't fit drops the
     // oldest history first, so the forecast is never what gets clipped.
     let count = weather.daily.len().max(1);
-    let stride = ((chart_area.width as usize + BAR_GAP as usize) / count).clamp(2, 4);
+    // Never go below MIN_BAR_STRIDE: on a cramped chart it is better to drop
+    // the oldest days than to render every one of them as a single column.
+    let stride =
+        ((chart_area.width as usize + BAR_GAP as usize) / count).clamp(MIN_BAR_STRIDE as usize, 4);
     let capacity = ((chart_area.width as usize + BAR_GAP as usize) / stride).max(1);
     let start = weather.daily.len().saturating_sub(capacity);
     let visible = &weather.daily[start..];
@@ -201,10 +204,14 @@ pub(super) fn max_height(weather: &Weather, width: u16) -> u16 {
 /// Rendered width of the table at each level of detail, emoji included.
 const TABLE_COMPACT: u16 = 42;
 const TABLE_FULL: u16 = 68;
-/// Below this the table and chart stack. It is the full table plus the gutter
-/// plus a chart wide enough for all 22 days, so the split never costs detail on
-/// either side.
-const SIDE_BY_SIDE_MIN: u16 = TABLE_FULL + GUTTER + 43;
+/// Bars thinner than this read as a comb rather than a chart.
+const MIN_BAR_STRIDE: u16 = 3;
+/// Every day at a stride that still looks like a bar chart.
+const CHART_COMFORTABLE: u16 = 22 * MIN_BAR_STRIDE - BAR_GAP;
+/// Below this the table and chart stack. Splitting only pays when the table
+/// keeps every column *and* the chart keeps readable bars — at the old
+/// threshold the chart fell to one-cell bars the moment the split kicked in.
+const SIDE_BY_SIDE_MIN: u16 = TABLE_FULL + GUTTER + CHART_COMFORTABLE;
 
 const DASH: &str = "–";
 
