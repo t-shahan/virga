@@ -44,11 +44,11 @@ pub(super) fn current_area_render(frame: &mut Frame, weather: &Weather, area: Re
             // Hang the unit symbol off the middle row so it sits centred against the digits.
             if i == DIGIT_ROWS / 2 {
                 Line::from(vec![
-                    Span::from(row.clone()).bold().cyan(),
-                    Span::from(symbol.to_string()).cyan(),
+                    Span::from(row.clone()).bold().blue(),
+                    Span::from(symbol.to_string()).blue(),
                 ])
             } else {
-                Line::from(format!("{row}{symbol_pad}")).bold().cyan()
+                Line::from(format!("{row}{symbol_pad}")).bold().blue()
             }
         })
         .collect();
