@@ -18,19 +18,12 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
 
     let table_rows = upcoming.len() as u16 + 1;
 
-    // Side by side once both halves can be useful, otherwise stack. The table
-    // takes its full column set only when the chart can still show every day;
-    // below that the chart is the better use of the width, so the table drops
-    // to its compact form.
+    // Side by side only when neither half has to give anything up. Splitting
+    // any earlier bought a second column by taking uv/sunrise/sunset off the
+    // table, which is a worse read than simply stacking them.
     let (table_area, caption_area, chart_area) = if inner.width >= SIDE_BY_SIDE_MIN {
-        let table_width = if inner.width >= FULL_TABLE_AND_CHART {
-            TABLE_FULL
-        } else {
-            TABLE_COMPACT
-        };
-
         let [left, _gutter, right] = Layout::horizontal([
-            Constraint::Length(table_width),
+            Constraint::Length(TABLE_FULL),
             Constraint::Length(GUTTER),
             Constraint::Fill(1),
         ])
@@ -204,10 +197,10 @@ pub(super) fn max_height(weather: &Weather, width: u16) -> u16 {
 /// Rendered width of the table at each level of detail, emoji included.
 const TABLE_COMPACT: u16 = 42;
 const TABLE_FULL: u16 = 68;
-/// Below this the table and chart stack instead of sitting side by side.
-const SIDE_BY_SIDE_MIN: u16 = 72;
-/// Enough for the full table beside a chart that can still show every day.
-const FULL_TABLE_AND_CHART: u16 = 114;
+/// Below this the table and chart stack. It is the full table plus the gutter
+/// plus a chart wide enough for all 22 days, so the split never costs detail on
+/// either side.
+const SIDE_BY_SIDE_MIN: u16 = TABLE_FULL + GUTTER + 43;
 
 const DASH: &str = "–";
 
