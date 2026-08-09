@@ -9,19 +9,38 @@ use ratatui::text::Line;
 use ratatui::widgets::{Bar, BarChart, BarGroup, Block, Paragraph};
 
 pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: Unit) {
-    let block = Block::bordered().title("Forecast");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
     // Today onwards. The past stays exclusive to the chart.
     let upcoming = weather.daily.get(weather.today_index..).unwrap_or(&[]);
 
     let table_rows = upcoming.len() as u16 + 1;
+    let stacked_needs = table_rows + 1 + CHART_MIN + 2;
+
+    // Side by side buys vertical space at the cost of chart width AND height —
+    // stacked gives the chart the whole pane in both. So it is a fallback for
+    // when stacking will not fit, never a reward for a wide terminal. Keying it
+    // on width is what made a wide, tall window render a squat, thin chart.
+    let side_by_side = area.width >= SIDE_BY_SIDE_MIN + 2 && area.height < stacked_needs;
+
+    let wanted = if side_by_side {
+        table_rows.max(1 + CHART_MIN) + 2
+    } else {
+        table_rows + 1 + CHART_MAX + 2
+    };
+
+    // Take only the rows we need; the caller hands us everything that is left.
+    let area = Rect {
+        height: wanted.min(area.height),
+        ..area
+    };
+
+    let block = Block::bordered().title("Forecast");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     // Side by side only when neither half has to give anything up. Splitting
     // any earlier bought a second column by taking uv/sunrise/sunset off the
     // table, which is a worse read than simply stacking them.
-    let (table_area, caption_area, chart_area) = if inner.width >= SIDE_BY_SIDE_MIN {
+    let (table_area, caption_area, chart_area) = if side_by_side {
         let [left, _gutter, right] = Layout::horizontal([
             Constraint::Length(TABLE_FULL),
             Constraint::Length(GUTTER),
@@ -181,24 +200,6 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             .bar_gap(BAR_GAP),
         chart_area,
     );
-}
-
-/// The most rows the pane can use, border included. The caller caps it with
-/// Max, so a short window shrinks the chart while a tall one stops growing it
-/// rather than stretching the bars into towers.
-pub(super) fn max_height(weather: &Weather, width: u16) -> u16 {
-    let table_rows = weather.daily.len().saturating_sub(weather.today_index) as u16 + 1;
-    let inner = if width.saturating_sub(2) >= SIDE_BY_SIDE_MIN {
-        // Beside the table, the chart should match its height — CHART_MAX here
-        // made a 16-row chart tower over a 9-row table with a void beneath it.
-        // The floor only matters when the forecast list is unusually short.
-        table_rows.max(1 + CHART_MIN)
-    } else {
-        // Stacked, the chart sits below and can use the depth.
-        table_rows + 1 + CHART_MAX
-    };
-
-    inner + 2
 }
 
 /// Rendered width of the table at each level of detail, emoji included.

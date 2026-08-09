@@ -29,10 +29,11 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Weather => match &app.weather {
             Fetch::Ready(w) => {
-                let [top_area, current_area, forecast_area, _spare] = Layout::vertical([
+                // The forecast pane takes only the rows it needs out of what is
+                // left, so the slack collects above the legend.
+                let [top_area, current_area, forecast_area] = Layout::vertical([
                     Constraint::Length(4),
                     Constraint::Length(7),
-                    Constraint::Max(forecast::max_height(w, content.width)),
                     Constraint::Fill(1),
                 ])
                 .areas(content);
