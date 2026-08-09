@@ -28,7 +28,7 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
 
     let input_line = if app.query.is_empty() {
         Line::from(vec![
-            Span::from("❯ ").cyan(),
+            Span::from("❯ ").blue(),
             Span::from("search for a city").dark_gray().italic(),
         ])
     } else {
@@ -38,9 +38,9 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
             " "
         };
         Line::from(vec![
-            Span::from("❯ ").cyan(),
+            Span::from("❯ ").blue(),
             Span::from(app.query.as_str()).white(),
-            Span::from(cursor).cyan(),
+            Span::from(cursor).blue(),
         ])
     };
 
@@ -61,7 +61,7 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
                 if i == app.selected {
                     Line::from(text).yellow().bold()
                 } else {
-                    Line::from(text).cyan()
+                    Line::from(text).blue()
                 }
             })
             .collect(),

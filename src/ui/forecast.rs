@@ -104,7 +104,7 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
             let color = if start + i == weather.today_index {
                 Color::Yellow
             } else {
-                Color::Cyan
+                Color::Blue
             };
             let value = BAR_FLOOR + (((d.high_c - coolest) / span) * scale).round() as u64;
             Bar::default()
