@@ -37,12 +37,15 @@ pub struct CurrentDto {
     pub wind_speed_10m: f64,
 }
 
+/// Every measurement is optional: Open-Meteo returns `null` for days a model
+/// has no data for. Typing these as bare `f64` makes a single null fail the
+/// whole response rather than one day.
 #[derive(Debug, Deserialize)]
 pub struct DailyDto {
     pub time: Vec<String>,
-    pub weather_code: Vec<u8>,
-    pub temperature_2m_max: Vec<f64>,
-    pub temperature_2m_min: Vec<f64>,
+    pub weather_code: Vec<Option<u8>>,
+    pub temperature_2m_max: Vec<Option<f64>>,
+    pub temperature_2m_min: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,27 +60,32 @@ impl From<ForecastDto> for Weather {
         // `current.time` is local to the forecast location, so its date identifies
         // today's entry without assuming how many past days were requested.
         let today = dto.current.time.get(..10).unwrap_or_default().to_string();
-        let today_index = dto
-            .daily
-            .time
-            .iter()
-            .position(|day| *day == today)
-            .unwrap_or(0);
 
-        let daily = dto
+        // `?` inside filter_map drops any day missing a measurement instead of
+        // failing the entire forecast.
+        let daily: Vec<DailyForecast> = dto
             .daily
             .time
             .into_iter()
             .zip(dto.daily.temperature_2m_max)
             .zip(dto.daily.temperature_2m_min)
             .zip(dto.daily.weather_code)
-            .map(|(((date, high), low), code)| DailyForecast {
-                date,
-                high_c: high,
-                low_c: low,
-                code,
+            .filter_map(|(((date, high), low), code)| {
+                Some(DailyForecast {
+                    date,
+                    high_c: high?,
+                    low_c: low?,
+                    code: code?,
+                })
             })
             .collect();
+
+        // Located after filtering, so a dropped row can't shift the index. If
+        // today's own row was dropped, fall back to the count of days before it.
+        let today_index = daily
+            .iter()
+            .position(|day| day.date == today)
+            .unwrap_or_else(|| daily.iter().filter(|day| day.date < today).count());
 
         Self {
             location: dto.timezone,
@@ -107,6 +115,26 @@ pub struct AqiCurrentDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real icon_seamless response; its final day has a null temperature_2m_max.
+    /// Before daily measurements were Option, this failed to deserialize at all
+    /// and took the whole forecast down with it.
+    #[test]
+    fn drops_days_missing_measurements_instead_of_failing() {
+        let json = include_str!("../../tests/fixtures/forecast_nulls.json");
+        let dto: ForecastDto = serde_json::from_str(json).expect("nulls should parse");
+
+        let raw_days = dto.daily.time.len();
+        assert_eq!(raw_days, 8);
+
+        let weather: Weather = dto.into();
+
+        assert_eq!(weather.daily.len(), 7, "the null day should be dropped");
+        assert!(
+            weather.daily.iter().all(|d| d.date != "2026-08-16"),
+            "the dropped day should be the one with a null max"
+        );
+    }
 
     #[test]
     fn parses_geocode_results() {
