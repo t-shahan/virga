@@ -46,8 +46,20 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
     app.location = Some(DEFAULT_LOCATION.name.to_string());
 
     let mut dirty = true;
+    let mut last_size = terminal.size()?;
 
     loop {
+        // Belt and braces against the class of bug that made resize freeze the
+        // app: ratatui only reconciles its buffer inside draw(), so if the size
+        // changes and nothing marks the frame dirty, a stale layout persists
+        // forever. Polling it costs one ioctl per tick and does not rely on an
+        // event turning up.
+        let size = terminal.size()?;
+        if size != last_size {
+            last_size = size;
+            dirty = true;
+        }
+
         // Only the spinner and the search cursor change on their own. With
         // neither on screen there is nothing to redraw until input or a worker
         // message arrives, so an idle app costs no CPU instead of ten frames a

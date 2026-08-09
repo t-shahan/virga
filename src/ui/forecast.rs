@@ -186,8 +186,12 @@ pub(super) fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: R
 pub(super) fn max_height(weather: &Weather, width: u16) -> u16 {
     let table_rows = weather.daily.len().saturating_sub(weather.today_index) as u16 + 1;
     let inner = if width.saturating_sub(2) >= SIDE_BY_SIDE_MIN {
-        table_rows.max(1 + CHART_MAX)
+        // Beside the table, the chart should match its height — CHART_MAX here
+        // made a 16-row chart tower over a 9-row table with a void beneath it.
+        // The floor only matters when the forecast list is unusually short.
+        table_rows.max(1 + CHART_MIN)
     } else {
+        // Stacked, the chart sits below and can use the depth.
         table_rows + 1 + CHART_MAX
     };
 
@@ -206,6 +210,8 @@ const DASH: &str = "–";
 
 /// Past this the bars grow spindly rather than informative.
 const CHART_MAX: u16 = 16;
+/// Below this the bars stop being readable at all.
+const CHART_MIN: u16 = 8;
 /// Columns between the table and the chart when side by side.
 const GUTTER: u16 = 3;
 
