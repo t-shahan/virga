@@ -242,6 +242,90 @@ mod tests {
         assert_eq!(locations[0].name, "Frederick");
     }
 
+    /// today_index is located by matching current.time against the daily dates,
+    /// so it stays right whatever past_days was requested — and it is computed
+    /// after filtering, so a dropped row cannot shift it.
+    #[test]
+    fn today_index_points_at_the_current_date() {
+        let json = r#"{
+            "current": {"time": "2026-08-09T14:30", "temperature_2m": 20.0,
+                        "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0},
+            "daily": {
+                "time": ["2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10"],
+                "weather_code": [0, 0, 0, 0],
+                "temperature_2m_max": [30.0, 31.0, 32.0, 33.0],
+                "temperature_2m_min": [20.0, 21.0, 22.0, 23.0]
+            }
+        }"#;
+
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json).unwrap().into();
+
+        assert_eq!(weather.today_index, 2);
+        assert_eq!(weather.daily[weather.today_index].date, "2026-08-09");
+    }
+
+    #[test]
+    fn today_index_survives_an_earlier_day_being_dropped() {
+        let json = r#"{
+            "current": {"time": "2026-08-09T14:30", "temperature_2m": 20.0,
+                        "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0},
+            "daily": {
+                "time": ["2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10"],
+                "weather_code": [0, 0, 0, 0],
+                "temperature_2m_max": [30.0, null, 32.0, 33.0],
+                "temperature_2m_min": [20.0, 21.0, 22.0, 23.0]
+            }
+        }"#;
+
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json).unwrap().into();
+
+        assert_eq!(weather.daily.len(), 3, "the null day is dropped");
+        assert_eq!(
+            weather.daily[weather.today_index].date, "2026-08-09",
+            "the index followed the day, not its old position"
+        );
+    }
+
+    /// If today's own row is the one dropped, the index must still land on the
+    /// boundary rather than at zero, which would present history as forecast.
+    #[test]
+    fn today_index_falls_back_to_the_boundary() {
+        let json = r#"{
+            "current": {"time": "2026-08-09T14:30", "temperature_2m": 20.0,
+                        "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0},
+            "daily": {
+                "time": ["2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10"],
+                "weather_code": [0, 0, 0, 0],
+                "temperature_2m_max": [30.0, 31.0, null, 33.0],
+                "temperature_2m_min": [20.0, 21.0, 22.0, 23.0]
+            }
+        }"#;
+
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json).unwrap().into();
+
+        assert_eq!(weather.today_index, 2, "two days precede today");
+    }
+
+    #[test]
+    fn supplementary_readings_survive_being_absent() {
+        let json = r#"{
+            "current": {"time": "2026-08-09T14:30", "temperature_2m": 20.0,
+                        "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0},
+            "daily": {
+                "time": ["2026-08-09"], "weather_code": [0],
+                "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]
+            }
+        }"#;
+
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json).unwrap().into();
+        let day = &weather.daily[0];
+
+        assert_eq!(weather.daily.len(), 1, "a day is kept without its extras");
+        assert!(day.uv_index.is_none());
+        assert!(day.precip_mm.is_none());
+        assert!(day.daylight_secs.is_none());
+    }
+
     #[test]
     fn parses_geocode_results() {
         let json = include_str!("../../tests/fixtures/geocode.json");

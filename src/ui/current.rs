@@ -2,7 +2,7 @@ use crate::ui::UNKNOWN;
 use crate::units::Unit;
 use crate::weather::code::aqi_label;
 use crate::weather::model::{DailyForecast, Weather};
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::Stylize;
@@ -77,12 +77,22 @@ pub(super) fn current_area_render(
             }
         })
         .collect();
-    frame.render_widget(Paragraph::new(hero).alignment(Alignment::Center), hero_area);
+    // One blank row so five rows of digits sit centred in six.
+    let mut hero_lines = vec![Line::from("")];
+    hero_lines.extend(hero);
+    frame.render_widget(
+        Paragraph::new(hero_lines).alignment(Alignment::Center),
+        hero_area,
+    );
 
-    let details = if showing_now {
-        now_details(weather, unit)
-    } else {
-        day.map_or_else(Vec::new, |d| day_details(weather, d, unit))
+    // Both branches produce the same number of lines so today is no thinner
+    // than any other day. Today swaps the period comparison for air quality,
+    // which only exists for now; other days swap the live reading for the
+    // day's feels-like range.
+    let details = match day {
+        Some(d) if showing_now => now_details(weather, d, unit),
+        Some(d) => day_details(weather, d, unit),
+        None => Vec::new(),
     };
 
     frame.render_widget(Paragraph::new(details), detail_area);
@@ -127,7 +137,9 @@ fn big_digits(text: &str) -> [String; DIGIT_ROWS] {
     rows
 }
 
-fn now_details(weather: &Weather, unit: Unit) -> Vec<Line<'static>> {
+fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
+    let sym = unit.temp_symbol();
+
     let aqi = match &weather.air_quality {
         Some(aq) => format!("{} · {}", aq.us_aqi, aqi_label(aq.us_aqi)),
         None => UNKNOWN.to_string(),
@@ -135,20 +147,23 @@ fn now_details(weather: &Weather, unit: Unit) -> Vec<Line<'static>> {
 
     let feels_like = weather.current.feels_like_c.map_or_else(
         || UNKNOWN.to_string(),
-        |c| format!("{:.0}{}", unit.temp(c), unit.temp_symbol()),
+        |c| format!("{:.0}{sym}", unit.temp(c)),
     );
 
-    let wind = weather.current.wind_kph.map_or_else(
-        || UNKNOWN.to_string(),
-        |kph| format!("{:.0} {}", unit.speed(kph), unit.speed_label()),
+    let wind = wind_line(
+        today.wind_kph.or(weather.current.wind_kph),
+        today.gust_kph,
+        today,
+        unit,
     );
 
     vec![
-        Line::from(""),
         detail_line("feels like", &feels_like),
+        detail_line("high / low", &high_low(today, unit)),
+        detail_line("rain", &rain_line(today, unit)),
         detail_line("wind", &wind),
+        detail_line("daylight", &daylight_line(today)),
         detail_line("air quality", &aqi),
-        Line::from(format!("{}", Local::now().format("%a, %b %-d  %-I:%M %p"))).dark_gray(),
     ]
 }
 
@@ -160,7 +175,27 @@ fn day_details(weather: &Weather, day: &DailyForecast, unit: Unit) -> Vec<Line<'
         _ => UNKNOWN.to_string(),
     };
 
-    let rain = match (day.precip_mm, day.precip_hours) {
+    vec![
+        detail_line("feels like", &feels),
+        detail_line("high / low", &high_low(day, unit)),
+        detail_line("rain", &rain_line(day, unit)),
+        detail_line("wind", &wind_line(day.wind_kph, day.gust_kph, day, unit)),
+        detail_line("daylight", &daylight_line(day)),
+        Line::from(comparison(weather, day, unit)).dark_gray(),
+    ]
+}
+
+fn high_low(day: &DailyForecast, unit: Unit) -> String {
+    let sym = unit.temp_symbol();
+    format!(
+        "{:.0}{sym} / {:.0}{sym}",
+        unit.temp(day.high_c),
+        unit.temp(day.low_c)
+    )
+}
+
+fn rain_line(day: &DailyForecast, unit: Unit) -> String {
+    match (day.precip_mm, day.precip_hours) {
         (Some(mm), Some(h)) if mm > 0.0 => format!(
             "{:.2} {} over {:.0} h",
             unit.precip(mm),
@@ -169,47 +204,52 @@ fn day_details(weather: &Weather, day: &DailyForecast, unit: Unit) -> Vec<Line<'
         ),
         (Some(_), _) => "none".to_string(),
         _ => UNKNOWN.to_string(),
-    };
+    }
+}
 
-    let wind = match (day.wind_kph, day.gust_kph) {
+fn wind_line(speed: Option<f64>, gust: Option<f64>, day: &DailyForecast, unit: Unit) -> String {
+    let direction = day
+        .wind_dir_deg
+        .map_or(String::new(), |d| format!(" {}", compass(d)));
+
+    match (speed, gust) {
         (Some(w), Some(g)) => format!(
-            "{:.0}, gusts {:.0} {} {}",
+            "{:.0}, gusts {:.0} {}{direction}",
             unit.speed(w),
             unit.speed(g),
             unit.speed_label(),
-            day.wind_dir_deg
-                .map_or(String::new(), |d| compass(d).to_string()),
         ),
-        (Some(w), None) => format!("{:.0} {}", unit.speed(w), unit.speed_label()),
+        (Some(w), None) => format!("{:.0} {}{direction}", unit.speed(w), unit.speed_label()),
         _ => UNKNOWN.to_string(),
-    };
+    }
+}
 
-    let daylight = day
-        .daylight_secs
-        .map_or_else(|| UNKNOWN.to_string(), duration);
+fn daylight_line(day: &DailyForecast) -> String {
+    day.daylight_secs
+        .map_or_else(|| UNKNOWN.to_string(), duration)
+}
 
-    // The comparison is the part a table cannot give you: whether this day is
-    // remarkable for the period, not just what its number is.
+/// The part a table cannot give you: whether the day is remarkable for the
+/// period, not merely what its number is.
+fn comparison(weather: &Weather, day: &DailyForecast, unit: Unit) -> String {
+    if weather.daily.is_empty() {
+        return String::new();
+    }
+
     let mean = weather.daily.iter().map(|d| d.high_c).sum::<f64>() / weather.daily.len() as f64;
     let delta = unit.temp(day.high_c) - unit.temp(mean);
-    let comparison = if delta.abs() < 1.0 {
+
+    if delta.abs() < 1.0 {
         "about average for the period".to_string()
     } else {
         format!(
-            "{:.0}{sym} {} the {}-day average",
+            "{:.0}{} {} the {}-day average",
             delta.abs(),
+            unit.temp_symbol(),
             if delta > 0.0 { "above" } else { "below" },
             weather.daily.len(),
         )
-    };
-
-    vec![
-        detail_line("feels like", &feels),
-        detail_line("rain", &rain),
-        detail_line("wind", &wind),
-        detail_line("daylight", &daylight),
-        Line::from(comparison).dark_gray(),
-    ]
+    }
 }
 
 /// Sixteen points is more precision than a daily dominant direction deserves.
@@ -235,4 +275,109 @@ fn detail_line(label: &str, value: &str) -> Line<'static> {
         Span::from(format!("{label:<12}")).dark_gray(),
         Span::from(value.to_string()).white(),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::units::Unit;
+    use crate::weather::model::Weather;
+
+    /// Today used to carry fewer lines than any other day, which read as a gap
+    /// rather than a difference.
+    #[test]
+    fn today_and_other_days_carry_the_same_number_of_lines() {
+        let w = Weather::fixture(22, 14);
+        let today = &w.daily[14];
+        let other = &w.daily[3];
+
+        assert_eq!(
+            now_details(&w, today, Unit::Imperial).len(),
+            day_details(&w, other, Unit::Imperial).len()
+        );
+    }
+
+    #[test]
+    fn comparison_names_the_direction_from_the_average() {
+        let w = Weather::fixture(21, 10);
+        // Fixture highs climb 20..40, so the mean is the middle day.
+        assert!(comparison(&w, &w.daily[20], Unit::Metric).contains("above"));
+        assert!(comparison(&w, &w.daily[0], Unit::Metric).contains("below"));
+        assert!(comparison(&w, &w.daily[10], Unit::Metric).contains("average"));
+    }
+
+    #[test]
+    fn comparison_is_empty_rather_than_dividing_by_zero() {
+        let w = Weather::fixture(0, 0);
+        let day = Weather::fixture(1, 0).daily.remove(0);
+        assert_eq!(comparison(&w, &day, Unit::Metric), "");
+    }
+
+    #[test]
+    fn missing_readings_read_as_unavailable_rather_than_blank() {
+        let mut w = Weather::fixture(3, 1);
+        let day = &mut w.daily[1];
+        day.precip_mm = None;
+        day.gust_kph = None;
+        day.wind_kph = None;
+        day.daylight_secs = None;
+
+        assert_eq!(rain_line(&w.daily[1], Unit::Metric), UNKNOWN);
+        assert_eq!(daylight_line(&w.daily[1]), UNKNOWN);
+        assert_eq!(wind_line(None, None, &w.daily[1], Unit::Metric), UNKNOWN);
+    }
+
+    #[test]
+    fn compass_maps_degrees_to_points() {
+        assert_eq!(compass(0.0), "N");
+        assert_eq!(compass(45.0), "NE");
+        assert_eq!(compass(90.0), "E");
+        assert_eq!(compass(180.0), "S");
+        assert_eq!(compass(315.0), "NW");
+    }
+
+    /// 360 must not index past the end of the table, and the API has been known
+    /// to report a hair over or under.
+    #[test]
+    fn compass_wraps_at_the_full_circle() {
+        assert_eq!(compass(360.0), "N");
+        assert_eq!(compass(359.0), "N");
+        assert_eq!(compass(720.0), "N");
+        assert_eq!(compass(-45.0), "NW");
+    }
+
+    #[test]
+    fn duration_splits_seconds_into_hours_and_minutes() {
+        assert_eq!(duration(49_320.0), "13h 42m");
+        assert_eq!(duration(3_600.0), "1h 0m");
+        assert_eq!(duration(0.0), "0h 0m");
+        assert_eq!(duration(-5.0), "0h 0m");
+    }
+
+    /// Every row must be the same width or Alignment::Center shears the digits,
+    /// which is exactly how the hero temperature broke once before.
+    #[test]
+    fn block_digit_rows_are_all_the_same_width() {
+        for text in ["7", "91", "107", "-12", ""] {
+            let rows = big_digits(text);
+            let width = rows[0].chars().count();
+            for (i, row) in rows.iter().enumerate() {
+                assert_eq!(row.chars().count(), width, "{text:?} row {i} differs");
+            }
+            assert_eq!(width, text.chars().count() * 8, "{text:?} wrong width");
+        }
+    }
+
+    #[test]
+    fn unknown_characters_render_as_blanks_rather_than_panicking() {
+        let rows = big_digits("?");
+        assert!(rows.iter().all(|r| r.trim().is_empty()));
+    }
+
+    #[test]
+    fn long_date_falls_back_to_the_raw_value() {
+        assert_eq!(long_date("2026-08-11"), "Tue, Aug 11");
+        assert_eq!(long_date("not-a-date"), "not-a-date");
+    }
 }

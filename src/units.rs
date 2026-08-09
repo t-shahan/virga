@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Unit {
     Metric,
     Imperial,
@@ -57,4 +57,55 @@ pub fn c_to_f(c: f64) -> f64 {
 
 pub fn kph_to_mph(kph: f64) -> f64 {
     kph * 0.621371
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn celsius_to_fahrenheit_at_known_points() {
+        assert_eq!(c_to_f(0.0), 32.0);
+        assert_eq!(c_to_f(100.0), 212.0);
+        assert_eq!(c_to_f(-40.0), -40.0);
+    }
+
+    #[test]
+    fn metric_passes_values_through_untouched() {
+        assert_eq!(Unit::Metric.temp(21.5), 21.5);
+        assert_eq!(Unit::Metric.speed(30.0), 30.0);
+        assert_eq!(Unit::Metric.precip(5.0), 5.0);
+    }
+
+    #[test]
+    fn imperial_converts_every_measure() {
+        assert_eq!(Unit::Imperial.temp(0.0), 32.0);
+        assert!((Unit::Imperial.speed(100.0) - 62.1371).abs() < 0.001);
+        assert!((Unit::Imperial.precip(25.4) - 1.0).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn labels_match_the_system() {
+        assert_eq!(Unit::Metric.temp_symbol(), "\u{b0}C");
+        assert_eq!(Unit::Imperial.temp_symbol(), "\u{b0}F");
+        assert_eq!(Unit::Metric.speed_label(), "km/h");
+        assert_eq!(Unit::Imperial.speed_label(), "mph");
+        assert_eq!(Unit::Metric.precip_label(), "mm");
+        assert_eq!(Unit::Imperial.precip_label(), "in");
+    }
+
+    #[test]
+    fn toggling_twice_is_the_identity() {
+        assert_eq!(Unit::Metric.toggle().toggle(), Unit::Metric);
+        assert_eq!(Unit::Imperial.toggle().toggle(), Unit::Imperial);
+        assert_eq!(Unit::Metric.toggle(), Unit::Imperial);
+    }
+
+    /// The unit symbol is two cells wide; the block-digit rows are padded to
+    /// match it, so a change here would shear the hero temperature.
+    #[test]
+    fn temp_symbols_are_two_characters() {
+        assert_eq!(Unit::Metric.temp_symbol().chars().count(), 2);
+        assert_eq!(Unit::Imperial.temp_symbol().chars().count(), 2);
+    }
 }
