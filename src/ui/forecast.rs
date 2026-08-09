@@ -209,6 +209,13 @@ pub(super) fn chart_area_render(
     );
 }
 
+// Compile-time invariants: the detail levels must stay ordered, and the split
+// must never be reachable at a width the full table cannot fit. Breaking either
+// fails the build rather than a test.
+const _: () = assert!(TABLE_MINIMAL < TABLE_COMPACT);
+const _: () = assert!(TABLE_COMPACT < TABLE_FULL);
+const _: () = assert!(SIDE_BY_SIDE_MIN > TABLE_FULL + GUTTER);
+
 /// Rendered width of the table at each level of detail, emoji included.
 pub(super) const TABLE_MINIMAL: u16 = 26;
 const TABLE_COMPACT: u16 = 42;
@@ -246,5 +253,83 @@ fn weekday(date: &str) -> String {
     match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
         Ok(parsed) => parsed.weekday().to_string(),
         Err(_) => date.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::Unit;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn weekday_falls_back_to_the_raw_value() {
+        assert_eq!(weekday("2026-08-11"), "Tue");
+        assert_eq!(weekday("nonsense"), "nonsense");
+    }
+
+    #[test]
+    fn clock_slices_the_time_out_of_a_timestamp() {
+        assert_eq!(clock("2026-08-09T06:17"), "06:17");
+        assert_eq!(clock("short"), "short");
+    }
+
+    /// Bars narrower than two cells read as a comb. This has regressed twice,
+    /// once via the split threshold and once via the stride clamp.
+    #[test]
+    fn bars_never_fall_below_two_cells() {
+        for width in 30u16..=250 {
+            let stride =
+                ((width as usize + BAR_GAP as usize) / 22).clamp(MIN_BAR_STRIDE as usize, 4);
+            assert!(
+                stride as u16 - BAR_GAP >= 2,
+                "width {width} gives {}-cell bars",
+                stride as u16 - BAR_GAP
+            );
+        }
+    }
+
+    /// Whatever is dropped for want of room, the bars that remain must fit the
+    /// area they are given — anything wider is silently clipped.
+    #[test]
+    fn the_visible_bars_always_fit_their_area() {
+        for width in 30usize..=250 {
+            let stride = ((width + BAR_GAP as usize) / 22).clamp(MIN_BAR_STRIDE as usize, 4);
+            let capacity = ((width + BAR_GAP as usize) / stride).max(1);
+            let shown = capacity.min(22);
+            let used = shown * stride - BAR_GAP as usize;
+            assert!(used <= width, "width {width}: bars need {used}");
+        }
+    }
+
+    /// Every size that has broken at some point, plus the boundaries either
+    /// side of the split. Rendering must not panic or overrun the buffer.
+    #[test]
+    fn renders_without_panicking_at_awkward_sizes() {
+        let w = Weather::fixture(22, 14);
+        for (width, height) in [
+            (40, 12),
+            (70, 30),
+            (100, 30),
+            (113, 40),
+            (114, 40),
+            (135, 40),
+            (136, 24),
+            (138, 20),
+            (200, 50),
+        ] {
+            let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
+            t.draw(|f| {
+                let [top, bottom] = Layout::vertical([
+                    Constraint::Length(f.area().height / 2),
+                    Constraint::Fill(1),
+                ])
+                .areas(f.area());
+                forecast_area_render(f, &w, top, Unit::Imperial, 14);
+                chart_area_render(f, &w, bottom, Unit::Imperial, 14);
+            })
+            .unwrap();
+        }
     }
 }

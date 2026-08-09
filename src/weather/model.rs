@@ -64,3 +64,42 @@ pub struct Weather {
 pub struct AirQuality {
     pub us_aqi: u16,
 }
+
+#[cfg(test)]
+impl Weather {
+    /// Deterministic fixture: `days` days whose highs climb by one degree from
+    /// 20C, with today at `today_index`.
+    pub fn fixture(days: usize, today_index: usize) -> Self {
+        Self {
+            location: "Fixture".to_string(),
+            current: Current {
+                temp_c: Some(25.0),
+                feels_like_c: Some(26.0),
+                code: Some(0),
+                wind_kph: Some(10.0),
+            },
+            daily: (0..days)
+                .map(|i| DailyForecast {
+                    date: format!("2026-08-{:02}", i + 1),
+                    high_c: 20.0 + i as f64,
+                    low_c: 10.0 + i as f64,
+                    code: 0,
+                    rain_chance: Some(10),
+                    wind_kph: Some(12.0),
+                    uv_index: Some(6.0),
+                    sunrise: Some(format!("2026-08-{:02}T06:00", i + 1)),
+                    sunset: Some(format!("2026-08-{:02}T20:00", i + 1)),
+                    feels_max_c: Some(22.0 + i as f64),
+                    feels_min_c: Some(12.0 + i as f64),
+                    precip_mm: Some(2.54),
+                    precip_hours: Some(3.0),
+                    gust_kph: Some(30.0),
+                    wind_dir_deg: Some(315.0),
+                    daylight_secs: Some(49_320.0),
+                })
+                .collect(),
+            today_index,
+            air_quality: None,
+        }
+    }
+}

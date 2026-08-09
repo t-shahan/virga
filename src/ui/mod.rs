@@ -31,7 +31,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
             Fetch::Ready(w) => {
                 let [top_area, current_area, rest] = Layout::vertical([
                     Constraint::Length(4),
-                    Constraint::Length(7),
+                    Constraint::Length(8),
                     Constraint::Fill(1),
                 ])
                 .areas(content);
