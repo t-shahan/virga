@@ -58,6 +58,10 @@ pub struct DailyDto {
     pub wind_speed_10m_max: Vec<Option<f64>>,
     #[serde(default)]
     pub uv_index_max: Vec<Option<f64>>,
+    #[serde(default)]
+    pub sunrise: Vec<Option<String>>,
+    #[serde(default)]
+    pub sunset: Vec<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +76,11 @@ pub struct ForecastDto {
 /// same `None` — the caller cares about neither distinction.
 fn at<T: Copy>(values: &[Option<T>], i: usize) -> Option<T> {
     values.get(i).copied().flatten()
+}
+
+/// `at` for values that are not `Copy`.
+fn at_owned(values: &[Option<String>], i: usize) -> Option<String> {
+    values.get(i)?.clone()
 }
 
 impl From<ForecastDto> for Weather {
@@ -107,6 +116,8 @@ impl From<ForecastDto> for Weather {
                     rain_chance: at(&day.precipitation_probability_max, i),
                     wind_kph: at(&day.wind_speed_10m_max, i),
                     uv_index: at(&day.uv_index_max, i),
+                    sunrise: at_owned(&day.sunrise, i),
+                    sunset: at_owned(&day.sunset, i),
                 })
             })
             .collect();
