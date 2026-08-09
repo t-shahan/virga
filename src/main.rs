@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use chrono::{Datelike, NaiveDate};
 use std::time::Duration;
 use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::event;
@@ -265,7 +266,17 @@ fn forecast_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: 
     let lines = weather
         .daily
         .iter()
-        .map(|d| format!("{}    {:.0}{} / {:.0}{}", d.date, unit.temp(d.high_c), unit.temp_symbol(), unit.temp(d.low_c), unit.temp_symbol()))
+        .map(|d| {
+            format!(
+                "{}  {}  {:>3.0}{} / {:>3.0}{}",
+                weekday(&d.date),
+                emoji(d.code),
+                unit.temp(d.high_c),
+                unit.temp_symbol(),
+                unit.temp(d.low_c),
+                unit.temp_symbol(),
+            )
+        })
         .collect::<Vec<_>>();
 
     let forecast = Paragraph::new(lines.join("\n"))
@@ -326,4 +337,11 @@ fn popup_render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 fn spinner(tick: usize) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES[(tick / 2) % FRAMES.len()]
+}
+
+fn weekday(date: &str) -> String {
+    match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(parsed) => parsed.weekday().to_string(),
+        Err(_) => date.to_string(),
+    }
 }
