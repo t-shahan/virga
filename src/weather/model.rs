@@ -19,11 +19,14 @@ impl Location {
     }
 }
 
+/// Each reading is independently optional — the API can report some current
+/// conditions and not others, so a missing wind speed should not blank the
+/// temperature.
 pub struct Current {
-    pub temp_c: f64,
-    pub feels_like_c: f64,
-    pub code: u8,
-    pub wind_kph: f64,
+    pub temp_c: Option<f64>,
+    pub feels_like_c: Option<f64>,
+    pub code: Option<u8>,
+    pub wind_kph: Option<f64>,
 }
 
 pub struct DailyForecast {

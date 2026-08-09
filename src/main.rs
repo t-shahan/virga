@@ -263,7 +263,7 @@ fn top_area_render(frame: &mut Frame, app: &App, weather: &Weather, area: Rect) 
 
     let lines = vec![
         Line::from(name.to_uppercase()).bold().cyan(),
-        Line::from(description(weather.current.code)).dark_gray(),
+        Line::from(weather.current.code.map_or(UNKNOWN, description)).dark_gray(),
     ];
 
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
@@ -285,7 +285,13 @@ fn current_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: U
     ])
     .areas(content);
 
-    let temp = format!("{:.0}", unit.temp(weather.current.temp_c));
+    // The block font already has a '-' glyph, so a missing reading renders as
+    // "--" at the same scale rather than collapsing the layout.
+    let temp = weather
+        .current
+        .temp_c
+        .map_or_else(|| "--".to_string(), |c| format!("{:.0}", unit.temp(c)));
+
     let hero: Vec<Line> = big_digits(&temp)
         .iter()
         .enumerate()
@@ -308,29 +314,28 @@ fn current_area_render(frame: &mut Frame, weather: &Weather, area: Rect, unit: U
         None => "unavailable".to_string(),
     };
 
+    let feels_like = weather.current.feels_like_c.map_or_else(
+        || UNKNOWN.to_string(),
+        |c| format!("{:.0}{}", unit.temp(c), unit.temp_symbol()),
+    );
+
+    let wind = weather.current.wind_kph.map_or_else(
+        || UNKNOWN.to_string(),
+        |kph| format!("{:.0} {}", unit.speed(kph), unit.speed_label()),
+    );
+
     let details = vec![
         Line::from(""),
-        detail_line(
-            "feels like",
-            &format!(
-                "{:.0}{}",
-                unit.temp(weather.current.feels_like_c),
-                unit.temp_symbol()
-            ),
-        ),
-        detail_line(
-            "wind",
-            &format!(
-                "{:.0} {}",
-                unit.speed(weather.current.wind_kph),
-                unit.speed_label()
-            ),
-        ),
+        detail_line("feels like", &feels_like),
+        detail_line("wind", &wind),
         detail_line("air quality", &aqi),
         Line::from(format!("{}", Local::now().format("%a, %b %-d  %-I:%M %p"))).dark_gray(),
     ];
     frame.render_widget(Paragraph::new(details), detail_area);
 }
+
+/// Shown wherever the API reported no value for a reading.
+const UNKNOWN: &str = "unavailable";
 
 const DIGIT_ROWS: usize = 5;
 /// Widths of the two columns in the "Now" pane, centred as a pair.
