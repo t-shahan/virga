@@ -28,8 +28,18 @@ const SIDE_BY_SIDE_MIN: u16 = forecast::TABLE_FULL + GUTTER + chart::COMFORTABLE
 
 const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 
+/// Below this the panes cannot show anything useful, so say so plainly rather
+/// than rendering a clipped mess.
+const MIN_WIDTH: u16 = 44;
+const MIN_HEIGHT: u16 = 22;
+
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        too_small_render(frame, area);
+        return;
+    }
 
     // The legend is pinned to the bottom; everything else is laid out inside
     // what remains so panes can be sized to their content.
@@ -100,6 +110,19 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     keybind_legend_render(frame, app, legend_area);
 }
 
+fn too_small_render(frame: &mut Frame, area: Rect) {
+    let message = format!(
+        "Terminal too small\n\n{}x{}\nneeds {MIN_WIDTH}x{MIN_HEIGHT}",
+        area.width, area.height
+    );
+
+    // No border: at these sizes it would cost two of the few rows there are.
+    frame.render_widget(
+        Paragraph::new(message).alignment(Alignment::Center),
+        centered(area, area.width.min(MIN_WIDTH), 4.min(area.height)),
+    );
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
@@ -125,4 +148,51 @@ fn popup_render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
 fn spinner(tick: usize) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES[(tick / 2) % FRAMES.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::weather::model::Weather;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// A terminal below the minimum must say so rather than render a clipped
+    /// mess — and must not panic doing it, including at one cell.
+    #[test]
+    fn tiny_terminals_get_a_message_instead_of_a_broken_layout() {
+        let mut app = App::new();
+        app.weather = Fetch::Ready(Weather::fixture(22, 14));
+
+        for (width, height) in [(1, 1), (10, 5), (43, 21), (44, 21), (43, 22)] {
+            let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
+            t.draw(|f| render(f, &app)).unwrap();
+
+            let buf = t.backend().buffer();
+            let text: String = (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol())
+                .collect();
+            assert!(
+                !text.contains("feels like"),
+                "{width}x{height} rendered the pane anyway"
+            );
+        }
+    }
+
+    #[test]
+    fn the_minimum_size_itself_renders_the_app() {
+        let mut app = App::new();
+        app.weather = Fetch::Ready(Weather::fixture(22, 14));
+
+        let mut t = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).unwrap();
+        t.draw(|f| render(f, &app)).unwrap();
+
+        let buf = t.backend().buffer();
+        let text: String = (0..MIN_HEIGHT)
+            .flat_map(|y| (0..MIN_WIDTH).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol())
+            .collect();
+        assert!(text.contains("feels like"), "the minimum should be usable");
+    }
 }
