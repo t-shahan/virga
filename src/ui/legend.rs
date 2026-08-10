@@ -12,7 +12,7 @@ pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
             ("←→", "day"),
             ("n", "now"),
             ("r", "refresh"),
-            ("t", "units"),
+            ("u", "units"),
             ("l", "location"),
         ],
         Screen::Search => match &app.results {

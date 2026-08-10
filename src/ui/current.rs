@@ -90,7 +90,9 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
 
     let mut hero_lines = vec![Line::from("")];
     hero_lines.extend(hero);
-    hero_lines.push(Line::from(condition).dark_gray());
+    // Belt and braces: the descriptions are all inside HERO_WIDTH today, but a
+    // longer one added later would silently run into the detail column.
+    hero_lines.push(Line::from(truncate(condition, HERO_WIDTH as usize)).dark_gray());
 
     frame.render_widget(
         Paragraph::new(hero_lines).alignment(Alignment::Center),
@@ -251,6 +253,18 @@ fn long_date(date: &str) -> String {
     }
 }
 
+/// Clip to `width` on a character boundary, marking the cut so a truncated
+/// value cannot be mistaken for a short one.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    text.chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        + "…"
+}
+
 fn detail_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::from(format!("{label:<12}")).dark_gray(),
@@ -307,6 +321,31 @@ mod tests {
         assert_eq!(rain_line(&w.daily[1], Unit::Metric), UNKNOWN);
         assert_eq!(daylight_line(&w.daily[1]), UNKNOWN);
         assert_eq!(wind_line(None, None, &w.daily[1], Unit::Metric), UNKNOWN);
+    }
+
+    #[test]
+    fn truncate_marks_the_cut_and_leaves_short_text_alone() {
+        assert_eq!(truncate("Clear sky", 26), "Clear sky");
+        assert_eq!(
+            truncate("Thunderstorm, heavy hail", 26),
+            "Thunderstorm, heavy hail"
+        );
+        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("", 4), "");
+    }
+
+    /// Every description must fit the column that shows it, or it collides
+    /// with the detail column beside it.
+    #[test]
+    fn every_description_fits_the_hero_column() {
+        for code in 0u8..=99 {
+            let text = crate::weather::code::description(code);
+            assert!(
+                text.chars().count() <= HERO_WIDTH as usize,
+                "code {code}: {text:?} is {} wide, column is {HERO_WIDTH}",
+                text.chars().count()
+            );
+        }
     }
 
     #[test]

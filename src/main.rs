@@ -112,7 +112,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                     lon: DEFAULT_LOCATION.lon,
                                 })?;
                             }
-                            KeyCode::Char('t') => {
+                            KeyCode::Char('u') => {
                                 app.unit = app.unit.toggle();
                             }
                             KeyCode::Char('l') => {
