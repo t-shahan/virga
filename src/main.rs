@@ -96,9 +96,38 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 app.screen = Screen::Search;
                                 app.query.clear();
                             }
+                            KeyCode::Char('p') => {
+                                app.screen = Screen::Precipitation;
+                                app.select_now();
+                            }
                             KeyCode::Left => app.select_prev_day(),
                             KeyCode::Right => app.select_next_day(),
                             KeyCode::Char('n') | KeyCode::Home => app.select_today(),
+                            _ => {}
+                        },
+                        // Refresh and location stay live here rather than
+                        // bouncing to the main screen first: both are about the
+                        // place, not the screen, and a stale hourly forecast is
+                        // exactly when you want to refresh.
+                        Screen::Precipitation => match key.code {
+                            KeyCode::Char('q') => break Ok(()),
+                            KeyCode::Char('b') | KeyCode::Enter | KeyCode::Esc => {
+                                app.screen = Screen::Weather;
+                            }
+                            KeyCode::Char('r') => {
+                                let target = app.refresh_target();
+                                request_tx.send(Request::Fetch(app.request(target)))?;
+                            }
+                            KeyCode::Char('u') => app.unit = app.unit.toggle(),
+                            KeyCode::Char('l') => {
+                                app.screen = Screen::Search;
+                                app.query.clear();
+                            }
+                            KeyCode::Left => app.select_prev_hour(),
+                            KeyCode::Right => app.select_next_hour(),
+                            KeyCode::Up => app.select_prev_hour_day(),
+                            KeyCode::Down => app.select_next_hour_day(),
+                            KeyCode::Char('n') | KeyCode::Home => app.select_now(),
                             _ => {}
                         },
                         Screen::Search => match key.code {

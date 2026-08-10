@@ -1,3 +1,4 @@
+use crate::ui::bars::{Columns, GAP};
 use crate::units::Unit;
 use crate::weather::model::Weather;
 use ratatui::Frame;
@@ -34,15 +35,15 @@ pub(super) fn chart_area_render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Widen the bars if there's room. Anything that still doesn't fit drops the
-    // oldest history first, so the forecast is never what gets clipped.
-    let count = weather.daily.len().max(1);
-    // Never go below MIN_BAR_STRIDE: on a cramped chart it is better to drop
-    // the oldest days than to render every one of them as a single column.
-    let stride =
-        ((inner.width as usize + BAR_GAP as usize) / count).clamp(MIN_BAR_STRIDE as usize, 4);
-    let capacity = ((inner.width as usize + BAR_GAP as usize) / stride).max(1);
-    let start = weather.daily.len().saturating_sub(capacity);
+    // Anything that doesn't fit drops the oldest history first, so the
+    // forecast is never what gets clipped.
+    let columns = Columns::fit(
+        inner.width,
+        weather.daily.len(),
+        MIN_BAR_STRIDE,
+        MAX_BAR_STRIDE,
+    );
+    let start = weather.daily.len().saturating_sub(columns.capacity);
     let visible = &weather.daily[start..];
 
     let coolest = visible
@@ -84,8 +85,7 @@ pub(super) fn chart_area_render(
 
     // Centre the chart on its own measured width; left-aligned looked lopsided
     // once the bars stopped filling the pane.
-    let chart_width = (visible.len() * stride).saturating_sub(BAR_GAP as usize) as u16;
-    let [chart_area] = Layout::horizontal([Constraint::Length(chart_width)])
+    let [chart_area] = Layout::horizontal([Constraint::Length(columns.width_of(visible.len()))])
         .flex(Flex::Center)
         .areas(inner);
 
@@ -93,22 +93,23 @@ pub(super) fn chart_area_render(
         BarChart::default()
             .data(BarGroup::default().bars(&bars))
             .max(BAR_CEILING)
-            .bar_width(stride as u16 - BAR_GAP)
-            .bar_gap(BAR_GAP),
+            .bar_width(columns.stride - GAP)
+            .bar_gap(GAP),
         chart_area,
     );
 }
 
 /// Bars thinner than this read as a comb rather than a chart.
 const MIN_BAR_STRIDE: u16 = 3;
-const BAR_GAP: u16 = 1;
+/// Past this they grow fat rather than more informative.
+const MAX_BAR_STRIDE: u16 = 4;
 /// Shortest bar, as a proportion of `BAR_CEILING`. Keeps the coolest day visible.
 const BAR_FLOOR: u64 = 15;
 const BAR_CEILING: u64 = 100;
 
 /// Every day at a stride that still looks like a bar chart. The caller uses
 /// this to decide whether a side-by-side split can afford a chart at all.
-pub(super) const COMFORTABLE_WIDTH: u16 = 22 * MIN_BAR_STRIDE - BAR_GAP;
+pub(super) const COMFORTABLE_WIDTH: u16 = 22 * MIN_BAR_STRIDE - GAP;
 /// Below this the bars stop being readable at all.
 pub(super) const MIN_HEIGHT: u16 = 8;
 /// Past this they grow spindly rather than informative.
@@ -125,26 +126,12 @@ mod tests {
     #[test]
     fn bars_never_fall_below_two_cells() {
         for width in 30u16..=250 {
-            let stride =
-                ((width as usize + BAR_GAP as usize) / 22).clamp(MIN_BAR_STRIDE as usize, 4);
+            let columns = Columns::fit(width, 22, MIN_BAR_STRIDE, MAX_BAR_STRIDE);
             assert!(
-                stride as u16 - BAR_GAP >= 2,
+                columns.stride - GAP >= 2,
                 "width {width} gives {}-cell bars",
-                stride as u16 - BAR_GAP
+                columns.stride - GAP
             );
-        }
-    }
-
-    /// Whatever is dropped for want of room, the bars that remain must fit the
-    /// area they are given — anything wider is silently clipped.
-    #[test]
-    fn the_visible_bars_always_fit_their_area() {
-        for width in 30usize..=250 {
-            let stride = ((width + BAR_GAP as usize) / 22).clamp(MIN_BAR_STRIDE as usize, 4);
-            let capacity = ((width + BAR_GAP as usize) / stride).max(1);
-            let shown = capacity.min(22);
-            let used = shown * stride - BAR_GAP as usize;
-            assert!(used <= width, "width {width}: bars need {used}");
         }
     }
 

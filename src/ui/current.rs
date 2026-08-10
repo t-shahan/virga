@@ -1,6 +1,6 @@
 use crate::app::App;
-use crate::ui::UNKNOWN;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
+use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
 use crate::units::Unit;
 use crate::weather::code::{aqi_label, description};
 use crate::weather::model::{DailyForecast, Weather};
@@ -159,8 +159,6 @@ const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
 const DETAIL_WIDTH: u16 = 34;
 /// Columns between the hero and the details.
 const COLUMN_GUTTER: u16 = 3;
-/// Columns kept clear between the two border titles.
-const TITLE_GUTTER: usize = 3;
 /// Joins the condition to the air quality. Box-drawing horizontals, so at the
 /// border's own colour the rule reads as running behind the text.
 const TITLE_RULE: &str = "───";
@@ -314,14 +312,6 @@ fn long_date(date: &str) -> String {
     }
 }
 
-/// Fits the city, condition and day into the border, dropping detail rather
-/// than letting the two titles overwrite each other. The day matters most —
-/// it is what changes as you arrow around — then the city, then the condition.
-/// Two corners, plus a column of breathing room inside each.
-fn title_room(width: u16) -> usize {
-    width.saturating_sub(4) as usize
-}
-
 /// City left; condition and air quality right. The city is the identity, so it
 /// is clipped last; air quality is supplementary, so it goes first.
 fn top_titles(
@@ -364,18 +354,6 @@ fn bottom_titles(summary: &str, when: &str, width: u16) -> (Option<String>, Stri
     }
 
     (None, when.to_string())
-}
-
-/// Clip to `width` on a character boundary, marking the cut so a truncated
-/// value cannot be mistaken for a short one.
-fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    text.chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>()
-        + "…"
 }
 
 fn detail_line(label: &str, value: &str) -> Line<'static> {

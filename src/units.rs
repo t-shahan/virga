@@ -36,6 +36,28 @@ impl Unit {
         }
     }
 
+    /// Snow is reported in centimetres, where rain is in millimetres — the
+    /// same hour can carry 0.7 cm of snow and 1.4 mm of precipitation.
+    pub fn snow(self, cm: f64) -> f64 {
+        match self {
+            Unit::Metric => cm,
+            Unit::Imperial => cm / 2.54,
+        }
+    }
+
+    /// A tenth of an inch of snow is already visible on the ground, so snow
+    /// needs one fewer decimal than rain does.
+    pub fn snow_decimals(self) -> usize {
+        1
+    }
+
+    pub fn snow_label(self) -> &'static str {
+        match self {
+            Unit::Metric => "cm",
+            Unit::Imperial => "in",
+        }
+    }
+
     /// Hundredths of an inch are a meaningful amount of rain; hundredths of a
     /// millimetre are noise, and the extra digit costs column width.
     pub fn precip_decimals(self) -> usize {
@@ -101,6 +123,20 @@ mod tests {
         assert_eq!(Unit::Imperial.speed_label(), "mph");
         assert_eq!(Unit::Metric.precip_label(), "mm");
         assert_eq!(Unit::Imperial.precip_label(), "in");
+        assert_eq!(Unit::Metric.snow_label(), "cm");
+        assert_eq!(Unit::Imperial.snow_label(), "in");
+    }
+
+    /// Snow converts from centimetres, so reusing the rain conversion would
+    /// under-report it by a factor of ten.
+    #[test]
+    fn snow_converts_from_centimetres_not_millimetres() {
+        assert_eq!(Unit::Metric.snow(2.5), 2.5);
+        assert!((Unit::Imperial.snow(2.54) - 1.0).abs() < 0.000_1);
+        assert!(
+            Unit::Imperial.snow(2.54) > Unit::Imperial.precip(2.54),
+            "a centimetre is not a millimetre"
+        );
     }
 
     #[test]

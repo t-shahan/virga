@@ -74,6 +74,13 @@ fn fetch_daily(lat: f64, lon: f64) -> Result<Weather> {
             "daily",
             "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_hours,wind_gusts_10m_max,wind_direction_10m_dominant,daylight_duration",
         )
+        // Rides the existing request rather than taking its own. ~15 KB more on
+        // an already-warm pooled connection beats a second round trip with its
+        // own loading state and its own failure mode.
+        .query(
+            "hourly",
+            "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m",
+        )
         .query("timezone", "auto")
         .query("forecast_days", "8")
         .query("past_days", "14")
@@ -216,6 +223,43 @@ mod live {
         assert!(
             covered > 15,
             "expected most of the window covered, got {covered}"
+        );
+    }
+
+    /// The hourly block rides the forecast request, so a schema change or a
+    /// dropped parameter would silently empty the precipitation screen rather
+    /// than fail anything. An operational smoke test, not a contract.
+    #[test]
+    #[ignore]
+    fn real_fetch_carries_a_populated_hourly_series() {
+        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch");
+        let forward = weather.forecast_hours();
+
+        println!(
+            "hourly {} · now_hour {} · forward {}",
+            weather.hourly.len(),
+            weather.now_hour,
+            forward.len()
+        );
+        println!("first forward hour: {:?}", forward.first().map(|h| &h.time));
+
+        assert!(!weather.hourly.is_empty(), "no hourly block arrived");
+        assert!(
+            weather.now_hour > 0,
+            "the request carries past_days, so now cannot be the first hour"
+        );
+        assert!(
+            forward.len() > 24,
+            "expected more than a day ahead, got {}",
+            forward.len()
+        );
+        assert!(
+            forward.iter().all(|h| h.chance.is_some()),
+            "probability was populated for every hour when this was written"
+        );
+        assert!(
+            forward.iter().any(|h| h.precip_mm.is_some()),
+            "amount should be present even when it is zero"
         );
     }
 }

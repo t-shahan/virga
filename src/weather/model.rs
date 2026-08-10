@@ -55,13 +55,59 @@ pub struct DailyForecast {
     pub daylight_secs: Option<f64>,
 }
 
+#[derive(Clone)]
+/// One hour of the forecast. Only the timestamp is guaranteed; every reading
+/// can come back null and degrades to a dash rather than dropping the hour.
+pub struct HourlyForecast {
+    /// Local to the location, e.g. "2026-08-10T16:00".
+    pub time: String,
+    /// Total precipitation, snow counted as its melted equivalent.
+    pub precip_mm: Option<f64>,
+    /// Snow depth, which is a different measure of the same hour — 1 mm of
+    /// precipitation is roughly 0.7 cm of snow, not 0.1.
+    pub snow_cm: Option<f64>,
+    pub chance: Option<u8>,
+    pub code: Option<u8>,
+    pub temp_c: Option<f64>,
+}
+
+impl HourlyForecast {
+    /// Whether anything is forecast to fall. The trigger is the amount rather
+    /// than the chance: a 20% hour with no forecast accumulation is not rain,
+    /// which is the confusion the daily pane already had to fix once.
+    pub fn is_wet(&self) -> bool {
+        self.precip_mm.is_some_and(|mm| mm > 0.0)
+    }
+
+    /// Snow is the story when there is any, since a centimetre of snow and a
+    /// millimetre of rain are very different news.
+    pub fn is_snow(&self) -> bool {
+        self.snow_cm.is_some_and(|cm| cm > 0.0)
+    }
+}
+
 pub struct Weather {
     pub current: Current,
     /// Past days, today, then the forecast — in chronological order.
     pub daily: Vec<DailyForecast>,
     /// Index of today within `daily`.
     pub today_index: usize,
+    /// The hourly series, which like `daily` runs from the past through the
+    /// forecast horizon.
+    pub hourly: Vec<HourlyForecast>,
+    /// Index of the current hour within `hourly`.
+    pub now_hour: usize,
     pub air_quality: Option<AirQuality>,
+}
+
+impl Weather {
+    /// The hourly forecast from this hour onward. The request carries two weeks
+    /// of history for the daily chart's benefit; the precipitation screen looks
+    /// only forward, so it slices here rather than every caller doing its own
+    /// arithmetic on `now_hour`.
+    pub fn forecast_hours(&self) -> &[HourlyForecast] {
+        self.hourly.get(self.now_hour..).unwrap_or_default()
+    }
 }
 
 /// Everything one air-quality request yields: the live reading, plus a maximum
@@ -111,7 +157,32 @@ impl Weather {
                 })
                 .collect(),
             today_index,
+            hourly: (0..PAST_HOURS + FORECAST_HOURS)
+                .map(|i| HourlyForecast {
+                    time: hour_stamp(i),
+                    // Mostly dry, wet every seventeenth hour — the real series
+                    // is far emptier than a naive fixture would suggest.
+                    precip_mm: Some(if i % 17 == 0 { 0.4 } else { 0.0 }),
+                    snow_cm: Some(0.0),
+                    chance: Some(((i * 7) % 101) as u8),
+                    code: Some(if i % 17 == 0 { 61 } else { 0 }),
+                    temp_c: Some(15.0 + (i % 12) as f64),
+                })
+                .collect(),
+            now_hour: PAST_HOURS,
             air_quality: None,
         }
     }
+}
+
+/// The fixture's hourly series carries history either side of `now_hour`, as
+/// the real response does — a screen that looks only forward has to prove it.
+#[cfg(test)]
+const PAST_HOURS: usize = 24;
+#[cfg(test)]
+const FORECAST_HOURS: usize = 192;
+
+#[cfg(test)]
+fn hour_stamp(i: usize) -> String {
+    format!("2026-08-{:02}T{:02}:00", 1 + i / 24, i % 24)
 }
