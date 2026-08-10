@@ -82,9 +82,28 @@ render.
 | `Ctrl-C` | Quit, from any screen |
 | `←` `→` | Move through the 22-day window; wraps at both ends |
 | `n` / `Home` | Jump back to today |
+| `p` | Hourly precipitation |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `l` | Search for a city |
+
+On the precipitation screen:
+
+| Key | Action |
+|---|---|
+| `←` `→` | Move an hour through the forecast; wraps at both ends |
+| `↑` `↓` | Move a whole day |
+| `n` / `Home` | Jump back to the current hour |
+| `b` / `Enter` / `Esc` | Back to the weather |
+| `r` | Refetch the current location |
+| `u` | Toggle metric / imperial |
+| `l` | Search for a city |
+| `q` | Quit |
+
+Chance rises from the centre rule, forecast amount hangs below it, and the
+box title carries the span and the scale the lower half is drawn against.
+The rule marks the current hour (`┬`), the selected one (`═`) and midnight
+(`┼`), so the three stay apart without relying on colour.
 
 On the search screen:
 
