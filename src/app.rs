@@ -11,7 +11,12 @@ pub enum Fetch<T> {
 pub enum Screen {
     Weather,
     Search,
+    Precipitation,
 }
+
+/// How far the vertical arrows jump. Eight days is a long way at one press
+/// per hour.
+const HOURS_PER_DAY: isize = 24;
 
 /// A place the app can fetch for, with its label and coordinates in one value.
 /// They were separate before: selecting a search result stored the label and
@@ -55,6 +60,9 @@ pub struct App {
     /// Index into `Weather::daily` of the day being inspected. Distinct from
     /// `selected`, which tracks the search results list.
     pub selected_day: usize,
+    /// Index into `Weather::forecast_hours()` — the hourly series from now
+    /// onward, so zero is always the current hour.
+    pub selected_hour: usize,
     /// The place the displayed weather actually describes. Only a successful
     /// load moves it, so the label can never get ahead of the measurements.
     pub location: ActiveLocation,
@@ -75,6 +83,7 @@ impl App {
             tick: 0,
             selected: 0,
             selected_day: 0,
+            selected_hour: 0,
             location: ActiveLocation::default(),
             pending: None,
         }
@@ -102,6 +111,7 @@ impl App {
             self.pending = None;
         }
         self.selected_day = weather.today_index;
+        self.selected_hour = 0;
         self.location = location;
         self.weather = Fetch::Ready(weather);
     }
@@ -141,6 +151,50 @@ impl App {
         if let Fetch::Ready(weather) = &self.weather {
             self.selected_day = weather.today_index;
         }
+    }
+
+    /// `None` while there is no hourly forecast to move around in — the same
+    /// guard `last_day` gives the day arrows.
+    fn hour_count(&self) -> Option<usize> {
+        match &self.weather {
+            Fetch::Ready(weather) => match weather.forecast_hours().len() {
+                0 => None,
+                count => Some(count),
+            },
+            _ => None,
+        }
+    }
+
+    /// One step of `delta` hours, wrapping at both ends as the day arrows do.
+    /// `rem_euclid` is what makes a backwards step from hour zero land on the
+    /// last hour rather than underflowing.
+    fn step_hour(&mut self, delta: isize) {
+        let Some(count) = self.hour_count() else {
+            return;
+        };
+        let count = count as isize;
+        self.selected_hour = (self.selected_hour as isize + delta).rem_euclid(count) as usize;
+    }
+
+    pub fn select_prev_hour(&mut self) {
+        self.step_hour(-1);
+    }
+
+    pub fn select_next_hour(&mut self) {
+        self.step_hour(1);
+    }
+
+    pub fn select_prev_hour_day(&mut self) {
+        self.step_hour(-HOURS_PER_DAY);
+    }
+
+    pub fn select_next_hour_day(&mut self) {
+        self.step_hour(HOURS_PER_DAY);
+    }
+
+    /// Hour zero of the forward window is the current hour, by construction.
+    pub fn select_now(&mut self) {
+        self.selected_hour = 0;
     }
 
     /// Results only describe the query that produced them, so any edit to the
@@ -226,6 +280,131 @@ mod tests {
         app.select_next_day();
         app.select_prev_day();
         assert_eq!(app.selected_day, 0);
+    }
+
+    /// The fixture carries 24 hours of history before `now_hour`, so anything
+    /// that leaks the past into this window shows up as an off-by-24.
+    #[test]
+    fn the_hour_window_opens_at_now_and_looks_only_forward() {
+        let app = app_with(22, 14);
+        let Fetch::Ready(w) = &app.weather else {
+            panic!("fixture is ready")
+        };
+
+        assert_eq!(app.selected_hour, 0);
+        assert_eq!(w.forecast_hours().len(), 192, "eight days ahead");
+        assert_eq!(w.forecast_hours()[0].time, w.hourly[w.now_hour].time);
+    }
+
+    #[test]
+    fn hour_navigation_wraps_at_both_ends() {
+        let mut app = app_with(22, 14);
+
+        app.select_prev_hour();
+        assert_eq!(app.selected_hour, 191, "back from now lands on the last");
+
+        app.select_next_hour();
+        assert_eq!(app.selected_hour, 0, "and forward again returns");
+    }
+
+    #[test]
+    fn the_vertical_arrows_move_a_whole_day() {
+        let mut app = app_with(22, 14);
+
+        app.select_next_hour_day();
+        assert_eq!(app.selected_hour, 24);
+
+        app.select_prev_hour_day();
+        assert_eq!(app.selected_hour, 0);
+
+        // Backwards from now wraps to the same hour on the final day.
+        app.select_prev_hour_day();
+        assert_eq!(app.selected_hour, 168);
+    }
+
+    #[test]
+    fn stepping_forward_and_back_returns_to_the_same_hour() {
+        let mut app = app_with(22, 14);
+        for start in [0, 1, 23, 100, 191] {
+            app.selected_hour = start;
+            app.select_next_hour();
+            app.select_prev_hour();
+            assert_eq!(app.selected_hour, start, "round trip from {start}");
+
+            app.select_next_hour_day();
+            app.select_prev_hour_day();
+            assert_eq!(app.selected_hour, start, "day round trip from {start}");
+        }
+    }
+
+    #[test]
+    fn a_full_lap_of_hours_returns_to_the_start() {
+        let mut app = app_with(22, 14);
+        for _ in 0..192 {
+            app.select_next_hour();
+        }
+        assert_eq!(app.selected_hour, 0);
+    }
+
+    #[test]
+    fn now_returns_to_the_current_hour() {
+        let mut app = app_with(22, 14);
+        app.selected_hour = 137;
+        app.select_now();
+        assert_eq!(app.selected_hour, 0);
+    }
+
+    /// The arrows are live before the first forecast lands, and a location
+    /// with no hourly coverage is a real response shape.
+    #[test]
+    fn hour_navigation_is_inert_without_an_hourly_forecast() {
+        let mut app = App::new();
+        app.select_next_hour();
+        app.select_prev_hour();
+        app.select_next_hour_day();
+        assert_eq!(app.selected_hour, 0);
+
+        let mut empty = Weather::fixture(3, 1);
+        empty.hourly.clear();
+        empty.now_hour = 0;
+        app.weather = Fetch::Ready(empty);
+
+        app.select_next_hour();
+        app.select_prev_hour();
+        app.select_prev_hour_day();
+        assert_eq!(app.selected_hour, 0);
+    }
+
+    /// Whatever the arrows do, the index must stay addressable — a shorter
+    /// series after a refresh must not leave the selection off the end.
+    #[test]
+    fn the_selected_hour_can_never_index_out_of_bounds() {
+        let mut app = app_with(22, 14);
+
+        for step in 0..500 {
+            match step % 4 {
+                0 => app.select_next_hour(),
+                1 => app.select_prev_hour(),
+                2 => app.select_next_hour_day(),
+                _ => app.select_prev_hour_day(),
+            }
+            let Fetch::Ready(w) = &app.weather else {
+                panic!("still ready")
+            };
+            assert!(
+                w.forecast_hours().get(app.selected_hour).is_some(),
+                "step {step} left hour {} unaddressable",
+                app.selected_hour
+            );
+        }
+
+        // A refresh that returns a shorter series resets the selection.
+        app.selected_hour = 191;
+        let mut short = Weather::fixture(3, 1);
+        short.hourly.truncate(30);
+        short.now_hour = 24;
+        app.commit(ActiveLocation::default(), short);
+        assert_eq!(app.selected_hour, 0, "a new load starts at now");
     }
 
     fn berlin() -> ActiveLocation {

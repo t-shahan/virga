@@ -1,5 +1,5 @@
 use crate::weather::model::{
-    AirQuality, AirQualityReport, Current, DailyForecast, Location, Weather,
+    AirQuality, AirQualityReport, Current, DailyForecast, HourlyForecast, Location, Weather,
 };
 use chrono::Local;
 use serde::Deserialize;
@@ -85,6 +85,29 @@ pub struct DailyDto {
 pub struct ForecastDto {
     pub current: CurrentDto,
     pub daily: DailyDto,
+    /// Optional so a request that never asked for an hourly block — or a
+    /// fixture recorded before it did — still parses.
+    pub hourly: Option<HourlyDto>,
+}
+
+/// Same rules as `DailyDto`: every measurement optional, so one null hour
+/// cannot cost the whole series.
+#[derive(Debug, Deserialize)]
+pub struct HourlyDto {
+    #[serde(default)]
+    pub time: Vec<String>,
+    #[serde(default)]
+    pub precipitation: Vec<Option<f64>>,
+    #[serde(default)]
+    pub precipitation_probability: Vec<Option<u8>>,
+    /// Centimetres of snow, where `precipitation` counts its melted equivalent
+    /// in millimetres. Two different measures of the same hour.
+    #[serde(default)]
+    pub snowfall: Vec<Option<f64>>,
+    #[serde(default)]
+    pub weather_code: Vec<Option<u8>>,
+    #[serde(default)]
+    pub temperature_2m: Vec<Option<f64>>,
 }
 
 /// `values[i]`, collapsing "index out of range" and "value was null" into the
@@ -152,7 +175,52 @@ impl From<ForecastDto> for Weather {
             .position(|day| day.date == today)
             .unwrap_or_else(|| daily.iter().filter(|day| day.date < today).count());
 
+        // Same index-by-position shape as `daily`, for the same reason: six
+        // parallel arrays make a zip chain unreadable.
+        let hourly: Vec<HourlyForecast> = dto.hourly.map_or_else(Vec::new, |hour| {
+            (0..hour.time.len())
+                .filter_map(|i| {
+                    Some(HourlyForecast {
+                        time: hour.time.get(i)?.clone(),
+                        precip_mm: at(&hour.precipitation, i),
+                        snow_cm: at(&hour.snowfall, i),
+                        chance: at(&hour.precipitation_probability, i),
+                        code: at(&hour.weather_code, i),
+                        temp_c: at(&hour.temperature_2m, i),
+                    })
+                })
+                .collect()
+        });
+
+        // The hourly series runs 14 days back as well as forward, so getting
+        // this wrong points the whole screen at history. Truncating to the hour
+        // matches "2026-08-10T19:15" against "2026-08-10T19:00"; the same
+        // system-clock fallback as `today` applies if the API omits its clock.
+        let this_hour = dto
+            .current
+            .time
+            .as_deref()
+            .and_then(|stamp| stamp.get(..13))
+            .map_or_else(
+                || Local::now().format("%Y-%m-%dT%H").to_string(),
+                str::to_string,
+            );
+
+        // Located after filtering, exactly as `today_index` is, so a dropped
+        // hour cannot shift it.
+        let now_hour = hourly
+            .iter()
+            .position(|h| h.time.get(..13) == Some(this_hour.as_str()))
+            .unwrap_or_else(|| {
+                hourly
+                    .iter()
+                    .filter(|h| h.time.as_str() < this_hour.as_str())
+                    .count()
+            });
+
         Self {
+            hourly,
+            now_hour,
             current: Current {
                 temp_c: dto.current.temperature_2m,
                 feels_like_c: dto.current.apparent_temperature,
@@ -396,6 +464,148 @@ mod tests {
 
         assert_eq!(report.current.map(|c| c.us_aqi), Some(42));
         assert!(report.daily_max.is_empty());
+    }
+
+    /// Builds a forecast whose `current.time` sits at 02:30, with four hourly
+    /// points either side of it, so tests can vary just the hourly block.
+    fn with_hourly(hourly: &str) -> Weather {
+        let json = format!(
+            r#"{{
+                "current": {{"time": "2026-08-09T02:30", "temperature_2m": 20.0,
+                             "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0}},
+                "daily": {{
+                    "time": ["2026-08-09"], "weather_code": [0],
+                    "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]
+                }},
+                "hourly": {hourly}
+            }}"#
+        );
+        serde_json::from_str::<ForecastDto>(&json)
+            .expect("hourly fixture should parse")
+            .into()
+    }
+
+    const FOUR_HOURS: &str = r#"{
+        "time": ["2026-08-09T00:00", "2026-08-09T01:00", "2026-08-09T02:00", "2026-08-09T03:00"],
+        "precipitation": [0.0, 0.2, null, 1.4],
+        "precipitation_probability": [5, 40, null, 90],
+        "snowfall": [0.0, 0.0, 0.0, 0.7],
+        "weather_code": [0, 61, null, 71],
+        "temperature_2m": [18.0, 17.5, null, 16.0]
+    }"#;
+
+    /// A null reading blanks that one cell. Unlike a daily row there is no
+    /// required measurement, so no hour is ever dropped — which is what keeps
+    /// `now_hour` addressable by position.
+    #[test]
+    fn a_null_hourly_reading_blanks_the_cell_rather_than_the_hour() {
+        let weather = with_hourly(FOUR_HOURS);
+
+        assert_eq!(weather.hourly.len(), 4, "the null hour is kept");
+        let null_hour = &weather.hourly[2];
+        assert_eq!(null_hour.time, "2026-08-09T02:00");
+        assert!(null_hour.precip_mm.is_none());
+        assert!(null_hour.chance.is_none());
+        assert!(null_hour.temp_c.is_none());
+    }
+
+    /// Snow is carried separately from precipitation because they measure the
+    /// same hour differently — 1.4 mm melted is 0.7 cm fallen.
+    #[test]
+    fn snowfall_is_kept_apart_from_precipitation() {
+        let weather = with_hourly(FOUR_HOURS);
+        let snowy = &weather.hourly[3];
+
+        assert_eq!(snowy.precip_mm, Some(1.4));
+        assert_eq!(snowy.snow_cm, Some(0.7));
+        assert!(snowy.is_snow(), "0.7 cm is snow");
+        assert!(!weather.hourly[1].is_snow(), "0.2 mm of rain is not");
+    }
+
+    /// A stripped request or an older cached fixture has no hourly block at
+    /// all. That must degrade to an empty screen, not a failed forecast.
+    #[test]
+    fn an_absent_hourly_block_still_yields_a_forecast() {
+        let json = r#"{
+            "current": {"time": "2026-08-09T02:30", "temperature_2m": 20.0,
+                        "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0},
+            "daily": {"time": ["2026-08-09"], "weather_code": [0],
+                      "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]}
+        }"#;
+
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json).unwrap().into();
+
+        assert!(weather.hourly.is_empty());
+        assert_eq!(weather.now_hour, 0);
+        assert!(weather.forecast_hours().is_empty(), "and slices safely");
+        assert_eq!(weather.daily.len(), 1, "the daily forecast still arrives");
+    }
+
+    /// Arrays shorter than `time` blank the tail rather than truncating the
+    /// series or panicking on the index.
+    #[test]
+    fn mismatched_hourly_arrays_blank_the_missing_readings() {
+        let weather = with_hourly(
+            r#"{
+                "time": ["2026-08-09T00:00", "2026-08-09T01:00", "2026-08-09T02:00"],
+                "precipitation": [0.0],
+                "precipitation_probability": [5, 40]
+            }"#,
+        );
+
+        assert_eq!(weather.hourly.len(), 3, "time drives the length");
+        assert_eq!(weather.hourly[0].precip_mm, Some(0.0));
+        assert!(weather.hourly[1].precip_mm.is_none());
+        assert_eq!(weather.hourly[1].chance, Some(40));
+        assert!(weather.hourly[2].chance.is_none());
+        assert!(weather.hourly[2].snow_cm.is_none(), "absent array too");
+    }
+
+    /// The series runs two weeks into the past, so an off-by-one here points
+    /// the whole screen at history. 02:30 belongs to the 02:00 hour.
+    #[test]
+    fn now_hour_points_at_the_current_hour() {
+        let weather = with_hourly(FOUR_HOURS);
+
+        assert_eq!(weather.now_hour, 2);
+        assert_eq!(weather.hourly[weather.now_hour].time, "2026-08-09T02:00");
+    }
+
+    /// If the current hour is missing from the series, land on the boundary
+    /// rather than at zero — which would present two weeks of history as the
+    /// forecast.
+    #[test]
+    fn now_hour_falls_back_to_the_boundary_when_its_hour_is_absent() {
+        let weather = with_hourly(
+            r#"{
+                "time": ["2026-08-09T00:00", "2026-08-09T01:00", "2026-08-09T03:00"],
+                "precipitation": [0.0, 0.0, 0.0]
+            }"#,
+        );
+
+        assert_eq!(weather.now_hour, 2, "two hours precede 02:00");
+        assert_eq!(
+            weather.forecast_hours()[0].time,
+            "2026-08-09T03:00",
+            "the window opens at the next hour that exists"
+        );
+    }
+
+    /// The screen looks only forward; the request carries history for the
+    /// daily chart's sake.
+    #[test]
+    fn forecast_hours_start_at_now_and_drop_the_past() {
+        let weather = with_hourly(FOUR_HOURS);
+        let forward = weather.forecast_hours();
+
+        assert_eq!(forward.len(), 2, "02:00 and 03:00");
+        assert_eq!(forward[0].time, "2026-08-09T02:00");
+        assert!(
+            forward
+                .iter()
+                .all(|h| h.time.as_str() >= "2026-08-09T02:00"),
+            "nothing before now survives the slice"
+        );
     }
 
     #[test]

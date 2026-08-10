@@ -3,21 +3,46 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+mod bars;
 mod chart;
 mod current;
 mod digits;
 mod forecast;
 mod legend;
+mod precip;
+mod precip_chart;
 mod search;
 
 use chart::chart_area_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
 use legend::keybind_legend_render;
+use precip::precip_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
 const UNKNOWN: &str = "unavailable";
+
+/// Columns kept clear between two titles sharing one border row.
+const TITLE_GUTTER: usize = 3;
+
+/// Room a border row has for titles: two corners, plus a column of breathing
+/// space inside each.
+fn title_room(width: u16) -> usize {
+    width.saturating_sub(4) as usize
+}
+
+/// Clip to `width` on a character boundary, marking the cut so a truncated
+/// value cannot be mistaken for a short one.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    text.chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        + "…"
+}
 
 /// Columns between the table and the chart when they sit side by side.
 const GUTTER: u16 = 3;
@@ -97,6 +122,17 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                 forecast_area_render(frame, w, forecast_area, app.unit, app.selected_day);
                 chart_area_render(frame, w, chart_area, app.unit, app.selected_day);
             }
+            Fetch::Loading => popup_render(
+                frame,
+                area,
+                "Loading",
+                &format!("{} fetching...", spinner(app.tick)),
+            ),
+            Fetch::Failed(msg) => popup_render(frame, area, "Error", msg),
+            Fetch::Idle => {}
+        },
+        Screen::Precipitation => match &app.weather {
+            Fetch::Ready(_) => precip_render(frame, app, content),
             Fetch::Loading => popup_render(
                 frame,
                 area,
