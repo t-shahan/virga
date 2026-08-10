@@ -237,7 +237,9 @@ fn rain_line(day: &DailyForecast, unit: Unit) -> String {
             unit.precip(mm),
             unit.precip_label()
         )),
-        (Some(_), _) => Some("none".to_string()),
+        // "none" alone reads as a denial of the chance beside it; "expected"
+        // ties it to the forecast amount, which is what is actually zero.
+        (Some(_), _) => Some("none expected".to_string()),
         _ => None,
     };
 
@@ -659,7 +661,10 @@ mod tests {
 
         day.rain_chance = Some(47);
         day.precip_mm = Some(0.0);
-        assert_eq!(rain_line(&w.daily[1], Unit::Imperial), "47% · none");
+        assert_eq!(
+            rain_line(&w.daily[1], Unit::Imperial),
+            "47% · none expected"
+        );
 
         w.daily[1].precip_mm = Some(25.4);
         w.daily[1].precip_hours = Some(3.0);
