@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::ui::UNKNOWN;
+use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::units::Unit;
 use crate::weather::code::{aqi_label, description};
 use crate::weather::model::{DailyForecast, Weather};
@@ -111,44 +112,11 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     frame.render_widget(Paragraph::new(details), detail_area);
 }
 
-const DIGIT_ROWS: usize = 5;
-/// Widths of the two columns in the "Now" pane, centred as a pair.
-const HERO_WIDTH: u16 = 26;
+/// Widths of the two columns in the "Now" pane, centred as a pair. The hero
+/// holds three digits and the unit symbol, sized from the font rather than
+/// restated here.
+const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
 const DETAIL_WIDTH: u16 = 30;
-
-/// One 7x5 block glyph. At three cells wide the digits rendered far taller
-/// than they were broad, since terminal cells are roughly twice as tall as
-/// they are wide. Only digits and a minus sign are needed for temperatures.
-fn glyph(c: char) -> [&'static str; DIGIT_ROWS] {
-    match c {
-        '0' => ["███████", "██   ██", "██   ██", "██   ██", "███████"],
-        '1' => ["   ██  ", "   ██  ", "   ██  ", "   ██  ", "   ██  "],
-        '2' => ["███████", "     ██", "███████", "██     ", "███████"],
-        '3' => ["███████", "     ██", "███████", "     ██", "███████"],
-        '4' => ["██   ██", "██   ██", "███████", "     ██", "     ██"],
-        '5' => ["███████", "██     ", "███████", "     ██", "███████"],
-        '6' => ["███████", "██     ", "███████", "██   ██", "███████"],
-        '7' => ["███████", "     ██", "     ██", "     ██", "     ██"],
-        '8' => ["███████", "██   ██", "███████", "██   ██", "███████"],
-        '9' => ["███████", "██   ██", "███████", "     ██", "███████"],
-        '-' => ["       ", "       ", "███████", "       ", "       "],
-        _ => ["       "; DIGIT_ROWS],
-    }
-}
-
-/// Renders `text` as block digits, one `String` per output row.
-fn big_digits(text: &str) -> [String; DIGIT_ROWS] {
-    let mut rows: [String; DIGIT_ROWS] = Default::default();
-
-    for c in text.chars() {
-        for (row, part) in rows.iter_mut().zip(glyph(c)) {
-            row.push_str(part);
-            row.push(' ');
-        }
-    }
-
-    rows
-}
 
 fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
     let sym = unit.temp_symbol();
@@ -366,26 +334,6 @@ mod tests {
         assert_eq!(duration(3_600.0), "1h 0m");
         assert_eq!(duration(0.0), "0h 0m");
         assert_eq!(duration(-5.0), "0h 0m");
-    }
-
-    /// Every row must be the same width or Alignment::Center shears the digits,
-    /// which is exactly how the hero temperature broke once before.
-    #[test]
-    fn block_digit_rows_are_all_the_same_width() {
-        for text in ["7", "91", "107", "-12", ""] {
-            let rows = big_digits(text);
-            let width = rows[0].chars().count();
-            for (i, row) in rows.iter().enumerate() {
-                assert_eq!(row.chars().count(), width, "{text:?} row {i} differs");
-            }
-            assert_eq!(width, text.chars().count() * 8, "{text:?} wrong width");
-        }
-    }
-
-    #[test]
-    fn unknown_characters_render_as_blanks_rather_than_panicking() {
-        let rows = big_digits("?");
-        assert!(rows.iter().all(|r| r.trim().is_empty()));
     }
 
     #[test]
