@@ -18,17 +18,17 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     // conditions; on any other day it shows that day's summary, so arrowing
     // through the chart has somewhere to put its answer.
     let day = weather.daily.get(selected);
-    let showing_now = selected == weather.today_index || day.is_none();
+    let showing_today = selected == weather.today_index || day.is_none();
 
-    let when = if showing_now {
-        "Now".to_string()
+    let when = if showing_today {
+        "Today".to_string()
     } else {
-        day.map_or_else(|| "Now".to_string(), |d| long_date(&d.date))
+        day.map_or_else(|| "Today".to_string(), |d| long_date(&d.date))
     };
 
     let name = app.location.as_deref().unwrap_or(&weather.location);
 
-    let condition = if showing_now {
+    let condition = if showing_today {
         weather.current.code.map_or(UNKNOWN, description)
     } else {
         day.map_or(UNKNOWN, |d| description(d.code))
@@ -87,7 +87,7 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
 
     // The block font already has a '-' glyph, so a missing reading renders as
     // "--" at the same scale rather than collapsing the layout.
-    let temp = if showing_now {
+    let temp = if showing_today {
         weather
             .current
             .temp_c
@@ -136,7 +136,7 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     // A leading blank keeps the labels level with the digits.
     let mut details = vec![Line::from("")];
     details.extend(match day {
-        Some(d) if showing_now => now_details(weather, d, unit),
+        Some(d) if showing_today => now_details(weather, d, unit),
         Some(d) => day_details(weather, d, unit),
         None => Vec::new(),
     });
@@ -144,7 +144,7 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     frame.render_widget(Paragraph::new(details), detail_area);
 }
 
-/// Widths of the two columns in the "Now" pane, centred as a pair. The hero
+/// Widths of the two columns in the current pane, centred as a pair. The hero
 /// holds three digits and the unit symbol, sized from the font rather than
 /// restated here.
 const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
