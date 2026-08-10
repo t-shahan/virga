@@ -36,6 +36,15 @@ impl Unit {
         }
     }
 
+    /// Hundredths of an inch are a meaningful amount of rain; hundredths of a
+    /// millimetre are noise, and the extra digit costs column width.
+    pub fn precip_decimals(self) -> usize {
+        match self {
+            Unit::Metric => 1,
+            Unit::Imperial => 2,
+        }
+    }
+
     pub fn precip_label(self) -> &'static str {
         match self {
             Unit::Metric => "mm",
