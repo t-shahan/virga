@@ -156,7 +156,7 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
 /// holds three digits and the unit symbol, sized from the font rather than
 /// restated here.
 const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
-const DETAIL_WIDTH: u16 = 30;
+const DETAIL_WIDTH: u16 = 34;
 /// Columns between the hero and the details.
 const COLUMN_GUTTER: u16 = 3;
 /// Columns kept clear between the two border titles.
@@ -219,16 +219,33 @@ fn high_low(day: &DailyForecast, unit: Unit) -> String {
     )
 }
 
+/// Chance and amount are different measurements, and showing only the amount
+/// read as a contradiction against the forecast table's percentage — a day can
+/// carry a 47% chance and still be forecast no measurable accumulation.
 fn rain_line(day: &DailyForecast, unit: Unit) -> String {
-    match (day.precip_mm, day.precip_hours) {
-        (Some(mm), Some(h)) if mm > 0.0 => format!(
-            "{:.2} {} over {:.0} h",
+    let amount = match (day.precip_mm, day.precip_hours) {
+        (Some(mm), Some(h)) if mm > 0.0 => Some(format!(
+            "{:.*} {} / {:.0} h",
+            unit.precip_decimals(),
             unit.precip(mm),
             unit.precip_label(),
             h
-        ),
-        (Some(_), _) => "none".to_string(),
-        _ => UNKNOWN.to_string(),
+        )),
+        (Some(mm), None) if mm > 0.0 => Some(format!(
+            "{:.*} {}",
+            unit.precip_decimals(),
+            unit.precip(mm),
+            unit.precip_label()
+        )),
+        (Some(_), _) => Some("none".to_string()),
+        _ => None,
+    };
+
+    match (day.rain_chance, amount) {
+        (Some(chance), Some(amount)) => format!("{chance}% · {amount}"),
+        (Some(chance), None) => format!("{chance}% chance"),
+        (None, Some(amount)) => amount,
+        (None, None) => UNKNOWN.to_string(),
     }
 }
 
@@ -411,6 +428,7 @@ mod tests {
         let mut w = Weather::fixture(3, 1);
         let day = &mut w.daily[1];
         day.precip_mm = None;
+        day.rain_chance = None;
         day.gust_kph = None;
         day.wind_kph = None;
         day.daylight_secs = None;
@@ -418,6 +436,17 @@ mod tests {
         assert_eq!(rain_line(&w.daily[1], Unit::Metric), UNKNOWN);
         assert_eq!(daylight_line(&w.daily[1]), UNKNOWN);
         assert_eq!(wind_line(None, None, &w.daily[1], Unit::Metric), UNKNOWN);
+    }
+
+    /// Knowing the chance but not the amount is still worth saying — it beats
+    /// reporting the whole line as unavailable.
+    #[test]
+    fn rain_falls_back_to_the_chance_alone() {
+        let mut w = Weather::fixture(3, 1);
+        w.daily[1].precip_mm = None;
+        w.daily[1].rain_chance = Some(40);
+
+        assert_eq!(rain_line(&w.daily[1], Unit::Metric), "40% chance");
     }
 
     const CITY: &str = "Frederick, Maryland, United States";
@@ -592,6 +621,52 @@ mod tests {
                 assert!(text.contains(label), "width {width} lost {label:?}");
             }
         }
+    }
+
+    /// Every detail value must fit its column, or it is clipped mid-word. The
+    /// rain line is the widest and the easiest to overflow.
+    #[test]
+    fn detail_values_fit_the_column() {
+        let room = (DETAIL_WIDTH - 12) as usize; // label is padded to 12
+        let mut w = Weather::fixture(3, 1);
+
+        // A tropical-storm day in metric is the widest realistic case.
+        w.daily[1].precip_mm = Some(313.5);
+        w.daily[1].precip_hours = Some(24.0);
+        w.daily[1].rain_chance = Some(100);
+        w.daily[1].gust_kph = Some(120.0);
+
+        for unit in [Unit::Metric, Unit::Imperial] {
+            for value in [
+                rain_line(&w.daily[1], unit),
+                wind_line(w.daily[1].wind_kph, w.daily[1].gust_kph, &w.daily[1], unit),
+                high_low(&w.daily[1], unit),
+                daylight_line(&w.daily[1]),
+            ] {
+                assert!(
+                    value.chars().count() <= room,
+                    "{unit:?}: {value:?} is {} wide, column allows {room}",
+                    value.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rain_shows_chance_alongside_amount() {
+        let mut w = Weather::fixture(3, 1);
+        let day = &mut w.daily[1];
+
+        day.rain_chance = Some(47);
+        day.precip_mm = Some(0.0);
+        assert_eq!(rain_line(&w.daily[1], Unit::Imperial), "47% · none");
+
+        w.daily[1].precip_mm = Some(25.4);
+        w.daily[1].precip_hours = Some(3.0);
+        assert_eq!(
+            rain_line(&w.daily[1], Unit::Imperial),
+            "47% · 1.00 in / 3 h"
+        );
     }
 
     #[test]
