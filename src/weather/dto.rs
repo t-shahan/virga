@@ -200,7 +200,7 @@ mod tests {
     }
 
     /// Every current reading null and `timezone` absent entirely. The forecast
-    /// should still come through — a blank "Now" pane beats no weather at all.
+    /// should still come through — a blank current pane beats no weather at all.
     #[test]
     fn tolerates_null_current_readings() {
         let json = r#"{
