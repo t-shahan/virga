@@ -28,10 +28,11 @@ const SIDE_BY_SIDE_MIN: u16 = forecast::TABLE_FULL + GUTTER + chart::COMFORTABLE
 
 const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 
-/// Below this the panes cannot show anything useful, so say so plainly rather
-/// than rendering a clipped mess.
-const MIN_WIDTH: u16 = 44;
-const MIN_HEIGHT: u16 = 22;
+/// Below this even the detail column clips mid-word, so say so plainly rather
+/// than rendering a broken layout. Deliberately generous: an earlier attempt
+/// set this from the *comfortable* layout and rejected an ordinary 100x20.
+const MIN_WIDTH: u16 = 34;
+const MIN_HEIGHT: u16 = 12;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -164,7 +165,7 @@ mod tests {
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
 
-        for (width, height) in [(1, 1), (10, 5), (43, 21), (44, 21), (43, 22)] {
+        for (width, height) in [(1, 1), (10, 5), (33, 11), (34, 11), (33, 12)] {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
             t.draw(|f| render(f, &app)).unwrap();
 
