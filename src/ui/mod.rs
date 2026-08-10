@@ -7,13 +7,11 @@ mod current;
 mod forecast;
 mod legend;
 mod search;
-mod top;
 
 use current::current_area_render;
 use forecast::{chart_area_render, forecast_area_render};
 use legend::keybind_legend_render;
 use search::search_render;
-use top::top_area_render;
 
 /// Shown wherever the API reported no value for a reading.
 const UNKNOWN: &str = "unavailable";
@@ -29,12 +27,10 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::Weather => match &app.weather {
             Fetch::Ready(w) => {
-                let [top_area, current_area, rest] = Layout::vertical([
-                    Constraint::Length(4),
-                    Constraint::Length(8),
-                    Constraint::Fill(1),
-                ])
-                .areas(content);
+                // City and day live in the pane's border now, so the separate
+                // header box is gone and its rows go to the chart.
+                let [current_area, rest] =
+                    Layout::vertical([Constraint::Length(9), Constraint::Fill(1)]).areas(content);
 
                 // Table and chart are separate boxes now. Side by side buys
                 // rows at the cost of chart width, so it is a fallback for
@@ -74,8 +70,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                     )
                 };
 
-                top_area_render(frame, app, w, top_area);
-                current_area_render(frame, w, current_area, app.unit, app.selected_day);
+                current_area_render(frame, app, w, current_area);
                 forecast_area_render(frame, w, forecast_area, app.unit, app.selected_day);
                 chart_area_render(frame, w, chart_area, app.unit, app.selected_day);
             }

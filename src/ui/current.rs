@@ -1,6 +1,7 @@
+use crate::app::App;
 use crate::ui::UNKNOWN;
 use crate::units::Unit;
-use crate::weather::code::aqi_label;
+use crate::weather::code::{aqi_label, description};
 use crate::weather::model::{DailyForecast, Weather};
 use chrono::NaiveDate;
 use ratatui::Frame;
@@ -9,26 +10,28 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-pub(super) fn current_area_render(
-    frame: &mut Frame,
-    weather: &Weather,
-    area: Rect,
-    unit: Unit,
-    selected: usize,
-) {
+pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weather, area: Rect) {
+    let unit = app.unit;
+    let selected = app.selected_day;
     // The pane doubles as the day inspector. On today it shows live current
     // conditions; on any other day it shows that day's summary, so arrowing
     // through the chart has somewhere to put its answer.
     let day = weather.daily.get(selected);
     let showing_now = selected == weather.today_index || day.is_none();
 
-    let title = if showing_now {
+    let when = if showing_now {
         "Now".to_string()
     } else {
         day.map_or_else(|| "Now".to_string(), |d| long_date(&d.date))
     };
 
-    let block = Block::bordered().title(title);
+    let name = app.location.as_deref().unwrap_or(&weather.location);
+
+    // Both ends of the border carry text, so the identity costs no interior
+    // rows at all — the chrome is being drawn either way.
+    let block = Block::bordered()
+        .title_top(Line::from(name.to_uppercase()).bold().blue().left_aligned())
+        .title_top(Line::from(when).dark_gray().right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -77,9 +80,17 @@ pub(super) fn current_area_render(
             }
         })
         .collect();
-    // One blank row so five rows of digits sit centred in six.
+    // The condition reads as a caption to the temperature it describes.
+    let condition = if showing_now {
+        weather.current.code.map_or(UNKNOWN, description)
+    } else {
+        day.map_or(UNKNOWN, |d| description(d.code))
+    };
+
     let mut hero_lines = vec![Line::from("")];
     hero_lines.extend(hero);
+    hero_lines.push(Line::from(condition).dark_gray());
+
     frame.render_widget(
         Paragraph::new(hero_lines).alignment(Alignment::Center),
         hero_area,
@@ -89,11 +100,13 @@ pub(super) fn current_area_render(
     // than any other day. Today swaps the period comparison for air quality,
     // which only exists for now; other days swap the live reading for the
     // day's feels-like range.
-    let details = match day {
+    // A leading blank keeps the labels level with the digits.
+    let mut details = vec![Line::from("")];
+    details.extend(match day {
         Some(d) if showing_now => now_details(weather, d, unit),
         Some(d) => day_details(weather, d, unit),
         None => Vec::new(),
-    };
+    });
 
     frame.render_widget(Paragraph::new(details), detail_area);
 }
