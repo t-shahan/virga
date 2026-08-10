@@ -26,7 +26,7 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
         day.map_or_else(|| "Today".to_string(), |d| long_date(&d.date))
     };
 
-    let name = app.location.as_deref().unwrap_or(&weather.location);
+    let name = app.location.label.as_str();
 
     let condition = if showing_today {
         weather.current.code.map_or(UNKNOWN, description)
@@ -388,7 +388,7 @@ fn detail_line(label: &str, value: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Fetch;
+    use crate::app::{ActiveLocation, Fetch};
 
     use crate::units::Unit;
     use crate::weather::model::Weather;
@@ -555,7 +555,10 @@ mod tests {
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
         app.selected_day = 20;
-        app.location = Some(CITY.to_string());
+        app.location = ActiveLocation {
+            label: CITY.to_string(),
+            ..Default::default()
+        };
 
         for width in [44u16, 60, 80, 120, 200] {
             let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();
@@ -606,7 +609,10 @@ mod tests {
 
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
-        app.location = Some(CITY.to_string());
+        app.location = ActiveLocation {
+            label: CITY.to_string(),
+            ..Default::default()
+        };
 
         for width in [34u16, 44, 58, 59, 80] {
             let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();

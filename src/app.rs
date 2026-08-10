@@ -13,6 +13,37 @@ pub enum Screen {
     Search,
 }
 
+/// A place the app can fetch for, with its label and coordinates in one value.
+/// They were separate before: selecting a search result stored the label and
+/// discarded the coordinates, so refresh silently fell back to the default city
+/// while the border kept showing the chosen one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveLocation {
+    pub label: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+impl Default for ActiveLocation {
+    fn default() -> Self {
+        Self {
+            label: "Frederick, Maryland, United States".to_string(),
+            lat: 39.414_27,
+            lon: -77.410_54,
+        }
+    }
+}
+
+impl From<&Location> for ActiveLocation {
+    fn from(found: &Location) -> Self {
+        Self {
+            label: found.label(),
+            lat: found.lat,
+            lon: found.lon,
+        }
+    }
+}
+
 pub struct App {
     pub screen: Screen,
     pub query: String,
@@ -24,7 +55,13 @@ pub struct App {
     /// Index into `Weather::daily` of the day being inspected. Distinct from
     /// `selected`, which tracks the search results list.
     pub selected_day: usize,
-    pub location: Option<String>,
+    /// The place the displayed weather actually describes. Only a successful
+    /// load moves it, so the label can never get ahead of the measurements.
+    pub location: ActiveLocation,
+    /// A place we have asked for but not yet heard back about. Refresh and
+    /// retry aim here, so a failed switch retries the city you asked for
+    /// rather than the one still on screen.
+    pub pending: Option<ActiveLocation>,
 }
 
 impl App {
@@ -38,8 +75,35 @@ impl App {
             tick: 0,
             selected: 0,
             selected_day: 0,
-            location: None,
+            location: ActiveLocation::default(),
+            pending: None,
         }
+    }
+
+    /// What `r` should fetch: whatever we are already chasing, else what is on
+    /// screen. Never the compiled-in default — that was the bug.
+    pub fn refresh_target(&self) -> ActiveLocation {
+        self.pending
+            .clone()
+            .unwrap_or_else(|| self.location.clone())
+    }
+
+    /// Aim at a new place. The label does not move yet; `commit` does that.
+    pub fn request(&mut self, location: ActiveLocation) -> ActiveLocation {
+        self.pending = Some(location.clone());
+        self.weather = Fetch::Loading;
+        location
+    }
+
+    /// A load arrived. Adopt the location it was for, rather than assuming it
+    /// answers the most recent request — two fetches can be in flight at once.
+    pub fn commit(&mut self, location: ActiveLocation, weather: Weather) {
+        if self.pending.as_ref() == Some(&location) {
+            self.pending = None;
+        }
+        self.selected_day = weather.today_index;
+        self.location = location;
+        self.weather = Fetch::Ready(weather);
     }
 
     /// Both directions wrap, so the window is a loop rather than a corridor.
@@ -162,6 +226,83 @@ mod tests {
         app.select_next_day();
         app.select_prev_day();
         assert_eq!(app.selected_day, 0);
+    }
+
+    fn berlin() -> ActiveLocation {
+        ActiveLocation {
+            label: "Berlin, Germany".to_string(),
+            lat: 52.52437,
+            lon: 13.41053,
+        }
+    }
+
+    /// The bug this type exists to kill: `r` used to refetch the compiled-in
+    /// default whatever city was on screen, so the user saw Frederick's weather
+    /// under Berlin's name.
+    #[test]
+    fn refresh_follows_the_location_that_loaded() {
+        let mut app = App::new();
+        assert_eq!(app.refresh_target(), ActiveLocation::default());
+
+        app.request(berlin());
+        app.commit(berlin(), Weather::fixture(5, 2));
+
+        assert_eq!(app.refresh_target(), berlin());
+        assert_eq!(app.location, berlin(), "the label followed the fetch");
+    }
+
+    /// Refresh aims at the request in flight, not the city still on screen —
+    /// otherwise a retry after a failed switch quietly reverts your choice.
+    #[test]
+    fn refresh_retries_the_place_that_was_asked_for() {
+        let mut app = App::new();
+        app.commit(ActiveLocation::default(), Weather::fixture(5, 2));
+
+        app.request(berlin());
+        app.weather = Fetch::Failed("timed out".to_string());
+
+        assert_eq!(app.refresh_target(), berlin(), "retry keeps chasing Berlin");
+    }
+
+    /// Until a fetch succeeds the label must keep describing the measurements
+    /// that are actually on screen.
+    #[test]
+    fn a_failed_switch_never_relabels_the_previous_weather() {
+        let mut app = App::new();
+        app.commit(ActiveLocation::default(), Weather::fixture(5, 2));
+
+        app.request(berlin());
+        app.weather = Fetch::Failed("no route to host".to_string());
+
+        assert_eq!(app.location, ActiveLocation::default());
+    }
+
+    /// Two fetches can be in flight at once — press `r`, then pick a city. The
+    /// response carries its own location, so the first cannot commit under the
+    /// second's name.
+    #[test]
+    fn a_response_commits_its_own_location_not_the_newest_request() {
+        let mut app = App::new();
+        app.request(ActiveLocation::default());
+        app.request(berlin());
+
+        app.commit(ActiveLocation::default(), Weather::fixture(5, 2));
+
+        assert_eq!(app.location, ActiveLocation::default());
+        assert_eq!(app.pending, Some(berlin()), "Berlin is still outstanding");
+    }
+
+    #[test]
+    fn a_search_result_becomes_a_fetchable_location() {
+        let found = Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52437,
+            lon: 13.41053,
+        };
+
+        assert_eq!(ActiveLocation::from(&found), berlin());
     }
 
     #[test]

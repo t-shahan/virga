@@ -83,8 +83,6 @@ pub struct DailyDto {
 
 #[derive(Debug, Deserialize)]
 pub struct ForecastDto {
-    #[serde(default)]
-    pub timezone: String,
     pub current: CurrentDto,
     pub daily: DailyDto,
 }
@@ -155,7 +153,6 @@ impl From<ForecastDto> for Weather {
             .unwrap_or_else(|| daily.iter().filter(|day| day.date < today).count());
 
         Self {
-            location: dto.timezone,
             current: Current {
                 temp_c: dto.current.temperature_2m,
                 feels_like_c: dto.current.apparent_temperature,
