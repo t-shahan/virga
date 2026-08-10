@@ -40,7 +40,18 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     // each other, so each border gets an explicit budget.
     let summary = day.map_or_else(String::new, |d| comparison(weather, d, unit));
 
-    let (city, condition) = top_titles(name, condition, area.width);
+    // Air quality rides the border beside the condition, where it costs no
+    // rows. Today shows the live reading; other days show that day's worst,
+    // derived from the hourly series. Days past the endpoint's horizon simply
+    // have none, and the border omits it rather than showing a placeholder.
+    let aqi = if showing_today {
+        weather.air_quality.as_ref().map(|aq| aq.us_aqi)
+    } else {
+        day.and_then(|d| d.aqi)
+    }
+    .map(|value| format!("AQI {value} {}", aqi_label(value)));
+
+    let (city, condition, aqi) = top_titles(name, condition, aqi.as_deref(), area.width);
     let (summary, when) = bottom_titles(&summary, &when, area.width);
 
     let mut block = Block::bordered()
@@ -48,7 +59,14 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
         .title_bottom(Line::from(when).white().right_aligned());
 
     if let Some(condition) = condition {
-        block = block.title_top(Line::from(condition).white().right_aligned());
+        // The rule between them is left unstyled so it takes the border's own
+        // colour, and the border appears to run behind the text.
+        let mut right = vec![Span::from(condition).white()];
+        if let Some(aqi) = aqi {
+            right.push(Span::from(TITLE_RULE));
+            right.push(Span::from(aqi).white());
+        }
+        block = block.title_top(Line::from(right).right_aligned());
     }
     if let Some(summary) = summary {
         block = block.title_bottom(Line::from(summary).dark_gray().left_aligned());
@@ -129,11 +147,7 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     // than any other day. Today swaps the period comparison for air quality,
     // which only exists for now; other days swap the live reading for the
     // day's feels-like range.
-    let details = match day {
-        Some(d) if showing_today => now_details(weather, d, unit),
-        Some(d) => day_details(weather, d, unit),
-        None => Vec::new(),
-    };
+    let details = day.map_or_else(Vec::new, |d| detail_lines(weather, d, unit, showing_today));
 
     frame.render_widget(Paragraph::new(details), detail_area);
 }
@@ -147,58 +161,53 @@ const DETAIL_WIDTH: u16 = 30;
 const COLUMN_GUTTER: u16 = 3;
 /// Columns kept clear between the two border titles.
 const TITLE_GUTTER: usize = 3;
+/// Joins the condition to the air quality. Box-drawing horizontals, so at the
+/// border's own colour the rule reads as running behind the text.
+const TITLE_RULE: &str = "───";
 
-fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
+/// One builder for both cases: the only difference is where "feels like" comes
+/// from — a live reading today, the day's range otherwise. Everything else is
+/// the same daily figure, so the two can no longer drift apart in length.
+fn detail_lines(
+    weather: &Weather,
+    day: &DailyForecast,
+    unit: Unit,
+    showing_today: bool,
+) -> Vec<Line<'static>> {
     let sym = unit.temp_symbol();
 
-    let aqi = match &weather.air_quality {
-        Some(aq) => format!("{} · {}", aq.us_aqi, aqi_label(aq.us_aqi)),
-        None => UNKNOWN.to_string(),
+    let feels = if showing_today {
+        weather.current.feels_like_c.map_or_else(
+            || UNKNOWN.to_string(),
+            |c| format!("{:.0}{sym}", unit.temp(c)),
+        )
+    } else {
+        match (day.feels_max_c, day.feels_min_c) {
+            (Some(hi), Some(lo)) => {
+                format!("{:.0}{sym} / {:.0}{sym}", unit.temp(hi), unit.temp(lo))
+            }
+            _ => UNKNOWN.to_string(),
+        }
     };
 
-    let feels_like = weather.current.feels_like_c.map_or_else(
-        || UNKNOWN.to_string(),
-        |c| format!("{:.0}{sym}", unit.temp(c)),
-    );
-
-    let wind = wind_line(
-        today.wind_kph.or(weather.current.wind_kph),
-        today.gust_kph,
-        today,
-        unit,
-    );
-
-    vec![
-        detail_line("feels like", &feels_like),
-        detail_line("high / low", &high_low(today, unit)),
-        detail_line("rain", &rain_line(today, unit)),
-        detail_line("wind", &wind),
-        detail_line("daylight", &daylight_line(today)),
-        detail_line("air quality", &aqi),
-    ]
-}
-
-fn day_details(_weather: &Weather, day: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
-    let sym = unit.temp_symbol();
-
-    let feels = match (day.feels_max_c, day.feels_min_c) {
-        (Some(hi), Some(lo)) => format!("{:.0}{sym} / {:.0}{sym}", unit.temp(hi), unit.temp(lo)),
-        _ => UNKNOWN.to_string(),
+    let wind = if showing_today {
+        wind_line(
+            day.wind_kph.or(weather.current.wind_kph),
+            day.gust_kph,
+            day,
+            unit,
+        )
+    } else {
+        wind_line(day.wind_kph, day.gust_kph, day, unit)
     };
 
     vec![
         detail_line("feels like", &feels),
         detail_line("high / low", &high_low(day, unit)),
         detail_line("rain", &rain_line(day, unit)),
-        detail_line("wind", &wind_line(day.wind_kph, day.gust_kph, day, unit)),
+        detail_line("wind", &wind),
         detail_line("daylight", &daylight_line(day)),
-        detail_line("uv index", &uv_line(day)),
     ]
-}
-
-fn uv_line(day: &DailyForecast) -> String {
-    day.uv_index
-        .map_or_else(|| UNKNOWN.to_string(), |uv| format!("{uv:.0}"))
 }
 
 fn high_low(day: &DailyForecast, unit: Unit) -> String {
@@ -294,22 +303,35 @@ fn title_room(width: u16) -> usize {
     width.saturating_sub(4) as usize
 }
 
-/// City left, condition right. The city is the identity, so the condition is
-/// what goes when they will not both fit.
-fn top_titles(name: &str, condition: &str, width: u16) -> (String, Option<String>) {
+/// City left; condition and air quality right. The city is the identity, so it
+/// is clipped last; air quality is supplementary, so it goes first.
+fn top_titles(
+    name: &str,
+    condition: &str,
+    aqi: Option<&str>,
+    width: u16,
+) -> (String, Option<String>, Option<String>) {
     let available = title_room(width);
     let name = name.to_uppercase();
     let len = |s: &str| s.chars().count();
+    let city = len(&name) + TITLE_GUTTER;
 
-    if len(&name) + TITLE_GUTTER + len(condition) <= available {
-        return (name, Some(condition.to_string()));
+    if let Some(aqi) = aqi {
+        let right = len(condition) + TITLE_RULE.chars().count() + len(aqi);
+        if city + right <= available {
+            return (name, Some(condition.to_string()), Some(aqi.to_string()));
+        }
+    }
+
+    if city + len(condition) <= available {
+        return (name, Some(condition.to_string()), None);
     }
 
     if len(&name) <= available {
-        return (name, None);
+        return (name, None, None);
     }
 
-    (truncate(&name, available), None)
+    (truncate(&name, available), None, None)
 }
 
 /// Comparison left, day right. The day is what changes as you arrow around, so
@@ -353,17 +375,19 @@ mod tests {
     use crate::weather::model::Weather;
 
     /// Today used to carry fewer lines than any other day, which read as a gap
-    /// rather than a difference.
+    /// rather than a difference. They must also match the digit block's row
+    /// count, or the hero cannot sit level with them.
     #[test]
-    fn today_and_other_days_carry_the_same_number_of_lines() {
+    fn both_branches_produce_one_line_per_digit_row() {
         let w = Weather::fixture(22, 14);
-        let today = &w.daily[14];
-        let other = &w.daily[3];
 
-        assert_eq!(
-            now_details(&w, today, Unit::Imperial).len(),
-            day_details(&w, other, Unit::Imperial).len()
-        );
+        for (day, today) in [(&w.daily[14], true), (&w.daily[3], false)] {
+            assert_eq!(
+                detail_lines(&w, day, Unit::Imperial, today).len(),
+                DIGIT_ROWS,
+                "today = {today}"
+            );
+        }
     }
 
     #[test]
@@ -398,26 +422,47 @@ mod tests {
 
     const CITY: &str = "Frederick, Maryland, United States";
 
+    const AQI: &str = "AQI 54 Moderate";
+
     #[test]
-    fn top_shows_the_condition_when_there_is_room() {
-        let (city, condition) = top_titles(CITY, "Drizzle", 120);
+    fn top_shows_condition_and_air_quality_when_there_is_room() {
+        let (city, condition, aqi) = top_titles(CITY, "Drizzle", Some(AQI), 120);
         assert_eq!(city, CITY.to_uppercase());
         assert_eq!(condition.as_deref(), Some("Drizzle"));
+        assert_eq!(aqi.as_deref(), Some(AQI));
     }
 
-    /// The city is the identity, so the condition is what goes.
+    /// Air quality is supplementary, so it is the first thing to go.
+    #[test]
+    fn top_drops_air_quality_before_the_condition() {
+        let (city, condition, aqi) = top_titles(CITY, "Drizzle", Some(AQI), 62);
+        assert_eq!(city, CITY.to_uppercase());
+        assert_eq!(condition.as_deref(), Some("Drizzle"), "condition survived");
+        assert_eq!(aqi, None);
+    }
+
+    /// The city is the identity, so the condition goes before it is clipped.
     #[test]
     fn top_drops_the_condition_before_clipping_the_city() {
-        let (city, condition) = top_titles(CITY, "Thunderstorm, heavy hail", 48);
+        let (city, condition, aqi) = top_titles(CITY, "Thunderstorm, heavy hail", Some(AQI), 48);
         assert_eq!(city, CITY.to_uppercase(), "the city stayed whole");
         assert_eq!(condition, None);
+        assert_eq!(aqi, None);
     }
 
     #[test]
     fn top_clips_the_city_only_as_a_last_resort() {
-        let (city, condition) = top_titles(CITY, "Drizzle", 24);
+        let (city, condition, _) = top_titles(CITY, "Drizzle", Some(AQI), 24);
         assert!(city.ends_with('…'), "the city took the cut: {city:?}");
         assert_eq!(condition, None);
+    }
+
+    /// Days beyond the endpoint's horizon have no reading at all.
+    #[test]
+    fn top_omits_air_quality_when_there_is_none() {
+        let (_, condition, aqi) = top_titles(CITY, "Drizzle", None, 120);
+        assert_eq!(condition.as_deref(), Some("Drizzle"));
+        assert_eq!(aqi, None);
     }
 
     /// The day is what changes as you arrow around, so it is never sacrificed.
@@ -447,8 +492,11 @@ mod tests {
         for width in 20u16..=200 {
             let available = title_room(width);
 
-            let (city, condition) = top_titles(CITY, "Thunderstorm, heavy hail", width);
-            let used = city.chars().count() + condition.map_or(0, |c| c.chars().count());
+            let (city, condition, aqi) =
+                top_titles(CITY, "Thunderstorm, heavy hail", Some(AQI), width);
+            let used = city.chars().count()
+                + condition.map_or(0, |c| c.chars().count())
+                + aqi.map_or(0, |a| a.chars().count() + TITLE_RULE.chars().count());
             assert!(used <= available, "top at {width}: {used} of {available}");
 
             let (summary, when) =

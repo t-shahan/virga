@@ -1,6 +1,9 @@
-use crate::weather::model::{Current, DailyForecast, Location, Weather};
+use crate::weather::model::{
+    AirQuality, AirQualityReport, Current, DailyForecast, Location, Weather,
+};
 use chrono::Local;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct GeocodeResultDto {
@@ -130,6 +133,7 @@ impl From<ForecastDto> for Weather {
                     rain_chance: at(&day.precipitation_probability_max, i),
                     wind_kph: at(&day.wind_speed_10m_max, i),
                     uv_index: at(&day.uv_index_max, i),
+                    aqi: None,
                     sunrise: at_owned(&day.sunrise, i),
                     sunset: at_owned(&day.sunset, i),
                     feels_max_c: at(&day.apparent_temperature_max, i),
@@ -168,6 +172,42 @@ impl From<ForecastDto> for Weather {
 #[derive(Debug, Deserialize)]
 pub struct AqiDto {
     pub current: Option<AqiCurrentDto>,
+    pub hourly: Option<AqiHourlyDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AqiHourlyDto {
+    #[serde(default)]
+    pub time: Vec<String>,
+    #[serde(default)]
+    pub us_aqi: Vec<Option<u16>>,
+}
+
+impl From<AqiDto> for AirQualityReport {
+    fn from(dto: AqiDto) -> Self {
+        let current = dto
+            .current
+            .and_then(|current| current.us_aqi)
+            .map(|us_aqi| AirQuality { us_aqi });
+
+        // The endpoint offers no daily aggregation, so collapse the hourly
+        // series to a maximum per date. The max is the figure worth showing:
+        // it is the worst the air got, not an average that hides a bad hour.
+        let mut daily_max: HashMap<String, u16> = HashMap::new();
+        if let Some(hourly) = dto.hourly {
+            for (stamp, value) in hourly.time.into_iter().zip(hourly.us_aqi) {
+                let (Some(value), Some(date)) = (value, stamp.get(..10)) else {
+                    continue;
+                };
+                daily_max
+                    .entry(date.to_string())
+                    .and_modify(|worst| *worst = (*worst).max(value))
+                    .or_insert(value);
+            }
+        }
+
+        Self { current, daily_max }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +364,41 @@ mod tests {
         assert!(day.uv_index.is_none());
         assert!(day.precip_mm.is_none());
         assert!(day.daylight_secs.is_none());
+    }
+
+    /// The endpoint has no daily aggregation, so per-day figures come from
+    /// collapsing the hourly series. The maximum is what matters — an average
+    /// would hide the hour the air was actually bad.
+    #[test]
+    fn hourly_air_quality_collapses_to_a_daily_maximum() {
+        let json = r#"{
+            "current": {"us_aqi": 68},
+            "hourly": {
+                "time": ["2026-08-10T00:00", "2026-08-10T01:00", "2026-08-10T02:00",
+                         "2026-08-11T00:00", "2026-08-11T01:00"],
+                "us_aqi": [40, 102, null, 55, 51]
+            }
+        }"#;
+
+        let report: AirQualityReport = serde_json::from_str::<AqiDto>(json).unwrap().into();
+
+        assert_eq!(report.current.map(|c| c.us_aqi), Some(68));
+        assert_eq!(report.daily_max.get("2026-08-10").copied(), Some(102));
+        assert_eq!(report.daily_max.get("2026-08-11").copied(), Some(55));
+        assert_eq!(
+            report.daily_max.get("2026-08-12"),
+            None,
+            "uncovered days absent"
+        );
+    }
+
+    #[test]
+    fn air_quality_survives_an_absent_hourly_series() {
+        let json = r#"{"current": {"us_aqi": 42}}"#;
+        let report: AirQualityReport = serde_json::from_str::<AqiDto>(json).unwrap().into();
+
+        assert_eq!(report.current.map(|c| c.us_aqi), Some(42));
+        assert!(report.daily_max.is_empty());
     }
 
     #[test]

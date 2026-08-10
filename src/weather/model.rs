@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 pub struct Location {
     pub name: String,
     pub admin1: Option<String>,
@@ -39,6 +41,8 @@ pub struct DailyForecast {
     pub rain_chance: Option<u8>,
     pub wind_kph: Option<f64>,
     pub uv_index: Option<f64>,
+    /// Highest US AQI recorded for the day, where the endpoint covers it.
+    pub aqi: Option<u16>,
     /// ISO timestamps, e.g. "2026-08-09T06:17".
     pub sunrise: Option<String>,
     pub sunset: Option<String>,
@@ -59,6 +63,15 @@ pub struct Weather {
     /// Index of today within `daily`.
     pub today_index: usize,
     pub air_quality: Option<AirQuality>,
+}
+
+/// Everything one air-quality request yields: the live reading, plus a maximum
+/// for each date it covers. The endpoint has no daily aggregation, so the
+/// per-day figures are derived from its hourly series.
+#[derive(Default)]
+pub struct AirQualityReport {
+    pub current: Option<AirQuality>,
+    pub daily_max: HashMap<String, u16>,
 }
 
 pub struct AirQuality {
@@ -87,6 +100,7 @@ impl Weather {
                     rain_chance: Some(10),
                     wind_kph: Some(12.0),
                     uv_index: Some(6.0),
+                    aqi: Some(42),
                     sunrise: Some(format!("2026-08-{:02}T06:00", i + 1)),
                     sunset: Some(format!("2026-08-{:02}T20:00", i + 1)),
                     feels_max_c: Some(22.0 + i as f64),

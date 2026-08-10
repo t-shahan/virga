@@ -2,7 +2,7 @@ use crate::weather::dto::AqiDto;
 use crate::weather::dto::ForecastDto;
 use crate::weather::dto::GeocodeDto;
 use crate::weather::dto::GeocodeResultDto;
-use crate::weather::model::AirQuality;
+use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use anyhow::Result;
@@ -41,10 +41,15 @@ pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
     let dto: ForecastDto = response.body_mut().read_json()?;
     let mut weather: Weather = dto.into();
 
-    weather.air_quality = match aqi.join() {
-        Ok(Ok(aq)) => aq,
-        _ => None,
+    let report = match aqi.join() {
+        Ok(Ok(report)) => report,
+        _ => AirQualityReport::default(),
     };
+
+    weather.air_quality = report.current;
+    for day in &mut weather.daily {
+        day.aqi = report.daily_max.get(&day.date).copied();
+    }
 
     Ok(weather)
 }
@@ -67,16 +72,48 @@ pub fn search_locations(query: &str) -> Result<Vec<Location>> {
         .collect())
 }
 
-pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<Option<AirQuality>> {
-    let url = format!(
-        "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=us_aqi&current=us_aqi&domains=cams_global"
-    );
+pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<AirQualityReport> {
+    // The window matches the forecast request so nearly every day the user can
+    // browse to carries a figure. Coverage runs out a couple of days short of
+    // the forecast horizon, which the UI shows as absence rather than zero.
+    let mut response = agent()
+        .get("https://air-quality-api.open-meteo.com/v1/air-quality")
+        .query("latitude", lat.to_string())
+        .query("longitude", lon.to_string())
+        .query("current", "us_aqi")
+        .query("hourly", "us_aqi")
+        .query("timezone", "auto")
+        .query("past_days", "14")
+        .query("forecast_days", "7")
+        .query("domains", "cams_global")
+        .call()?;
 
-    let mut response = agent().get(&url).call()?;
     let dto: AqiDto = response.body_mut().read_json()?;
 
-    Ok(dto
-        .current
-        .and_then(|current| current.us_aqi)
-        .map(|us_aqi| AirQuality { us_aqi }))
+    Ok(dto.into())
+}
+
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn real_fetch_carries_per_day_air_quality() {
+        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch");
+        let covered = weather.daily.iter().filter(|d| d.aqi.is_some()).count();
+
+        println!(
+            "current AQI: {:?}",
+            weather.air_quality.as_ref().map(|a| a.us_aqi)
+        );
+        println!("days: {}  with AQI: {covered}", weather.daily.len());
+        for d in &weather.daily {
+            println!("  {}  high {:>5.1}C  aqi {:?}", d.date, d.high_c, d.aqi);
+        }
+        assert!(
+            covered > 15,
+            "expected most of the window covered, got {covered}"
+        );
+    }
 }
