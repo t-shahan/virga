@@ -34,23 +34,25 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
         day.map_or(UNKNOWN, |d| description(d.code))
     };
 
-    // Both ends of the border carry text, so the identity costs no interior
-    // rows at all — the chrome is being drawn either way. Nothing stops the two
-    // titles overwriting each other, so the budget is worked out explicitly.
-    let (left, condition, when) = border_titles(name, condition, &when, area.width);
+    // The period comparison earns its place on the border rather than in the
+    // detail column: it is a sentence, not a reading, and moving it there frees
+    // an interior row. Nothing stops two titles on the same row overwriting
+    // each other, so each border gets an explicit budget.
+    let summary = day.map_or_else(String::new, |d| comparison(weather, d, unit));
 
-    // The separator is left unstyled so it takes the border's own colour and
-    // the line appears to run behind the text rather than beside it.
-    let mut right = Vec::new();
+    let (city, condition) = top_titles(name, condition, area.width);
+    let (summary, when) = bottom_titles(&summary, &when, area.width);
+
+    let mut block = Block::bordered()
+        .title_top(Line::from(city).bold().blue().left_aligned())
+        .title_bottom(Line::from(when).white().right_aligned());
+
     if let Some(condition) = condition {
-        right.push(Span::from(condition).white());
-        right.push(Span::from(TITLE_SEPARATOR));
+        block = block.title_top(Line::from(condition).white().right_aligned());
     }
-    right.push(Span::from(when).white());
-
-    let block = Block::bordered()
-        .title_top(Line::from(left).bold().blue().left_aligned())
-        .title_top(Line::from(right).right_aligned());
+    if let Some(summary) = summary {
+        block = block.title_bottom(Line::from(summary).dark_gray().left_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -119,27 +121,19 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
             }
         })
         .collect();
-    let mut hero_lines = vec![Line::from("")];
-    hero_lines.extend(hero);
-
     if let Some(hero_area) = hero_area {
-        frame.render_widget(
-            Paragraph::new(hero_lines).alignment(Alignment::Center),
-            hero_area,
-        );
+        frame.render_widget(Paragraph::new(hero).alignment(Alignment::Center), hero_area);
     }
 
     // Both branches produce the same number of lines so today is no thinner
     // than any other day. Today swaps the period comparison for air quality,
     // which only exists for now; other days swap the live reading for the
     // day's feels-like range.
-    // A leading blank keeps the labels level with the digits.
-    let mut details = vec![Line::from("")];
-    details.extend(match day {
+    let details = match day {
         Some(d) if showing_today => now_details(weather, d, unit),
         Some(d) => day_details(weather, d, unit),
         None => Vec::new(),
-    });
+    };
 
     frame.render_widget(Paragraph::new(details), detail_area);
 }
@@ -153,9 +147,6 @@ const DETAIL_WIDTH: u16 = 30;
 const COLUMN_GUTTER: u16 = 3;
 /// Columns kept clear between the two border titles.
 const TITLE_GUTTER: usize = 3;
-/// Joins the condition to the day. Box-drawing horizontals, so at the border's
-/// own colour the line reads as running behind the text.
-const TITLE_SEPARATOR: &str = "───";
 
 fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
     let sym = unit.temp_symbol();
@@ -187,7 +178,7 @@ fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line
     ]
 }
 
-fn day_details(weather: &Weather, day: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
+fn day_details(_weather: &Weather, day: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
     let sym = unit.temp_symbol();
 
     let feels = match (day.feels_max_c, day.feels_min_c) {
@@ -201,8 +192,13 @@ fn day_details(weather: &Weather, day: &DailyForecast, unit: Unit) -> Vec<Line<'
         detail_line("rain", &rain_line(day, unit)),
         detail_line("wind", &wind_line(day.wind_kph, day.gust_kph, day, unit)),
         detail_line("daylight", &daylight_line(day)),
-        Line::from(comparison(weather, day, unit)).dark_gray(),
+        detail_line("uv index", &uv_line(day)),
     ]
+}
+
+fn uv_line(day: &DailyForecast) -> String {
+    day.uv_index
+        .map_or_else(|| UNKNOWN.to_string(), |uv| format!("{uv:.0}"))
 }
 
 fn high_low(day: &DailyForecast, unit: Unit) -> String {
@@ -293,28 +289,40 @@ fn long_date(date: &str) -> String {
 /// Fits the city, condition and day into the border, dropping detail rather
 /// than letting the two titles overwrite each other. The day matters most —
 /// it is what changes as you arrow around — then the city, then the condition.
-fn border_titles(
-    name: &str,
-    condition: &str,
-    when: &str,
-    width: u16,
-) -> (String, Option<String>, String) {
-    // Two corners, plus a column of breathing room inside each.
-    let available = width.saturating_sub(4) as usize;
+/// Two corners, plus a column of breathing room inside each.
+fn title_room(width: u16) -> usize {
+    width.saturating_sub(4) as usize
+}
+
+/// City left, condition right. The city is the identity, so the condition is
+/// what goes when they will not both fit.
+fn top_titles(name: &str, condition: &str, width: u16) -> (String, Option<String>) {
+    let available = title_room(width);
     let name = name.to_uppercase();
     let len = |s: &str| s.chars().count();
 
-    let with_condition = len(condition) + TITLE_SEPARATOR.chars().count() + len(when);
-    if len(&name) + TITLE_GUTTER + with_condition <= available {
-        return (name, Some(condition.to_string()), when.to_string());
+    if len(&name) + TITLE_GUTTER + len(condition) <= available {
+        return (name, Some(condition.to_string()));
     }
 
-    if len(&name) + TITLE_GUTTER + len(when) <= available {
-        return (name, None, when.to_string());
+    if len(&name) <= available {
+        return (name, None);
     }
 
-    let room = available.saturating_sub(TITLE_GUTTER + len(when));
-    (truncate(&name, room), None, when.to_string())
+    (truncate(&name, available), None)
+}
+
+/// Comparison left, day right. The day is what changes as you arrow around, so
+/// it is never the one sacrificed.
+fn bottom_titles(summary: &str, when: &str, width: u16) -> (Option<String>, String) {
+    let available = title_room(width);
+    let len = |s: &str| s.chars().count();
+
+    if !summary.is_empty() && len(summary) + TITLE_GUTTER + len(when) <= available {
+        return (Some(summary.to_string()), when.to_string());
+    }
+
+    (None, when.to_string())
 }
 
 /// Clip to `width` on a character boundary, marking the cut so a truncated
@@ -391,49 +399,71 @@ mod tests {
     const CITY: &str = "Frederick, Maryland, United States";
 
     #[test]
-    fn border_shows_everything_when_there_is_room() {
-        let (left, condition, when) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 120);
-        assert_eq!(left, CITY.to_uppercase());
+    fn top_shows_the_condition_when_there_is_room() {
+        let (city, condition) = top_titles(CITY, "Drizzle", 120);
+        assert_eq!(city, CITY.to_uppercase());
         assert_eq!(condition.as_deref(), Some("Drizzle"));
-        assert_eq!(when, "Sun, Aug 16");
     }
 
-    /// The condition is the first thing to go: the day is what changes as you
-    /// arrow around, and the city is the identity.
+    /// The city is the identity, so the condition is what goes.
     #[test]
-    fn border_drops_the_condition_before_the_day() {
-        let (left, condition, when) =
-            border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", 60);
-        assert_eq!(left, CITY.to_uppercase());
+    fn top_drops_the_condition_before_clipping_the_city() {
+        let (city, condition) = top_titles(CITY, "Thunderstorm, heavy hail", 48);
+        assert_eq!(city, CITY.to_uppercase(), "the city stayed whole");
         assert_eq!(condition, None);
-        assert_eq!(when, "Sun, Aug 16");
     }
 
     #[test]
-    fn border_clips_the_city_last_and_keeps_the_day_whole() {
-        let (left, _, when) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 30);
-        assert_eq!(when, "Sun, Aug 16", "the day is never sacrificed");
-        assert!(left.ends_with('…'), "the city took the cut: {left:?}");
+    fn top_clips_the_city_only_as_a_last_resort() {
+        let (city, condition) = top_titles(CITY, "Drizzle", 24);
+        assert!(city.ends_with('…'), "the city took the cut: {city:?}");
+        assert_eq!(condition, None);
     }
 
-    /// Whatever is shown must leave a gap between the two titles at every width
-    /// the app will render at — they are drawn onto the same border row.
+    /// The day is what changes as you arrow around, so it is never sacrificed.
+    #[test]
+    fn bottom_keeps_the_day_and_drops_the_comparison() {
+        let long = "17°F above the 22-day average";
+
+        let (summary, when) = bottom_titles(long, "Fri, Aug 21", 120);
+        assert_eq!(summary.as_deref(), Some(long));
+        assert_eq!(when, "Fri, Aug 21");
+
+        let (summary, when) = bottom_titles(long, "Fri, Aug 21", 40);
+        assert_eq!(summary, None);
+        assert_eq!(when, "Fri, Aug 21");
+    }
+
+    #[test]
+    fn bottom_omits_an_empty_comparison() {
+        let (summary, _) = bottom_titles("", "Today", 120);
+        assert_eq!(summary, None);
+    }
+
+    /// Both border rows carry two titles drawn onto the same line, so neither
+    /// pair may overlap at any width the app renders at.
     #[test]
     fn border_titles_never_collide() {
         for width in 20u16..=200 {
-            let (left, condition, when) =
-                border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", width);
-            let right = condition
-                .map_or(0, |c| c.chars().count() + TITLE_SEPARATOR.chars().count())
-                + when.chars().count();
-            let used = left.chars().count() + right;
-            let available = width.saturating_sub(4) as usize;
+            let available = title_room(width);
+
+            let (city, condition) = top_titles(CITY, "Thunderstorm, heavy hail", width);
+            let used = city.chars().count() + condition.map_or(0, |c| c.chars().count());
+            assert!(used <= available, "top at {width}: {used} of {available}");
+
+            let (summary, when) =
+                bottom_titles("17°F above the 22-day average", "Fri, Aug 21", width);
+            let used = when.chars().count() + summary.map_or(0, |s| s.chars().count());
             assert!(
-                used + TITLE_GUTTER <= available || left.is_empty(),
-                "width {width}: {left:?} + {right} needs {} of {available}",
-                used + TITLE_GUTTER
+                used <= available || summary_fits_nowhere(width),
+                "bottom at {width}: {used} of {available}"
             );
         }
+    }
+
+    /// Below a certain width even the day alone exceeds the border.
+    fn summary_fits_nowhere(width: u16) -> bool {
+        title_room(width) < "Fri, Aug 21".len()
     }
 
     /// The budget is arithmetic; this checks what ratatui actually draws.
@@ -454,16 +484,25 @@ mod tests {
                 .unwrap();
 
             let buf = t.backend().buffer();
-            let top: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+            let row = |y: u16| -> String { (0..width).map(|x| buf[(x, y)].symbol()).collect() };
+            let (top, bottom) = (row(0), row(8));
 
             assert!(
-                top.contains("Aug"),
-                "width {width}: day missing from {top:?}"
+                bottom.contains("Aug"),
+                "width {width}: day missing from bottom border {bottom:?}"
             );
             assert!(
-                !top.contains("FREDERICKAug") && !top.contains("STATESAug"),
-                "width {width}: titles ran together in {top:?}"
+                top.contains("FREDERICK"),
+                "width {width}: city missing from top border {top:?}"
             );
+            // Titles running together is what a collision looks like once
+            // rendered; the border rule should always separate them.
+            for line in [&top, &bottom] {
+                assert!(
+                    line.contains('─'),
+                    "width {width}: no rule left between titles in {line:?}"
+                );
+            }
         }
     }
 
