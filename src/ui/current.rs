@@ -28,24 +28,53 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
 
     let name = app.location.as_deref().unwrap_or(&weather.location);
 
+    let condition = if showing_now {
+        weather.current.code.map_or(UNKNOWN, description)
+    } else {
+        day.map_or(UNKNOWN, |d| description(d.code))
+    };
+
     // Both ends of the border carry text, so the identity costs no interior
-    // rows at all — the chrome is being drawn either way.
+    // rows at all — the chrome is being drawn either way. Nothing stops the two
+    // titles overwriting each other, so the budget is worked out explicitly.
+    let (left, right) = border_titles(name, condition, &when, area.width);
+
     let block = Block::bordered()
-        .title_top(Line::from(name.to_uppercase()).bold().blue().left_aligned())
-        .title_top(Line::from(when).dark_gray().right_aligned());
+        .title_top(Line::from(left).bold().blue().left_aligned())
+        .title_top(Line::from(right).dark_gray().right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Centre the hero and details as one group rather than pinning them left.
-    let [content] = Layout::horizontal([Constraint::Length(HERO_WIDTH + DETAIL_WIDTH)])
+    // The block digits are decoration; the readings are the content. Rather
+    // than squeeze both and clip the digits mid-glyph, drop the hero entirely
+    // once there is not room for the pair.
+    let full = HERO_WIDTH + COLUMN_GUTTER + DETAIL_WIDTH;
+    let show_hero = inner.width >= full;
+
+    let wanted = if show_hero {
+        full
+    } else {
+        DETAIL_WIDTH.min(inner.width)
+    };
+
+    // Centre the group rather than pinning it left.
+    let [content] = Layout::horizontal([Constraint::Length(wanted)])
         .flex(Flex::Center)
         .areas(inner);
 
-    let [hero_area, detail_area] = Layout::horizontal([
-        Constraint::Length(HERO_WIDTH),
-        Constraint::Length(DETAIL_WIDTH),
-    ])
-    .areas(content);
+    // Without a gutter a three-digit temperature fills HERO_WIDTH exactly and
+    // its unit symbol lands flush against the first label.
+    let (hero_area, detail_area) = if show_hero {
+        let [hero, _gutter, detail] = Layout::horizontal([
+            Constraint::Length(HERO_WIDTH),
+            Constraint::Length(COLUMN_GUTTER),
+            Constraint::Length(DETAIL_WIDTH),
+        ])
+        .areas(content);
+        (Some(hero), detail)
+    } else {
+        (None, content)
+    };
 
     // The block font already has a '-' glyph, so a missing reading renders as
     // "--" at the same scale rather than collapsing the layout.
@@ -81,23 +110,15 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
             }
         })
         .collect();
-    // The condition reads as a caption to the temperature it describes.
-    let condition = if showing_now {
-        weather.current.code.map_or(UNKNOWN, description)
-    } else {
-        day.map_or(UNKNOWN, |d| description(d.code))
-    };
-
     let mut hero_lines = vec![Line::from("")];
     hero_lines.extend(hero);
-    // Belt and braces: the descriptions are all inside HERO_WIDTH today, but a
-    // longer one added later would silently run into the detail column.
-    hero_lines.push(Line::from(truncate(condition, HERO_WIDTH as usize)).dark_gray());
 
-    frame.render_widget(
-        Paragraph::new(hero_lines).alignment(Alignment::Center),
-        hero_area,
-    );
+    if let Some(hero_area) = hero_area {
+        frame.render_widget(
+            Paragraph::new(hero_lines).alignment(Alignment::Center),
+            hero_area,
+        );
+    }
 
     // Both branches produce the same number of lines so today is no thinner
     // than any other day. Today swaps the period comparison for air quality,
@@ -119,6 +140,10 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
 /// restated here.
 const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
 const DETAIL_WIDTH: u16 = 30;
+/// Columns between the hero and the details.
+const COLUMN_GUTTER: u16 = 3;
+/// Columns kept clear between the two border titles.
+const TITLE_GUTTER: usize = 3;
 
 fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
     let sym = unit.temp_symbol();
@@ -253,6 +278,28 @@ fn long_date(date: &str) -> String {
     }
 }
 
+/// Fits the city, condition and day into the border, dropping detail rather
+/// than letting the two titles overwrite each other. The day matters most —
+/// it is what changes as you arrow around — then the city, then the condition.
+fn border_titles(name: &str, condition: &str, when: &str, width: u16) -> (String, String) {
+    // Two corners, plus a column of breathing room inside each.
+    let available = width.saturating_sub(4) as usize;
+    let name = name.to_uppercase();
+    let len = |s: &str| s.chars().count();
+
+    let full = format!("{condition} · {when}");
+    if len(&name) + TITLE_GUTTER + len(&full) <= available {
+        return (name, full);
+    }
+
+    if len(&name) + TITLE_GUTTER + len(when) <= available {
+        return (name, when.to_string());
+    }
+
+    let room = available.saturating_sub(TITLE_GUTTER + len(when));
+    (truncate(&name, room), when.to_string())
+}
+
 /// Clip to `width` on a character boundary, marking the cut so a truncated
 /// value cannot be mistaken for a short one.
 fn truncate(text: &str, width: usize) -> String {
@@ -275,6 +322,7 @@ fn detail_line(label: &str, value: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Fetch;
 
     use crate::units::Unit;
     use crate::weather::model::Weather;
@@ -323,6 +371,79 @@ mod tests {
         assert_eq!(wind_line(None, None, &w.daily[1], Unit::Metric), UNKNOWN);
     }
 
+    const CITY: &str = "Frederick, Maryland, United States";
+
+    #[test]
+    fn border_shows_everything_when_there_is_room() {
+        let (left, right) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 120);
+        assert_eq!(left, CITY.to_uppercase());
+        assert_eq!(right, "Drizzle · Sun, Aug 16");
+    }
+
+    /// The condition is the first thing to go: the day is what changes as you
+    /// arrow around, and the city is the identity.
+    #[test]
+    fn border_drops_the_condition_before_the_day() {
+        let (left, right) = border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", 60);
+        assert_eq!(left, CITY.to_uppercase());
+        assert_eq!(right, "Sun, Aug 16");
+    }
+
+    #[test]
+    fn border_clips_the_city_last_and_keeps_the_day_whole() {
+        let (left, right) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 30);
+        assert_eq!(right, "Sun, Aug 16", "the day is never sacrificed");
+        assert!(left.ends_with('…'), "the city took the cut: {left:?}");
+    }
+
+    /// Whatever is shown must leave a gap between the two titles at every width
+    /// the app will render at — they are drawn onto the same border row.
+    #[test]
+    fn border_titles_never_collide() {
+        for width in 20u16..=200 {
+            let (left, right) =
+                border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", width);
+            let used = left.chars().count() + right.chars().count();
+            let available = width.saturating_sub(4) as usize;
+            assert!(
+                used + TITLE_GUTTER <= available || left.is_empty(),
+                "width {width}: {left:?} + {right:?} needs {} of {available}",
+                used + TITLE_GUTTER
+            );
+        }
+    }
+
+    /// The budget is arithmetic; this checks what ratatui actually draws.
+    #[test]
+    fn rendered_border_keeps_the_day_and_never_overlaps() {
+        use crate::app::App;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.weather = Fetch::Ready(Weather::fixture(22, 14));
+        app.selected_day = 20;
+        app.location = Some(CITY.to_string());
+
+        for width in [44u16, 60, 80, 120, 200] {
+            let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();
+            t.draw(|f| current_area_render(f, &app, &Weather::fixture(22, 14), f.area()))
+                .unwrap();
+
+            let buf = t.backend().buffer();
+            let top: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+
+            assert!(
+                top.contains("Aug"),
+                "width {width}: day missing from {top:?}"
+            );
+            assert!(
+                !top.contains("FREDERICKAug") && !top.contains("STATESAug"),
+                "width {width}: titles ran together in {top:?}"
+            );
+        }
+    }
+
     #[test]
     fn truncate_marks_the_cut_and_leaves_short_text_alone() {
         assert_eq!(truncate("Clear sky", 26), "Clear sky");
@@ -334,17 +455,32 @@ mod tests {
         assert_eq!(truncate("", 4), "");
     }
 
-    /// Every description must fit the column that shows it, or it collides
-    /// with the detail column beside it.
+    /// Narrow panes drop the block digits rather than clipping them mid-glyph.
+    /// Whatever happens to the decoration, every reading must survive intact.
     #[test]
-    fn every_description_fits_the_hero_column() {
-        for code in 0u8..=99 {
-            let text = crate::weather::code::description(code);
-            assert!(
-                text.chars().count() <= HERO_WIDTH as usize,
-                "code {code}: {text:?} is {} wide, column is {HERO_WIDTH}",
-                text.chars().count()
-            );
+    fn narrow_panes_keep_the_readings_and_drop_the_digits() {
+        use crate::app::App;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.weather = Fetch::Ready(Weather::fixture(22, 14));
+        app.location = Some(CITY.to_string());
+
+        for width in [34u16, 44, 58, 59, 80] {
+            let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();
+            t.draw(|f| current_area_render(f, &app, &Weather::fixture(22, 14), f.area()))
+                .unwrap();
+
+            let buf = t.backend().buffer();
+            let text: String = (0..9u16)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol())
+                .collect();
+
+            for label in ["feels like", "high / low", "daylight"] {
+                assert!(text.contains(label), "width {width} lost {label:?}");
+            }
         }
     }
 
