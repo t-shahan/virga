@@ -53,7 +53,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                 // City and day live in the pane's border now, so the separate
                 // header box is gone and its rows go to the chart.
                 let [current_area, rest] =
-                    Layout::vertical([Constraint::Length(9), Constraint::Fill(1)]).areas(content);
+                    Layout::vertical([Constraint::Length(8), Constraint::Fill(1)]).areas(content);
 
                 // Table and chart are separate boxes now. Side by side buys
                 // rows at the cost of chart width, so it is a fallback for
