@@ -3,18 +3,29 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+mod chart;
 mod current;
 mod forecast;
 mod legend;
 mod search;
 
+use chart::chart_area_render;
 use current::current_area_render;
-use forecast::{chart_area_render, forecast_area_render};
+use forecast::forecast_area_render;
 use legend::keybind_legend_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
 const UNKNOWN: &str = "unavailable";
+
+/// Columns between the table and the chart when they sit side by side.
+const GUTTER: u16 = 3;
+/// Below this they stack instead. Splitting only pays when the table keeps
+/// every column *and* the chart keeps readable bars, so the threshold is
+/// composed from what each half needs rather than guessed at.
+const SIDE_BY_SIDE_MIN: u16 = forecast::TABLE_FULL + GUTTER + chart::COMFORTABLE_WIDTH;
+
+const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -37,13 +48,13 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                 // short windows rather than a reward for wide ones.
                 let table_rows = w.daily.len().saturating_sub(w.today_index) as u16 + 1;
                 let table_box = table_rows + 2;
-                let side_by_side = rest.width >= forecast::SIDE_BY_SIDE_MIN
-                    && rest.height < table_box + forecast::CHART_MIN + 2;
+                let side_by_side = rest.width >= SIDE_BY_SIDE_MIN
+                    && rest.height < table_box + chart::MIN_HEIGHT + 2;
 
                 let (forecast_area, chart_area) = if side_by_side {
                     let [left, _gutter, right] = Layout::horizontal([
                         Constraint::Length(forecast::TABLE_FULL + 2),
-                        Constraint::Length(forecast::GUTTER),
+                        Constraint::Length(GUTTER),
                         Constraint::Fill(1),
                     ])
                     .areas(rest);
@@ -64,7 +75,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                     (
                         table,
                         Rect {
-                            height: chart.height.min(forecast::CHART_MAX + 2),
+                            height: chart.height.min(chart::MAX_HEIGHT + 2),
                             ..chart
                         },
                     )
