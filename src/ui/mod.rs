@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 mod chart;
 mod current;
+mod digits;
 mod forecast;
 mod legend;
 mod search;
