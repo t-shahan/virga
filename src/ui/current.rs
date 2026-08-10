@@ -37,11 +37,20 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     // Both ends of the border carry text, so the identity costs no interior
     // rows at all — the chrome is being drawn either way. Nothing stops the two
     // titles overwriting each other, so the budget is worked out explicitly.
-    let (left, right) = border_titles(name, condition, &when, area.width);
+    let (left, condition, when) = border_titles(name, condition, &when, area.width);
+
+    // The separator is left unstyled so it takes the border's own colour and
+    // the line appears to run behind the text rather than beside it.
+    let mut right = Vec::new();
+    if let Some(condition) = condition {
+        right.push(Span::from(condition).white());
+        right.push(Span::from(TITLE_SEPARATOR));
+    }
+    right.push(Span::from(when).white());
 
     let block = Block::bordered()
         .title_top(Line::from(left).bold().blue().left_aligned())
-        .title_top(Line::from(right).dark_gray().right_aligned());
+        .title_top(Line::from(right).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -144,6 +153,9 @@ const DETAIL_WIDTH: u16 = 30;
 const COLUMN_GUTTER: u16 = 3;
 /// Columns kept clear between the two border titles.
 const TITLE_GUTTER: usize = 3;
+/// Joins the condition to the day. Box-drawing horizontals, so at the border's
+/// own colour the line reads as running behind the text.
+const TITLE_SEPARATOR: &str = "───";
 
 fn now_details(weather: &Weather, today: &DailyForecast, unit: Unit) -> Vec<Line<'static>> {
     let sym = unit.temp_symbol();
@@ -281,23 +293,28 @@ fn long_date(date: &str) -> String {
 /// Fits the city, condition and day into the border, dropping detail rather
 /// than letting the two titles overwrite each other. The day matters most —
 /// it is what changes as you arrow around — then the city, then the condition.
-fn border_titles(name: &str, condition: &str, when: &str, width: u16) -> (String, String) {
+fn border_titles(
+    name: &str,
+    condition: &str,
+    when: &str,
+    width: u16,
+) -> (String, Option<String>, String) {
     // Two corners, plus a column of breathing room inside each.
     let available = width.saturating_sub(4) as usize;
     let name = name.to_uppercase();
     let len = |s: &str| s.chars().count();
 
-    let full = format!("{condition} · {when}");
-    if len(&name) + TITLE_GUTTER + len(&full) <= available {
-        return (name, full);
+    let with_condition = len(condition) + TITLE_SEPARATOR.chars().count() + len(when);
+    if len(&name) + TITLE_GUTTER + with_condition <= available {
+        return (name, Some(condition.to_string()), when.to_string());
     }
 
     if len(&name) + TITLE_GUTTER + len(when) <= available {
-        return (name, when.to_string());
+        return (name, None, when.to_string());
     }
 
     let room = available.saturating_sub(TITLE_GUTTER + len(when));
-    (truncate(&name, room), when.to_string())
+    (truncate(&name, room), None, when.to_string())
 }
 
 /// Clip to `width` on a character boundary, marking the cut so a truncated
@@ -375,24 +392,27 @@ mod tests {
 
     #[test]
     fn border_shows_everything_when_there_is_room() {
-        let (left, right) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 120);
+        let (left, condition, when) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 120);
         assert_eq!(left, CITY.to_uppercase());
-        assert_eq!(right, "Drizzle · Sun, Aug 16");
+        assert_eq!(condition.as_deref(), Some("Drizzle"));
+        assert_eq!(when, "Sun, Aug 16");
     }
 
     /// The condition is the first thing to go: the day is what changes as you
     /// arrow around, and the city is the identity.
     #[test]
     fn border_drops_the_condition_before_the_day() {
-        let (left, right) = border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", 60);
+        let (left, condition, when) =
+            border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", 60);
         assert_eq!(left, CITY.to_uppercase());
-        assert_eq!(right, "Sun, Aug 16");
+        assert_eq!(condition, None);
+        assert_eq!(when, "Sun, Aug 16");
     }
 
     #[test]
     fn border_clips_the_city_last_and_keeps_the_day_whole() {
-        let (left, right) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 30);
-        assert_eq!(right, "Sun, Aug 16", "the day is never sacrificed");
+        let (left, _, when) = border_titles(CITY, "Drizzle", "Sun, Aug 16", 30);
+        assert_eq!(when, "Sun, Aug 16", "the day is never sacrificed");
         assert!(left.ends_with('…'), "the city took the cut: {left:?}");
     }
 
@@ -401,13 +421,16 @@ mod tests {
     #[test]
     fn border_titles_never_collide() {
         for width in 20u16..=200 {
-            let (left, right) =
+            let (left, condition, when) =
                 border_titles(CITY, "Thunderstorm, heavy hail", "Sun, Aug 16", width);
-            let used = left.chars().count() + right.chars().count();
+            let right = condition
+                .map_or(0, |c| c.chars().count() + TITLE_SEPARATOR.chars().count())
+                + when.chars().count();
+            let used = left.chars().count() + right;
             let available = width.saturating_sub(4) as usize;
             assert!(
                 used + TITLE_GUTTER <= available || left.is_empty(),
-                "width {width}: {left:?} + {right:?} needs {} of {available}",
+                "width {width}: {left:?} + {right} needs {} of {available}",
                 used + TITLE_GUTTER
             );
         }
