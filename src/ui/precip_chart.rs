@@ -512,6 +512,33 @@ mod tests {
         assert!(top.contains("Precipitation"), "{top:?}");
     }
 
+    /// `put` deliberately skips blank cells, which is only safe because
+    /// ratatui resets the buffer it is about to hand back. If that ever stops
+    /// being true, a redraw would keep glyphs from the frame before it — and
+    /// the chart scrolls, so almost every cell changes between frames.
+    #[test]
+    fn redrawing_leaves_nothing_behind_from_the_previous_frame() {
+        let weather = Weather::fixture(22, 14);
+        let mut reused = Terminal::new(TestBackend::new(90, 12)).unwrap();
+
+        for selected in [0usize, 40, 7, 191, 12] {
+            reused
+                .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, selected))
+                .unwrap();
+
+            let mut fresh = Terminal::new(TestBackend::new(90, 12)).unwrap();
+            fresh
+                .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, selected))
+                .unwrap();
+
+            assert_eq!(
+                reused.backend().buffer(),
+                fresh.backend().buffer(),
+                "selection {selected} kept cells from the frame before it"
+            );
+        }
+    }
+
     /// Colour reinforces the three states but must never be the only carrier.
     #[test]
     fn the_selection_is_coloured_as_well_as_shaped() {
