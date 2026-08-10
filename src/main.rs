@@ -1,4 +1,4 @@
-use crate::app::{App, Fetch, Screen};
+use crate::app::{ActiveLocation, App, Fetch, Screen};
 use crate::events::{Message, Request};
 use anyhow::Result;
 use ratatui::DefaultTerminal;
@@ -13,18 +13,6 @@ mod ui;
 mod units;
 mod weather;
 
-struct Place {
-    name: &'static str,
-    lat: f64,
-    lon: f64,
-}
-
-const DEFAULT_LOCATION: Place = Place {
-    name: "Frederick, Maryland, United States",
-    lat: 39.41427,
-    lon: -77.41054,
-};
-
 fn main() -> Result<()> {
     let terminal = ratatui::init();
     let result = run(terminal);
@@ -37,13 +25,8 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
     let (message_tx, message_rx) = mpsc::channel();
     events::spawn_worker(request_rx, message_tx);
 
-    request_tx.send(Request::Fetch {
-        lat: DEFAULT_LOCATION.lat,
-        lon: DEFAULT_LOCATION.lon,
-    })?;
-
     let mut app = App::new();
-    app.location = Some(DEFAULT_LOCATION.name.to_string());
+    request_tx.send(Request::Fetch(app.request(ActiveLocation::default())))?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
@@ -77,10 +60,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
         while let Ok(message) = message_rx.try_recv() {
             dirty = true;
             match message {
-                Message::Loaded(w) => {
-                    app.selected_day = w.today_index;
-                    app.weather = Fetch::Ready(w);
-                }
+                Message::Loaded(location, w) => app.commit(location, w),
                 Message::LoadFailed(e) => app.weather = Fetch::Failed(e),
                 Message::Located(l) => app.results = Fetch::Ready(l),
                 Message::SearchFailed(e) => app.results = Fetch::Failed(e),
@@ -106,11 +86,8 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                         Screen::Weather => match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
                             KeyCode::Char('r') => {
-                                app.weather = Fetch::Loading;
-                                request_tx.send(Request::Fetch {
-                                    lat: DEFAULT_LOCATION.lat,
-                                    lon: DEFAULT_LOCATION.lon,
-                                })?;
+                                let target = app.refresh_target();
+                                request_tx.send(Request::Fetch(app.request(target)))?;
                             }
                             KeyCode::Char('u') => {
                                 app.unit = app.unit.toggle();
@@ -132,18 +109,16 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                             }
                             KeyCode::Enter => {
                                 let picked = match &app.results {
-                                    Fetch::Ready(locations) => locations
-                                        .get(app.selected)
-                                        .map(|l| (l.lat, l.lon, l.label())),
+                                    Fetch::Ready(locations) => {
+                                        locations.get(app.selected).map(ActiveLocation::from)
+                                    }
                                     _ => None,
                                 };
 
-                                if let Some((lat, lon, label)) = picked {
-                                    app.weather = Fetch::Loading;
+                                if let Some(picked) = picked {
                                     app.results = Fetch::Idle;
                                     app.screen = Screen::Weather;
-                                    app.location = Some(label);
-                                    request_tx.send(Request::Fetch { lat, lon })?;
+                                    request_tx.send(Request::Fetch(app.request(picked)))?;
                                 } else if !app.query.is_empty() {
                                     app.results = Fetch::Loading;
                                     app.selected = 0;

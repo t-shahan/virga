@@ -56,7 +56,6 @@ pub struct DailyForecast {
 }
 
 pub struct Weather {
-    pub location: String,
     pub current: Current,
     /// Past days, today, then the forecast — in chronological order.
     pub daily: Vec<DailyForecast>,
@@ -84,7 +83,6 @@ impl Weather {
     /// 20C, with today at `today_index`.
     pub fn fixture(days: usize, today_index: usize) -> Self {
         Self {
-            location: "Fixture".to_string(),
             current: Current {
                 temp_c: Some(25.0),
                 feels_like_c: Some(26.0),
