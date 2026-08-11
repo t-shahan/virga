@@ -1,8 +1,10 @@
 # virga
 
-A terminal weather app. Current conditions, an eight-day forecast, three weeks
-of daily highs you can browse a day at a time, and an hourly precipitation
-chart — no account, no API key.
+[![CI](https://github.com/t-shahan/virga/actions/workflows/ci.yml/badge.svg)](https://github.com/t-shahan/virga/actions/workflows/ci.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+
+A terminal weather app: current conditions, an eight-day forecast, three weeks
+of daily highs, and an hourly precipitation chart — no account, no API key.
 
 *Virga* is precipitation that evaporates before it reaches the ground. It is
 also, most weeks, what the precipitation chart draws.
@@ -37,8 +39,9 @@ also, most weeks, what the precipitation chart draws.
   [l] location
 ```
 
-Press `p` for the hourly precipitation screen. Chance rises from a central
-rule, forecast amount hangs below it:
+Press `p` for the hourly precipitation screen. Chance rises from the centre
+rule, forecast amount hangs below it — a tall spike with nothing beneath it
+means "might drizzle"; tall above *and* below means take the umbrella.
 
 ```
 ┌FREDERICK, MARYLAND, UNITED STATES──────────────────────────────────Overcast┐
@@ -59,146 +62,130 @@ rule, forecast amount hangs below it:
   [u] units
 ```
 
-A tall spike with nothing beneath it means "might drizzle". Tall above *and*
-below means take the umbrella.
-
 ## Features
 
 - **Current conditions** — temperature, feels-like, wind with gusts and
   direction, precipitation, daylight length, and US air quality index.
-- **Eight-day forecast** with rain chance, max wind, UV index, sunrise and
-  sunset.
-- **Three weeks of daily highs** as a bar chart — fourteen days of history plus
-  the forecast, so today has context rather than sitting alone.
-- **Hourly precipitation** on `p`: chance and forecast amount mirrored around a
-  central rule, with "next rain in 3 h" on the border, a 24-hour running total,
-  and snow reported separately from rain.
-- **Browse any day** with the arrow keys. The top pane becomes an inspector for
-  the selected day, including how it compares to the period average.
-- **City search** against Open-Meteo's geocoder.
-- **Metric or imperial**, toggled live.
-- **Responsive** — panes drop columns, stack, or sit side by side depending on
-  the space available, down to a 34×12 terminal.
+- **Eight-day forecast** with rain chance, max wind, UV index, sunrise and sunset.
+- **Three weeks of daily highs** — fourteen days of history plus the forecast,
+  so today has context rather than sitting alone.
+- **Hourly precipitation** — chance and amount mirrored around a centre rule,
+  a next-rain countdown, a 24-hour running total, snow reported separately.
+- **Browse any day** with the arrow keys; the top pane becomes an inspector for
+  the selected day.
+- **City search** against Open-Meteo's geocoder, **metric or imperial** toggled
+  live, and a **responsive** layout down to a 34×12 terminal.
 
-## Requirements
+## Install
 
-- **Rust 1.88 or later.** Not the 1.85 that edition 2024 implies: `ratatui`
-  declares 1.88, and a dependency graph's floor is what actually binds.
-- A terminal with Unicode support. Weather icons are emoji; a font without them
-  will show replacement boxes in the forecast column but nothing else breaks.
-- An internet connection. Nothing is cached between runs.
-
-Tested on macOS (Apple Silicon). Linux and Windows are unverified — see
-[Limitations](#limitations).
-
-## Installation
-
-Straight from the repository, no clone needed:
+Requires **Rust 1.88 or later** — not the 1.85 edition 2024 implies, since
+`ratatui` declares 1.88 — a terminal with Unicode support, and an internet
+connection.
 
 ```bash
 cargo install --git https://github.com/t-shahan/virga
-```
-
-Or from a local checkout:
-
-```bash
-git clone https://github.com/t-shahan/virga
-cd virga
-cargo install --path .
-```
-
-Either way the binary lands at `~/.cargo/bin/virga`. If that directory is on
-your `PATH` — it is by default with a rustup install — you can then run:
-
-```bash
 virga
 ```
 
-To update, re-run the install; it is a copy, not a link. To remove it,
-`cargo uninstall virga-tui` — note that takes the *package* name, not the
-binary name.
+The binary lands at `~/.cargo/bin/virga`. Re-run the install to update, and
+`cargo uninstall virga-tui` to remove it — that takes the *package* name, not
+the binary name.
 
-If you would rather not install it, `cargo run --release` works from the
-project directory. Plain `cargo run` builds unoptimised and is noticeably
-slower to render.
+From a local checkout, `cargo run --release` works too; plain `cargo run`
+builds unoptimised and is noticeably slower to render.
 
-## Usage
+## Keys
 
 | Key | Action |
 |---|---|
-| `q` / `Esc` | Quit |
-| `Ctrl-C` | Quit, from any screen |
-| `←` `→` | Move through the 22-day window; wraps at both ends |
-| `n` / `Home` | Jump back to today |
-| `p` | Hourly precipitation |
+| `←` `→` | Previous / next day — or hour, on the precipitation screen; wraps |
+| `↑` `↓` | Precipitation screen: back / forward a day, keeping the time of day |
+| `n` / `Home` | Jump back to now |
+| `p` | Hourly precipitation — `b`, `Enter` or `Esc` to go back |
+| `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
-| `l` | Search for a city |
+| `q` / `Esc` / `Ctrl-C` | Quit |
 
-On the precipitation screen:
-
-| Key | Action |
-|---|---|
-| `←` `→` | Move an hour through the forecast; wraps at both ends |
-| `↑` / `↓` | Forward / back a whole day, keeping the same time of day |
-| `n` / `Home` | Jump back to the current hour |
-| `b` / `p` / `Enter` / `Esc` | Back to the weather |
-| `r` | Refetch the current location |
-| `u` | Toggle metric / imperial |
-| `l` | Search for a city |
-| `q` | Quit |
-
-The chart's centre rule marks the current hour (`┬`), the selected one (`═`)
-and midnight (`┼`), so the three stay apart without relying on colour. The box
-title carries the span on screen and the scale the lower half is drawn against
-— the two halves are percentages against inches, and are not comparable by
-height.
-
-On the search screen:
-
-| Key | Action |
-|---|---|
-| `Enter` | Search, then select the highlighted result |
-| `↑` `↓` | Move through results |
-| `Esc` | Back where you came from |
+The precipitation chart's centre rule marks the current hour (`┬`), the
+selected one (`═`) and midnight (`┼`), so the three stay apart without relying
+on colour. Its two halves are percentages against inches and are not comparable
+by height; the box title carries the scale.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
-opened from, so looking a place up from the precipitation screen leaves you on
-the precipitation screen.
+opened from.
 
 ## Configuration
 
-There is none yet. The startup location is a `Default` impl in `src/app.rs`:
+There is none yet. The startup location is a `Default` impl in `src/app.rs`;
+change it and reinstall to start somewhere else. Cities chosen with `l` apply
+for the session only — nothing is written to disk.
 
-```rust
-impl Default for ActiveLocation {
-    fn default() -> Self {
-        Self {
-            label: "Frederick, Maryland, United States".to_string(),
-            lat: 39.414_27,
-            lon: -77.410_54,
-        }
-    }
-}
+## Development
+
+```bash
+cargo test                                  # 176 deterministic tests
+cargo test -- --ignored                     # 2 live-API tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt
+cargo +1.88.0 test --locked --all-targets   # the declared minimum
 ```
 
-Change it and reinstall to start somewhere else. Locations chosen with `l`
-apply for the session only — nothing is written to disk.
+CI runs those on Linux, macOS and Windows, plus `cargo package` and a pinned
+`cargo audit`; every job proves one thing, so a red build names the contract
+that broke.
+
+Tests concentrate on what breaks quietly: layout at awkward terminal sizes,
+null and mismatched-length API responses, unit-conversion boundaries, day and
+hour navigation at the wrap points, and HTTP timeouts against a loopback server
+that never answers. Many render to a `TestBackend` and assert against the
+resulting buffer rather than against the arithmetic that produced it.
+
+Code is organised by responsibility: `src/ui/` does no networking and
+`src/weather/` does no rendering, and the wire types in `weather/dto.rs` stay
+separate from the domain model in `weather/model.rs`, so a change to
+Open-Meteo's JSON touches one conversion rather than the whole app.
+
+## Limitations
+
+- No configuration file and no cache: every launch fetches, and the default
+  location needs a rebuild to change.
+- Forecast text is English only.
+- Terminals below 34×12 show a size warning instead of the interface.
+- Selection and "today" are distinguished by colour alone in the forecast table
+  and the daily chart; only the precipitation chart also marks them by shape.
+- Linux and Windows are covered by CI but have only been driven by hand on
+  macOS. Passing unit tests does not validate console rendering, font fallback,
+  or held-key behaviour on a real terminal.
 
 ## Data
 
 Weather, air quality and geocoding all come from
-[Open-Meteo](https://open-meteo.com), which needs no API key.
+[Open-Meteo](https://open-meteo.com), which needs no API key. Its free tier is
+**for non-commercial use only** and is rate limited to 10,000 calls per day.
+Each weather load makes two requests, and each submitted search a third.
+
+Nothing is stored on disk — no account, no cache, no history — but the
+coordinates and city names you ask about are sent to Open-Meteo, whose
+free-service logs may retain IP addresses and coordinates for 90 days. See
+Open-Meteo's [terms](https://open-meteo.com/en/terms) and
+[licence](https://open-meteo.com/en/license).
+
+A missing or null reading degrades to a dash rather than failing the fetch. The
+AQI shown for today is the endpoint's current reading; for any other date it is
+that day's maximum, and both render under the same label. Air-quality coverage
+runs out a couple of days short of the forecast horizon.
 
 ### Attribution
 
 Weather data by [Open-Meteo](https://open-meteo.com), licensed
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Air-quality data is
+served by Open-Meteo from the Copernicus Atmosphere Monitoring Service (CAMS),
+whose [Air Quality API](https://open-meteo.com/en/docs/air-quality-api)
+requires that both be credited.
 
-Air-quality data is served by Open-Meteo from the Copernicus Atmosphere
-Monitoring Service, and the
-[Air Quality API](https://open-meteo.com/en/docs/air-quality-api) requires that
-both be credited:
+<details>
+<summary>Full CAMS citation</summary>
 
 > METEO FRANCE, Institut national de l'environnement industriel et des risques
 > (Ineris), Aarhus University, Norwegian Meteorological Institute (MET Norway),
@@ -215,110 +202,11 @@ both be credited:
 > All users of Open-Meteo data must provide a clear attribution to CAMS
 > ENSEMBLE data provider as well as a reference to Open-Meteo.
 
-### Terms
-
-Open-Meteo's free tier is **for non-commercial use only**, and is rate limited
-to 10,000 calls per day, 5,000 per hour and 600 per minute. See
-[Open-Meteo's terms](https://open-meteo.com/en/terms) and
-[licence](https://open-meteo.com/en/license).
-
-Each weather load makes **two** requests — forecast and air quality — and each
-submitted city search makes a third, to the geocoding endpoint. Loads happen on
-launch, on `r`, and on choosing a location. Held or repeated keys are not yet
-deduplicated, so a leaned-on `r` can queue more requests than you intended.
-
-### Privacy
-
-The app stores nothing on disk: no account, no cache, no search history. It
-does send the coordinates it is asked about, and any city name you search for,
-to Open-Meteo. Open-Meteo states that its free-service logs may include IP
-addresses and coordinates, retained for 90 days — see their
-[terms and privacy](https://open-meteo.com/en/terms).
-
-The committed default location is a public one in Frederick, Maryland. Change
-it if you would rather not have a location compiled into your build, and
-consider the same before publishing screenshots.
-
-### What the numbers mean
-
-- A missing or null reading degrades to a dash rather than failing the fetch.
-- The AQI shown for **today** is the endpoint's current reading; for any other
-  date it is the **maximum** of that day's hourly values. Both currently render
-  under the same `AQI` label, which is a known ambiguity.
-- Air-quality coverage runs out a couple of days short of the forecast horizon.
-  Days beyond it show no AQI rather than a stale or zero one.
-
-## Development
-
-```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt
-cargo +1.88.0 test --locked --all-targets   # the declared minimum
-```
-
-CI runs those on Linux, macOS and Windows, plus `cargo package` and a pinned
-`cargo audit`. Every job proves one thing, so a red build names the contract
-that broke. See [.github/workflows/ci.yml](.github/workflows/ci.yml).
-
-Two tests are `#[ignore]`d because they hit the live API; run them with
-`cargo test -- --ignored`.
-
-The tests concentrate on what breaks quietly: layout at awkward terminal sizes,
-null and mismatched-length handling in API responses, unit conversion
-boundaries, column alignment in both unit systems, day and hour navigation at
-the wrap points, and HTTP timeouts against a loopback server that never
-answers. Many render to a `TestBackend` and assert against the resulting buffer
-rather than against the arithmetic that produced it.
-
-Code is organised by responsibility:
-
-```
-src/
-├── main.rs        terminal setup and the draw loop
-├── input.rs       keys → Action; the only module that knows Crossterm
-├── app.rs         application state, and every transition over it
-├── events.rs      background worker, its requests and messages
-├── units.rs       metric/imperial conversion
-├── weather/       API client, wire types, domain model
-└── ui/            one module per pane, plus the block-digit font
-```
-
-`src/weather/` keeps the wire format (`dto.rs`) separate from the domain model
-(`model.rs`), so a change to Open-Meteo's JSON touches one conversion rather
-than the whole app. `src/ui/` contains no networking and `src/weather/`
-contains no rendering.
-
-## Limitations
-
-- No configuration file; the default location requires a rebuild to change.
-- Nothing is cached, so every launch fetches.
-- Forecast text is English only.
-- Terminals below 34×12 show a size warning instead of the interface. That
-  minimum is a reduced current-conditions view — it does not have room for the
-  forecast table and chart as well.
-- Windows is untested. Key release and repeat events are now filtered, which
-  was the known blocker, but no one has actually run it there.
-- Selection and "today" are distinguished by colour in the forecast table and
-  the daily chart. The precipitation chart also marks them by shape; the others
-  do not yet.
-- Windows and Linux are covered by CI but have never been driven by hand.
-  Compiling and passing unit tests does not validate console rendering, font
-  fallback, or held-key behaviour on a real terminal there.
+</details>
 
 ## License
 
-Copyright (C) 2026 Taylor Shahan.
-
-Licensed under the **GNU General Public License v3.0 or later**. See
-[LICENSE](LICENSE) for the full text.
-
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version. It is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE.
-
-The licence above covers this program's own source. It is separate from the
-licensing of the *data* it fetches, covered under [Data](#data).
+Copyright (C) 2026 Taylor Shahan. Licensed under the
+**GNU General Public License v3.0 or later**; see [LICENSE](LICENSE) for the
+full text. It covers this program's own source, which is separate from the
+licensing of the data it fetches — see [Data](#data).
