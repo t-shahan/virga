@@ -92,7 +92,7 @@ On the precipitation screen:
 | Key | Action |
 |---|---|
 | `←` `→` | Move an hour through the forecast; wraps at both ends |
-| `↑` `↓` | Move a whole day |
+| `↑` / `↓` | Forward / back a whole day, keeping the same time of day |
 | `n` / `Home` | Jump back to the current hour |
 | `b` / `p` / `Enter` / `Esc` | Back to the weather |
 | `r` | Refetch the current location |
