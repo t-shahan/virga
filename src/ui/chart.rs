@@ -4,6 +4,7 @@ use crate::weather::model::Weather;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Bar, BarChart, BarGroup, Block};
 
 /// The chart covers past days as well as the forecast, so it gets its own box
@@ -83,11 +84,30 @@ pub(super) fn chart_area_render(
         })
         .collect();
 
+    // The last row carries the selection marker. Colour alone put the
+    // selection out of reach of a monochrome terminal, a colour-blind reader,
+    // or a screenshot — and the bars cannot carry a shape the way the
+    // precipitation chart's centre rule can, so the marker needs its own row.
+    // One row out of six at the smallest chart the layout will draw.
+    let (bars_row_area, marker_row) = if inner.height > 2 {
+        let [bars, marker] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        (bars, Some(marker))
+    } else {
+        (inner, None)
+    };
+
     // Centre the chart on its own measured width; left-aligned looked lopsided
     // once the bars stopped filling the pane.
     let [chart_area] = Layout::horizontal([Constraint::Length(columns.width_of(visible.len()))])
         .flex(Flex::Center)
-        .areas(inner);
+        .areas(bars_row_area);
+
+    if let Some(marker_row) = marker_row {
+        render_selection_marker(
+            frame, chart_area, marker_row, &columns, selected, start, visible,
+        );
+    }
 
     frame.render_widget(
         BarChart::default()
@@ -97,6 +117,44 @@ pub(super) fn chart_area_render(
             .bar_gap(GAP),
         chart_area,
     );
+}
+
+/// A caret centred under the selected bar, in the row reserved for it.
+///
+/// The selection can sit outside the drawn window — the chart drops the oldest
+/// history first when the pane is narrow — in which case there is nothing to
+/// point at and the row stays blank rather than pointing at the wrong day.
+fn render_selection_marker(
+    frame: &mut Frame,
+    chart_area: Rect,
+    marker_row: Rect,
+    columns: &Columns,
+    selected: usize,
+    start: usize,
+    visible: &[crate::weather::model::DailyForecast],
+) {
+    let Some(column) = selected
+        .checked_sub(start)
+        .filter(|column| *column < visible.len())
+    else {
+        return;
+    };
+
+    let bar_width = columns.stride - GAP;
+    // Centre it under the bar rather than its stride, so a two-cell bar with a
+    // one-cell gap gets a caret over the bar and not over the gap beside it.
+    let offset = column as u16 * columns.stride + bar_width / 2;
+    if offset >= chart_area.width {
+        return;
+    }
+
+    let cell = Rect {
+        x: chart_area.x + offset,
+        y: marker_row.y,
+        width: 1,
+        height: 1,
+    };
+    frame.render_widget(Line::from("^").style(Style::new().fg(Color::Yellow)), cell);
 }
 
 /// Bars thinner than this read as a comb rather than a chart.
@@ -142,6 +200,87 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
             t.draw(|f| chart_area_render(f, &w, f.area(), Unit::Imperial, 14))
                 .unwrap();
+        }
+    }
+
+    /// Column of the caret in the marker row, which is the chart's only
+    /// non-colour statement about which bar is selected.
+    fn caret_column(width: u16, height: u16, selected: usize) -> Option<u16> {
+        let w = Weather::fixture(22, 14);
+        let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
+        t.draw(|f| chart_area_render(f, &w, f.area(), Unit::Imperial, selected))
+            .unwrap();
+
+        let buf = t.backend().buffer();
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "^")
+            .map(|(x, _)| x)
+    }
+
+    /// The finding: the bars carried the selection in yellow-versus-blue and
+    /// nothing else, so a monochrome render lost it entirely.
+    #[test]
+    fn the_selected_bar_is_marked_without_colour() {
+        assert!(
+            caret_column(80, 14, 14).is_some(),
+            "no marker under the selected bar"
+        );
+    }
+
+    /// One caret per stride, in the same direction as the selection. Catching
+    /// it pointing at the gap beside the bar, or drifting at a different rate,
+    /// is the point.
+    #[test]
+    fn the_caret_tracks_the_selected_bar_one_stride_at_a_time() {
+        let columns = Columns::fit(78, 22, MIN_BAR_STRIDE, MAX_BAR_STRIDE);
+        let here = caret_column(80, 14, 14).expect("a marker");
+
+        for step in 1..=3u16 {
+            let moved = caret_column(80, 14, 14 + step as usize).expect("a marker");
+            assert_eq!(
+                moved,
+                here + step * columns.stride,
+                "the caret moved {} cells for {step} day(s), not {}",
+                moved.saturating_sub(here),
+                step * columns.stride
+            );
+        }
+    }
+
+    /// A narrow pane drops the oldest history, so a selection can sit off the
+    /// left edge. Pointing at whatever bar happens to be leftmost would name
+    /// the wrong day, which is worse than saying nothing.
+    #[test]
+    fn a_selection_outside_the_window_is_not_marked_at_all() {
+        let narrow = 34u16;
+        let columns = Columns::fit(narrow - 2, 22, MIN_BAR_STRIDE, MAX_BAR_STRIDE);
+        assert!(
+            columns.capacity < 22,
+            "this test needs a pane too narrow for the whole window"
+        );
+
+        assert_eq!(
+            caret_column(narrow, 12, 0),
+            None,
+            "the oldest day is off the window and must not be marked"
+        );
+    }
+
+    /// The marker takes a row, so it must not take the last one a chart has.
+    #[test]
+    fn a_chart_too_short_for_a_marker_row_still_draws_bars() {
+        let w = Weather::fixture(22, 14);
+        for height in 3..=6u16 {
+            let mut t = Terminal::new(TestBackend::new(80, height)).unwrap();
+            t.draw(|f| chart_area_render(f, &w, f.area(), Unit::Imperial, 14))
+                .unwrap();
+
+            let buf = t.backend().buffer();
+            let drew_a_bar = (0..80)
+                .flat_map(|x| (0..height).map(move |y| (x, y)))
+                .any(|(x, y)| matches!(buf[(x, y)].symbol(), "█" | "▄" | "▀" | "▆" | "▂"));
+            assert!(drew_a_bar, "height {height} drew no bars at all");
         }
     }
 }

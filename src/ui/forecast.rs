@@ -67,10 +67,18 @@ pub(super) fn forecast_area_render(
             weekday(&d.date)
         };
 
+        // A caret in the gutter the header already leaves empty, so the
+        // selection survives being unable to tell yellow from light blue —
+        // colour-blindness, a monochrome terminal, or a screenshot. Same
+        // marker the search screen uses, and ASCII on purpose: a geometric
+        // arrow is ambiguous-width in some terminals and would shift every
+        // column on the selected row by a cell.
+        let marker = if is_selected { '>' } else { ' ' };
+
         // The high/low widths in the heading are these value widths plus the
         // two-cell unit symbol, so the headings sit over their own columns.
         let mut row = format!(
-            "  {:<5}{:>5.0}{}{:>6.0}{}",
+            "{marker} {:<5}{:>5.0}{}{:>6.0}{}",
             day,
             unit.temp(d.high_c),
             unit.temp_symbol(),
@@ -168,5 +176,81 @@ mod tests {
             t.draw(|f| forecast_area_render(f, &w, f.area(), Unit::Imperial, 14))
                 .unwrap();
         }
+    }
+
+    /// Renders the table and returns its rows as plain text, which is what a
+    /// reader who cannot use colour is left with.
+    fn rows_without_colour(selected: usize) -> Vec<String> {
+        let w = Weather::fixture(22, 14);
+        let mut t = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        t.draw(|f| forecast_area_render(f, &w, f.area(), Unit::Imperial, selected))
+            .unwrap();
+
+        let buf = t.backend().buffer();
+        (0..14)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// Which row a given index lands on depends on today's real date, so this
+    /// asserts the relationship between selection and marker rather than any
+    /// particular weekday.
+    fn marked_row(selected: usize) -> usize {
+        let rows = rows_without_colour(selected);
+        let marked: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.contains('>'))
+            .map(|(y, _)| y)
+            .collect();
+
+        assert_eq!(
+            marked.len(),
+            1,
+            "exactly one row should carry the marker, got {marked:?}"
+        );
+        marked[0]
+    }
+
+    /// The finding: with the selection carried by yellow-versus-light-blue,
+    /// stripping the colour left nothing at all to identify the selected row.
+    #[test]
+    fn the_selection_survives_losing_colour() {
+        // today_index is 14 in the fixture; the assertion is only that a
+        // marker exists and is unique, which `marked_row` checks.
+        marked_row(14);
+        marked_row(16);
+    }
+
+    #[test]
+    fn the_marker_travels_with_the_selection() {
+        let today = marked_row(14);
+
+        for step in 1..=4 {
+            assert_eq!(
+                marked_row(14 + step),
+                today + step,
+                "the marker did not follow the selection {step} day(s) on"
+            );
+        }
+    }
+
+    /// The gutter the marker uses is the one the header already leaves blank,
+    /// so a marked row's columns have to line up with an unmarked one's.
+    #[test]
+    fn the_marker_does_not_shift_the_columns() {
+        let rows = rows_without_colour(16);
+        let marked = rows.iter().find(|r| r.contains('>')).expect("a marked row");
+        let plain = rows
+            .iter()
+            .find(|r| r.contains("Fri"))
+            .expect("an unmarked row");
+
+        let degree = |row: &str| row.find('°').expect("a temperature column");
+        assert_eq!(
+            degree(marked),
+            degree(plain),
+            "marked {marked:?} and unmarked {plain:?} disagree on where the column starts"
+        );
     }
 }
