@@ -1,6 +1,17 @@
-# weather_tui — design
+# virga — original design plan (historical)
 
-Architecture plan. Type shapes and signatures are given; **bodies are deliberately left as `todo!()`** — the implementation is the exercise.
+> **This is a historical document, not a specification.**
+>
+> It is the plan written before any code existed, kept for context on why the
+> stack was chosen. The app has since been built and has diverged from it: type
+> shapes differ, module names differ (`events.rs`, not `event.rs`), and several
+> decisions below were superseded — `serde_json` is now a dev-dependency only,
+> and there is an hourly precipitation screen this plan never anticipated.
+>
+> **`README.md` and the source are authoritative.** Do not implement from this
+> file or treat its signatures as current.
+
+Architecture plan. Type shapes and signatures are given; **bodies are deliberately left as `todo!()`** — the implementation was the exercise.
 
 ## Decisions
 
