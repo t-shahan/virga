@@ -112,14 +112,20 @@ pub(super) fn precip_chart_render(
 
         let rising = rising_column(fraction(hour.chance.map(f64::from), 100.0), rows.rise);
         let falling = falling_column(fraction(hour.precip_mm, amount_scale), rows.fall);
-        let rule = if index == selected {
-            RULE_SELECTED
+
+        // The rule takes its column's colour except at a day boundary, which
+        // is structural rather than a reading: the bars above it stay ordinary
+        // while the mark itself takes the accent. Sharing the selection's
+        // yellow costs little, because the selection is yellow down its whole
+        // column and carries a different glyph.
+        let (rule, rule_colour) = if index == selected {
+            (RULE_SELECTED, colour)
         } else if index == 0 {
-            RULE_NOW
+            (RULE_NOW, colour)
         } else if is_midnight(&hour.time) {
-            RULE_MIDNIGHT
+            (RULE_MIDNIGHT, Color::Yellow)
         } else {
-            RULE
+            (RULE, colour)
         };
 
         let left = plot.x + (i * columns.stride as usize) as u16;
@@ -129,7 +135,7 @@ pub(super) fn precip_chart_render(
             for (offset, symbol) in rising.iter().enumerate() {
                 put(frame, x, plot.y + offset as u16, symbol, colour);
             }
-            put(frame, x, plot.y + rows.rise as u16, rule, colour);
+            put(frame, x, plot.y + rows.rise as u16, rule, rule_colour);
             for (offset, symbol) in falling.iter().enumerate() {
                 let y = plot.y + (rows.rise + 1 + offset) as u16;
                 put(frame, x, y, symbol, colour);
@@ -537,6 +543,33 @@ mod tests {
                 "selection {selected} kept cells from the frame before it"
             );
         }
+    }
+
+    /// Day boundaries are landmarks rather than readings, so the mark takes the
+    /// accent while the bars above it stay ordinary.
+    #[test]
+    fn midnight_is_marked_in_the_accent_colour() {
+        let weather = Weather::fixture(22, 14);
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        terminal
+            .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 5))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let midnight = (0..100u16)
+            .flat_map(|x| (0..10u16).map(move |y| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == RULE_MIDNIGHT)
+            .expect("a midnight rule cell");
+
+        assert_eq!(buffer[midnight].style().fg, Some(Color::Yellow));
+
+        // The column it marks is still an ordinary one above the rule.
+        let (x, y) = midnight;
+        assert_eq!(
+            buffer[(x, y - 1)].style().fg,
+            Some(Color::Blue),
+            "only the boundary itself takes the accent"
+        );
     }
 
     /// Colour reinforces the three states but must never be the only carrier.
