@@ -1,0 +1,83 @@
+# Each job proves one contract, so a red build names what broke rather than
+# just saying "CI failed".
+#
+# actions/checkout is pinned to a commit SHA, not a tag: tags are mutable, and
+# a build gate that can be changed under you is not a gate. The comment records
+# which release the SHA belongs to so it can be reviewed when bumped.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# CI only ever reads the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo fmt --check
+
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        # Windows is included now that key release and repeat events are
+        # filtered. Compiling and passing unit tests there does NOT validate
+        # console rendering — see the manual checklist in the README.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The live-API tests stay excluded: a provider outage is not a reason to
+      # fail someone's pull request.
+      - run: cargo test --locked --all-targets
+
+  msrv:
+    name: msrv (1.88.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Exactly the declared minimum, not "something at least that new" — the
+      # point is to catch a dependency or language feature quietly raising it.
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: cargo +1.88.0 test --locked --all-targets
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Verifies the crate builds from its own packaged contents, which is how
+      # a missing fixture or an untracked file gets caught before a release
+      # rather than after one.
+      - run: cargo package --locked
+      - name: The package must carry its licence
+        run: cargo package --locked --list | grep -qx LICENSE
+
+  audit:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned and --locked: an unpinned `cargo install` in a release gate is
+      # an unreviewed dependency that can change between runs.
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --deny warnings

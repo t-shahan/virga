@@ -108,10 +108,12 @@ fixture sizes.
 
 Open items from `../AUDIT.md`, roughly in priority order:
 
-- **§2.3 / §7.6** — no CI. macOS is the only platform ever tested, and Windows
-  has never been run even though its input blocker is fixed.
 - **§7.2** — the request channel is still unbounded. The guards in `App` mean
   nothing can currently flood it, but nothing enforces that structurally.
+- **§7.13** — CI covers Linux, macOS and Windows, but no one has driven the TUI
+  by hand anywhere but macOS. Unit tests cannot validate console rendering.
+- **§7.8** — the client is not injectable, so non-2xx statuses, malformed JSON
+  and captive-portal bodies are still untested. Timeouts are covered.
 - **§2.6** — today's AQI is a current reading and other days' is a daily
   maximum, both rendered under the same `AQI` label.
 - **§7.11** — the forecast table and daily chart still encode selection in
