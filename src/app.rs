@@ -71,6 +71,10 @@ pub struct App {
     /// retry aim here, so a failed switch retries the city you asked for
     /// rather than the one still on screen.
     pub pending: Option<ActiveLocation>,
+    /// The screen the search was opened from, and the one leaving it returns
+    /// to. Searching from the precipitation screen used to land you on the
+    /// weather screen regardless.
+    search_return: Screen,
 }
 
 impl App {
@@ -87,6 +91,7 @@ impl App {
             selected_hour: 0,
             location: ActiveLocation::default(),
             pending: None,
+            search_return: Screen::Weather,
         }
     }
 
@@ -241,6 +246,25 @@ impl App {
     /// Hour zero of the forward window is the current hour, by construction.
     pub fn select_now(&mut self) {
         self.selected_hour = 0;
+    }
+
+    /// Open the city search, remembering where it was opened from. Searching
+    /// is a detour rather than a way home: coming back should return you to
+    /// the screen you left, not always to the weather.
+    ///
+    /// The old query and its results go with it. Results describe the query
+    /// that produced them, and a fresh search starts with neither — without
+    /// this, Enter on the empty query would reopen a city from the last search.
+    pub fn open_search(&mut self) {
+        self.search_return = self.screen;
+        self.screen = Screen::Search;
+        self.query.clear();
+        self.invalidate_results();
+    }
+
+    /// Leave the search, whether a city was chosen or the search abandoned.
+    pub fn close_search(&mut self) {
+        self.screen = self.search_return;
     }
 
     /// Results only describe the query that produced them, so any edit to the
@@ -632,6 +656,68 @@ mod tests {
         };
 
         assert_eq!(ActiveLocation::from(&found), berlin());
+    }
+
+    /// Searching is a detour. Whichever screen you left, that is where
+    /// choosing a city puts you back — the precipitation screen included.
+    #[test]
+    fn choosing_a_city_returns_to_the_screen_the_search_began_on() {
+        for origin in [Screen::Weather, Screen::Precipitation] {
+            let mut app = app_with(22, 14);
+            app.screen = origin;
+
+            app.open_search();
+            assert_eq!(app.screen, Screen::Search);
+
+            app.close_search();
+            assert_eq!(app.screen, origin, "came back to the wrong screen");
+        }
+    }
+
+    /// Cancelling has to come back to the same place as choosing, or Esc
+    /// becomes its own kind of surprise.
+    #[test]
+    fn abandoning_the_search_returns_there_too() {
+        let mut app = app_with(22, 14);
+        app.screen = Screen::Precipitation;
+
+        app.open_search();
+        app.query.push('b');
+        app.close_search();
+
+        assert_eq!(app.screen, Screen::Precipitation);
+    }
+
+    /// Opening the search twice must not leave the second visit pointing at
+    /// the first visit's origin.
+    #[test]
+    fn the_origin_follows_the_most_recent_search() {
+        let mut app = app_with(22, 14);
+
+        app.screen = Screen::Weather;
+        app.open_search();
+        app.close_search();
+
+        app.screen = Screen::Precipitation;
+        app.open_search();
+        app.close_search();
+        assert_eq!(app.screen, Screen::Precipitation);
+    }
+
+    /// A fresh search starts empty. Leaving results from the last one in place
+    /// meant Enter on a blank query reopened a city nobody had searched for.
+    #[test]
+    fn opening_the_search_discards_the_previous_query_and_its_results() {
+        let mut app = app_with(22, 14);
+        app.query.push_str("berlin");
+        app.results = Fetch::Ready(vec![]);
+        app.selected = 2;
+
+        app.open_search();
+
+        assert!(app.query.is_empty());
+        assert!(matches!(app.results, Fetch::Idle));
+        assert_eq!(app.selected, 0);
     }
 
     #[test]

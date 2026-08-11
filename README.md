@@ -111,7 +111,11 @@ On the search screen:
 |---|---|
 | `Enter` | Search, then select the highlighted result |
 | `↑` `↓` | Move through results |
-| `Esc` | Back to the weather |
+| `Esc` | Back where you came from |
+
+Choosing a city — or cancelling — returns to whichever screen the search was
+opened from, so looking a place up from the precipitation screen leaves you on
+the precipitation screen.
 
 ## Configuration
 
