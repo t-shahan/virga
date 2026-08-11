@@ -44,14 +44,20 @@ impl Columns {
 }
 
 /// Where a window of `capacity` columns should begin so that `selected` sits
-/// inside it. The selection is centred where it can be, and the window stops
-/// rather than scrolling past either end — so arrowing along the series
-/// scrolls, but the last screenful stays put instead of trailing off.
+/// inside it: the page that contains it, stopping at the end of the series
+/// rather than scrolling past it.
+///
+/// Paging rather than centring. A centred window keeps the highlight pinned to
+/// the middle of the screen and slides every column underneath it, so pressing
+/// an arrow reads as the chart reshuffling rather than as moving through it —
+/// the one thing the selection is supposed to show you. Within a page the
+/// highlight travels and the bars hold still, which is the way round that makes
+/// a step legible.
 pub(super) fn window_start(selected: usize, capacity: usize, count: usize) -> usize {
     if count <= capacity {
         return 0;
     }
-    selected.saturating_sub(capacity / 2).min(count - capacity)
+    ((selected / capacity) * capacity).min(count - capacity)
 }
 
 #[cfg(test)]
@@ -115,10 +121,47 @@ mod tests {
     }
 
     #[test]
-    fn the_window_centres_the_selection_between_the_ends() {
-        // 100 items, 20 visible: the selection sits ten columns in.
-        assert_eq!(window_start(50, 20, 100), 40);
-        assert_eq!(window_start(10, 20, 100), 0);
+    fn the_window_holds_still_across_a_page() {
+        // 100 items, 20 visible: everything in 40..60 shares one page.
+        for selected in 40..60 {
+            assert_eq!(window_start(selected, 20, 100), 40, "selected {selected}");
+        }
+        assert_eq!(
+            window_start(39, 20, 100),
+            20,
+            "and 39 is on the page before"
+        );
+    }
+
+    /// The bug this replaced centring to fix. A centred window pins the
+    /// highlight to the middle of the screen and slides the columns underneath
+    /// it, so stepping looks like the chart reshuffling and the selection
+    /// appears not to move at all. Its offset within the window has to change.
+    #[test]
+    fn the_selection_travels_across_the_window_rather_than_the_window_under_it() {
+        // A day's step through the hourly chart at a typical terminal width.
+        let (capacity, count, step) = (29usize, 173usize, 24usize);
+
+        let offsets: Vec<usize> = (0..7)
+            .map(|i| {
+                let selected = i * step;
+                selected - window_start(selected, capacity, count)
+            })
+            .collect();
+
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] != pair[1]),
+            "the highlight sat still while the chart moved: {offsets:?}"
+        );
+
+        // And the same for stepping an hour at a time.
+        let offsets: Vec<usize> = (0..10)
+            .map(|selected| selected - window_start(selected, capacity, count))
+            .collect();
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] != pair[1]),
+            "hour steps left the highlight still: {offsets:?}"
+        );
     }
 
     /// Both ends pin rather than scrolling past, so the first and last
