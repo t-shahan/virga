@@ -21,7 +21,7 @@ cargo build --release      # → target/release/virga
 cargo check                # fast type/borrow check
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 155 deterministic tests
+cargo test                 # 176 deterministic tests
 cargo test -- --ignored    # 2 live-API tests, excluded by default
 cargo test <name> -- --exact --nocapture
 cargo +1.88.0 test --locked --all-targets   # the declared MSRV
@@ -38,9 +38,10 @@ on `PATH`; verify the minimum explicitly with `cargo +1.88.0`.
 
 ```
 src/
-├── main.rs      terminal setup, the event loop, key routing
-├── app.rs       App state, Fetch<T>, Screen, ActiveLocation, navigation
-├── events.rs    the worker thread; Request / Message
+├── main.rs      terminal setup and the draw loop, and nothing else
+├── input.rs     KeyEvent → Action; the only module aware of Crossterm
+├── app.rs       App state and every transition: on_action / on_message
+├── events.rs    the worker thread; Request / Message, correlated by id
 ├── units.rs     metric/imperial conversion and labels
 ├── weather/
 │   ├── client.rs  HTTP; one shared, timeout-bounded ureq Agent
@@ -90,9 +91,9 @@ A TUI cannot be verified by reading assertions alone. Two rules follow:
 1. **Render to a `TestBackend` and assert against the buffer**, not against the
    arithmetic that produced it. Several bugs here survived rounds of
    plausible-sounding fixes and died the moment someone printed the buffer.
-2. **Exercise anything interactive in a real terminal.** Key routing lives
-   inline in `run()` and has no test coverage at all — the mapping from
-   `KeyCode` to an `App` method is verified only by running the binary.
+2. **Exercise anything interactive in a real terminal.** Key *mapping* is now
+   testable in `input.rs`, and every state transition in `app.rs`, but nothing
+   proves the two are wired together correctly except running the binary.
 
 Tests target what breaks quietly: layout at awkward sizes (including the 34×12
 minimum), null and mismatched-length API responses, unit-conversion boundaries,
@@ -107,15 +108,10 @@ fixture sizes.
 
 Open items from `../AUDIT.md`, roughly in priority order:
 
-- **§1.2** — an in-flight search response is still accepted after the query
-  changes. `ActiveLocation` and commit-on-response built most of the seam this
-  needs; it wants request IDs.
-- **§2.1 / §7.3** — key release and repeat events are not filtered, so Windows
-  input can duplicate and a held key can flood the request queue.
-- **§2.2** — key handling and state transitions are inline in `run()`, so none
-  of it is testable. Extracting a terminal-independent `Action` enum plus
-  `App::on_action` / `App::on_message` is the prerequisite for §1.2 and §2.1.
-- **§2.3 / §7.6** — no CI. macOS is the only platform ever tested.
+- **§2.3 / §7.6** — no CI. macOS is the only platform ever tested, and Windows
+  has never been run even though its input blocker is fixed.
+- **§7.2** — the request channel is still unbounded. The guards in `App` mean
+  nothing can currently flood it, but nothing enforces that structurally.
 - **§2.6** — today's AQI is a current reading and other days' is a daily
   maximum, both rendered under the same `AQI` label.
 - **§7.11** — the forecast table and daily chart still encode selection in

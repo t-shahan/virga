@@ -1,3 +1,5 @@
+use crate::events::{Message, Request, RequestId};
+use crate::input::Action;
 use crate::units::Unit;
 use crate::weather::model::{Location, Weather};
 
@@ -67,10 +69,17 @@ pub struct App {
     /// The place the displayed weather actually describes. Only a successful
     /// load moves it, so the label can never get ahead of the measurements.
     pub location: ActiveLocation,
-    /// A place we have asked for but not yet heard back about. Refresh and
-    /// retry aim here, so a failed switch retries the city you asked for
-    /// rather than the one still on screen.
-    pub pending: Option<ActiveLocation>,
+    /// The weather request in flight: which one it is, and the place it is
+    /// for. Refresh and retry aim at the place, so a failed switch retries the
+    /// city you asked for rather than the one still on screen.
+    pending: Option<(RequestId, ActiveLocation)>,
+    /// The search request in flight. Editing the query abandons it, so a slow
+    /// response cannot arrive and repopulate results for a query you have
+    /// already moved on from.
+    pending_search: Option<RequestId>,
+    next_request: RequestId,
+    /// Set by `Action::Quit`; the event loop reads it and stops.
+    pub should_quit: bool,
     /// The screen the search was opened from, and the one leaving it returns
     /// to. Searching from the precipitation screen used to land you on the
     /// weather screen regardless.
@@ -91,35 +100,182 @@ impl App {
             selected_hour: 0,
             location: ActiveLocation::default(),
             pending: None,
+            pending_search: None,
+            next_request: 0,
+            should_quit: false,
             search_return: Screen::Weather,
         }
     }
 
+    /// The fetch that fills the first frame.
+    pub fn initial_fetch(&mut self) -> Request {
+        let location = self.location.clone();
+        self.fetch(location)
+    }
+
+    /// Apply an action, and hand back the request it wants making. Keeping the
+    /// I/O out here — the caller owns the channel — is what lets every
+    /// transition below be tested without a terminal or a network.
+    pub fn on_action(&mut self, action: Action) -> Option<Request> {
+        match action {
+            Action::Quit => self.should_quit = true,
+            Action::Back => self.back(),
+            Action::Refresh => return self.refresh(),
+            Action::Submit => return self.submit(),
+            Action::ToggleUnits => self.unit = self.unit.toggle(),
+            Action::OpenSearch => self.open_search(),
+            Action::OpenPrecipitation => {
+                self.screen = Screen::Precipitation;
+                self.select_now();
+            }
+            Action::PrevDay => self.select_prev_day(),
+            Action::NextDay => self.select_next_day(),
+            Action::Today => self.select_today(),
+            Action::PrevHour => self.select_prev_hour(),
+            Action::NextHour => self.select_next_hour(),
+            Action::PrevHourDay => self.select_prev_hour_day(),
+            Action::NextHourDay => self.select_next_hour_day(),
+            Action::Now => self.select_now(),
+            Action::Insert(c) => {
+                self.query.push(c);
+                self.invalidate_results();
+            }
+            Action::Backspace => {
+                self.query.pop();
+                self.invalidate_results();
+            }
+            Action::PrevResult => self.selected = self.selected.saturating_sub(1),
+            Action::NextResult => {
+                if let Fetch::Ready(locations) = &self.results
+                    && self.selected + 1 < locations.len()
+                {
+                    self.selected += 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// Apply a worker message, ignoring any that answers a request we are no
+    /// longer waiting on. The worker's ordering is not an identity guarantee:
+    /// a slow first response must not overwrite a fast second one, and a
+    /// search whose query has since changed must not repopulate the list.
+    pub fn on_message(&mut self, message: Message) {
+        match message {
+            Message::Loaded {
+                id,
+                location,
+                weather,
+            } => {
+                if !self.awaiting_weather(id) {
+                    return;
+                }
+                self.pending = None;
+                self.selected_day = weather.today_index;
+                self.selected_hour = 0;
+                self.location = location;
+                self.weather = Fetch::Ready(weather);
+            }
+            // `pending` deliberately survives a failure, so retrying aims at
+            // the place that failed rather than the one still on screen.
+            Message::LoadFailed { id, error } => {
+                if self.awaiting_weather(id) {
+                    self.weather = Fetch::Failed(error);
+                }
+            }
+            Message::Located { id, locations } => {
+                if self.awaiting_search(id) {
+                    self.pending_search = None;
+                    self.results = Fetch::Ready(locations);
+                }
+            }
+            Message::SearchFailed { id, error } => {
+                if self.awaiting_search(id) {
+                    self.pending_search = None;
+                    self.results = Fetch::Failed(error);
+                }
+            }
+        }
+    }
+
+    fn awaiting_weather(&self, id: RequestId) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(current, _)| *current == id)
+    }
+
+    fn awaiting_search(&self, id: RequestId) -> bool {
+        self.pending_search == Some(id)
+    }
+
+    fn next_id(&mut self) -> RequestId {
+        self.next_request += 1;
+        self.next_request
+    }
+
+    /// Aim at a place. The label does not move yet — only a response does that.
+    fn fetch(&mut self, location: ActiveLocation) -> Request {
+        let id = self.next_id();
+        self.pending = Some((id, location.clone()));
+        self.weather = Fetch::Loading;
+        Request::Fetch { id, location }
+    }
+
+    /// Ignored while a fetch is already running, so a held `r` cannot queue one
+    /// request per keypress against a single worker.
+    fn refresh(&mut self) -> Option<Request> {
+        if matches!(self.weather, Fetch::Loading) {
+            return None;
+        }
+        let target = self.refresh_target();
+        Some(self.fetch(target))
+    }
+
+    /// Enter either opens the highlighted result or runs the query, depending
+    /// on whether there is a result to open.
+    fn submit(&mut self) -> Option<Request> {
+        let picked = match &self.results {
+            Fetch::Ready(locations) => locations.get(self.selected).map(ActiveLocation::from),
+            _ => None,
+        };
+
+        if let Some(picked) = picked {
+            self.results = Fetch::Idle;
+            self.close_search();
+            return Some(self.fetch(picked));
+        }
+
+        // A repeated Enter while the same query is already running would queue
+        // a duplicate search behind it.
+        if self.query.is_empty() || matches!(self.results, Fetch::Loading) {
+            return None;
+        }
+
+        let id = self.next_id();
+        self.pending_search = Some(id);
+        self.results = Fetch::Loading;
+        self.selected = 0;
+        Some(Request::Search {
+            id,
+            query: self.query.clone(),
+        })
+    }
+
+    /// Leaving a screen. The search returns where it came from; everything
+    /// else returns to the weather.
+    fn back(&mut self) {
+        self.screen = match self.screen {
+            Screen::Search => self.search_return,
+            _ => Screen::Weather,
+        };
+    }
+
     /// What `r` should fetch: whatever we are already chasing, else what is on
     /// screen. Never the compiled-in default — that was the bug.
-    pub fn refresh_target(&self) -> ActiveLocation {
+    fn refresh_target(&self) -> ActiveLocation {
         self.pending
-            .clone()
-            .unwrap_or_else(|| self.location.clone())
-    }
-
-    /// Aim at a new place. The label does not move yet; `commit` does that.
-    pub fn request(&mut self, location: ActiveLocation) -> ActiveLocation {
-        self.pending = Some(location.clone());
-        self.weather = Fetch::Loading;
-        location
-    }
-
-    /// A load arrived. Adopt the location it was for, rather than assuming it
-    /// answers the most recent request — two fetches can be in flight at once.
-    pub fn commit(&mut self, location: ActiveLocation, weather: Weather) {
-        if self.pending.as_ref() == Some(&location) {
-            self.pending = None;
-        }
-        self.selected_day = weather.today_index;
-        self.selected_hour = 0;
-        self.location = location;
-        self.weather = Fetch::Ready(weather);
+            .as_ref()
+            .map_or_else(|| self.location.clone(), |(_, location)| location.clone())
     }
 
     /// Both directions wrap, so the window is a loop rather than a corridor.
@@ -274,6 +430,10 @@ impl App {
     pub fn invalidate_results(&mut self) {
         self.results = Fetch::Idle;
         self.selected = 0;
+        // Abandon the request too, not just its results. A search already in
+        // flight would otherwise land after the edit and repopulate the list
+        // for a query that is no longer on screen.
+        self.pending_search = None;
     }
 }
 
@@ -577,7 +737,8 @@ mod tests {
         let mut short = Weather::fixture(3, 1);
         short.hourly.truncate(30);
         short.now_hour = 24;
-        app.commit(ActiveLocation::default(), short);
+        let request = app.on_action(Action::Refresh).expect("a refresh request");
+        deliver(&mut app, request, short);
         assert_eq!(app.selected_hour, 0, "a new load starts at now");
     }
 
@@ -589,19 +750,62 @@ mod tests {
         }
     }
 
-    /// The bug this type exists to kill: `r` used to refetch the compiled-in
-    /// default whatever city was on screen, so the user saw Frederick's weather
-    /// under Berlin's name.
+    /// Answer a request the way the worker would, so tests exercise the same
+    /// correlation the real messages go through.
+    fn deliver(app: &mut App, request: Request, weather: Weather) {
+        let Request::Fetch { id, location } = request else {
+            panic!("not a fetch")
+        };
+        app.on_message(Message::Loaded {
+            id,
+            location,
+            weather,
+        });
+    }
+
+    fn fail(app: &mut App, request: Request) {
+        let id = match request {
+            Request::Fetch { id, .. } | Request::Search { id, .. } => id,
+        };
+        app.on_message(Message::LoadFailed {
+            id,
+            error: "no route to host".to_string(),
+        });
+    }
+
+    /// Get an app to the state it reaches a moment after launch: the startup
+    /// fetch issued and answered. `App::new` begins in `Fetch::Loading`, so a
+    /// refresh before that lands is correctly refused.
+    fn loaded(app: &mut App) {
+        let request = app.initial_fetch();
+        deliver(app, request, Weather::fixture(5, 2));
+    }
+
+    /// The bug ActiveLocation exists to kill: `r` used to refetch the
+    /// compiled-in default whatever city was on screen, so the user saw
+    /// Frederick's weather under Berlin's name.
     #[test]
     fn refresh_follows_the_location_that_loaded() {
         let mut app = App::new();
-        assert_eq!(app.refresh_target(), ActiveLocation::default());
+        let request = app.initial_fetch();
+        deliver(&mut app, request, Weather::fixture(5, 2));
 
-        app.request(berlin());
-        app.commit(berlin(), Weather::fixture(5, 2));
+        let request = app.on_action(Action::Refresh).expect("a refresh request");
+        let Request::Fetch { location, .. } = &request else {
+            panic!("not a fetch")
+        };
+        assert_eq!(*location, ActiveLocation::default());
+        deliver(&mut app, request, Weather::fixture(5, 2));
 
-        assert_eq!(app.refresh_target(), berlin());
+        // Now switch cities and refresh again.
+        let switch = app.fetch(berlin());
+        deliver(&mut app, switch, Weather::fixture(5, 2));
         assert_eq!(app.location, berlin(), "the label followed the fetch");
+
+        let Some(Request::Fetch { location, .. }) = app.on_action(Action::Refresh) else {
+            panic!("no refresh request")
+        };
+        assert_eq!(location, berlin(), "refresh went back to the default");
     }
 
     /// Refresh aims at the request in flight, not the city still on screen —
@@ -609,12 +813,15 @@ mod tests {
     #[test]
     fn refresh_retries_the_place_that_was_asked_for() {
         let mut app = App::new();
-        app.commit(ActiveLocation::default(), Weather::fixture(5, 2));
+        loaded(&mut app);
 
-        app.request(berlin());
-        app.weather = Fetch::Failed("timed out".to_string());
+        let switch = app.fetch(berlin());
+        fail(&mut app, switch);
 
-        assert_eq!(app.refresh_target(), berlin(), "retry keeps chasing Berlin");
+        let Some(Request::Fetch { location, .. }) = app.on_action(Action::Refresh) else {
+            panic!("no retry request")
+        };
+        assert_eq!(location, berlin(), "retry keeps chasing Berlin");
     }
 
     /// Until a fetch succeeds the label must keep describing the measurements
@@ -622,27 +829,220 @@ mod tests {
     #[test]
     fn a_failed_switch_never_relabels_the_previous_weather() {
         let mut app = App::new();
-        app.commit(ActiveLocation::default(), Weather::fixture(5, 2));
+        loaded(&mut app);
 
-        app.request(berlin());
-        app.weather = Fetch::Failed("no route to host".to_string());
+        let switch = app.fetch(berlin());
+        fail(&mut app, switch);
 
         assert_eq!(app.location, ActiveLocation::default());
+        assert!(matches!(app.weather, Fetch::Failed(_)));
     }
 
-    /// Two fetches can be in flight at once — press `r`, then pick a city. The
-    /// response carries its own location, so the first cannot commit under the
-    /// second's name.
+    /// Audit 1.2. Two fetches can be outstanding — press `r`, then pick a
+    /// city. The first response must not land at all: committing it would show
+    /// the old city's weather, and briefly its name, after you asked for a new
+    /// one.
     #[test]
-    fn a_response_commits_its_own_location_not_the_newest_request() {
+    fn a_weather_response_is_ignored_once_a_newer_request_exists() {
         let mut app = App::new();
-        app.request(ActiveLocation::default());
-        app.request(berlin());
+        loaded(&mut app);
 
-        app.commit(ActiveLocation::default(), Weather::fixture(5, 2));
+        let first = app.fetch(ActiveLocation::default());
+        let second = app.fetch(berlin());
 
-        assert_eq!(app.location, ActiveLocation::default());
-        assert_eq!(app.pending, Some(berlin()), "Berlin is still outstanding");
+        deliver(&mut app, first, Weather::fixture(9, 4));
+        assert!(
+            matches!(app.weather, Fetch::Loading),
+            "the stale response should not have resolved the load"
+        );
+
+        deliver(&mut app, second, Weather::fixture(5, 2));
+        assert_eq!(app.location, berlin());
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+    }
+
+    /// A stale *failure* must not knock the app into an error state either.
+    #[test]
+    fn a_stale_failure_never_replaces_a_newer_request() {
+        let mut app = App::new();
+        let first = app.fetch(ActiveLocation::default());
+        let second = app.fetch(berlin());
+
+        fail(&mut app, first);
+        assert!(
+            matches!(app.weather, Fetch::Loading),
+            "the newer request is still running"
+        );
+
+        deliver(&mut app, second, Weather::fixture(5, 2));
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+    }
+
+    /// Audit 1.2, the reported reproduction: search for A, edit the query to
+    /// B before A completes, then let A arrive. Pressing Enter afterwards used
+    /// to open a result from A.
+    #[test]
+    fn a_search_response_is_ignored_once_the_query_has_changed() {
+        let mut app = App::new();
+        app.on_action(Action::OpenSearch);
+        for c in "berlin".chars() {
+            app.on_action(Action::Insert(c));
+        }
+
+        let Some(Request::Search { id, .. }) = app.on_action(Action::Submit) else {
+            panic!("no search request")
+        };
+
+        // The query moves on while that search is still running.
+        app.on_action(Action::Insert('x'));
+
+        app.on_message(Message::Located {
+            id,
+            locations: vec![Location {
+                name: "Berlin".to_string(),
+                admin1: None,
+                country: Some("Germany".to_string()),
+                lat: 52.52437,
+                lon: 13.41053,
+            }],
+        });
+
+        assert!(
+            matches!(app.results, Fetch::Idle),
+            "an obsolete query repopulated the list"
+        );
+
+        // And Enter now runs the edited query rather than opening a result.
+        let Some(Request::Search { query, .. }) = app.on_action(Action::Submit) else {
+            panic!("Enter opened a stale result instead of searching")
+        };
+        assert_eq!(query, "berlinx");
+    }
+
+    #[test]
+    fn a_stale_search_failure_is_ignored_too() {
+        let mut app = App::new();
+        app.on_action(Action::OpenSearch);
+        app.on_action(Action::Insert('a'));
+        let Some(Request::Search { id, .. }) = app.on_action(Action::Submit) else {
+            panic!("no search request")
+        };
+
+        app.on_action(Action::Insert('b'));
+        app.on_message(Message::SearchFailed {
+            id,
+            error: "timed out".to_string(),
+        });
+
+        assert!(
+            matches!(app.results, Fetch::Idle),
+            "an obsolete failure surfaced as an error"
+        );
+    }
+
+    /// An ignored response must leave the current request's own state alone —
+    /// not clear its loading indicator, not move the selection.
+    #[test]
+    fn an_ignored_response_disturbs_nothing() {
+        let mut app = App::new();
+        loaded(&mut app);
+        app.selected_day = 4;
+        app.selected_hour = 7;
+
+        let stale = app.fetch(berlin());
+        let current = app.fetch(ActiveLocation::default());
+        deliver(&mut app, stale, Weather::fixture(9, 1));
+
+        assert!(matches!(app.weather, Fetch::Loading));
+        assert_eq!(app.selected_day, 4, "selection moved");
+        assert_eq!(app.selected_hour, 7, "hour selection moved");
+        drop(current);
+    }
+
+    /// Ids must stay distinct however search and weather requests interleave,
+    /// or one kind could answer for the other.
+    #[test]
+    fn request_ids_are_never_reused() {
+        let mut app = App::new();
+        let mut ids = Vec::new();
+
+        for _ in 0..5 {
+            ids.push(match app.initial_fetch() {
+                Request::Fetch { id, .. } | Request::Search { id, .. } => id,
+            });
+
+            app.on_action(Action::OpenSearch);
+            app.on_action(Action::Insert('a'));
+            if let Some(request) = app.on_action(Action::Submit) {
+                ids.push(match request {
+                    Request::Fetch { id, .. } | Request::Search { id, .. } => id,
+                });
+            }
+            app.on_action(Action::Back);
+        }
+
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "an id was reused: {ids:?}");
+    }
+
+    /// Audit 2.1. A held `r` against one worker would otherwise queue a fetch
+    /// per keypress, and the queue is unbounded.
+    #[test]
+    fn refresh_is_ignored_while_a_fetch_is_already_running() {
+        let mut app = App::new();
+        loaded(&mut app);
+
+        assert!(
+            app.on_action(Action::Refresh).is_some(),
+            "the first is sent"
+        );
+        for _ in 0..10 {
+            assert!(
+                app.on_action(Action::Refresh).is_none(),
+                "a second fetch was queued behind the first"
+            );
+        }
+    }
+
+    /// The same for leaning on Enter while a search is running.
+    #[test]
+    fn a_repeated_enter_does_not_queue_duplicate_searches() {
+        let mut app = App::new();
+        app.on_action(Action::OpenSearch);
+        for c in "berlin".chars() {
+            app.on_action(Action::Insert(c));
+        }
+
+        assert!(app.on_action(Action::Submit).is_some(), "the first is sent");
+        for _ in 0..10 {
+            assert!(
+                app.on_action(Action::Submit).is_none(),
+                "a duplicate search was queued"
+            );
+        }
+    }
+
+    /// A failed load has to be retryable, or the app is stuck.
+    #[test]
+    fn refresh_works_again_once_a_fetch_has_finished() {
+        let mut app = App::new();
+        let request = app.initial_fetch();
+        fail(&mut app, request);
+
+        assert!(
+            app.on_action(Action::Refresh).is_some(),
+            "a failed load must be retryable"
+        );
+    }
+
+    #[test]
+    fn quitting_is_recorded_for_the_event_loop() {
+        let mut app = App::new();
+        assert!(!app.should_quit);
+        assert!(app.on_action(Action::Quit).is_none());
+        assert!(app.should_quit);
     }
 
     #[test]

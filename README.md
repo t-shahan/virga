@@ -271,9 +271,10 @@ Code is organised by responsibility:
 
 ```
 src/
-├── main.rs        startup and the event loop
-├── app.rs         application state
-├── events.rs      background worker and its messages
+├── main.rs        terminal setup and the draw loop
+├── input.rs       keys → Action; the only module that knows Crossterm
+├── app.rs         application state, and every transition over it
+├── events.rs      background worker, its requests and messages
 ├── units.rs       metric/imperial conversion
 ├── weather/       API client, wire types, domain model
 └── ui/            one module per pane, plus the block-digit font
@@ -292,10 +293,8 @@ contains no rendering.
 - Terminals below 34×12 show a size warning instead of the interface. That
   minimum is a reduced current-conditions view — it does not have room for the
   forecast table and chart as well.
-- Key release and repeat events are not filtered, which can duplicate input on
-  Windows and lets a held key queue requests. Windows is not a supported
-  platform yet for that reason.
-- An in-flight search response is still accepted after the query has changed.
+- Windows is untested. Key release and repeat events are now filtered, which
+  was the known blocker, but no one has actually run it there.
 - Selection and "today" are distinguished by colour in the forecast table and
   the daily chart. The precipitation chart also marks them by shape; the others
   do not yet.
