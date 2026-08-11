@@ -206,7 +206,7 @@ requires that both be credited.
 
 ## License
 
-Copyright (C) 2026 Taylor Shahan. Licensed under the
-**GNU General Public License v3.0 or later**; see [LICENSE](LICENSE) for the
-full text. It covers this program's own source, which is separate from the
-licensing of the data it fetches — see [Data](#data).
+Licensed under the **GNU General Public License v3.0 or later**; see
+[LICENSE](LICENSE) for the full text. It covers this program's own source,
+which is separate from the licensing of the data it fetches — see
+[Data](#data).
