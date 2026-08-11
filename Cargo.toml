@@ -1,19 +1,36 @@
 [package]
-name = "weather_tui"
+name = "virga-tui"
 version = "0.1.0"
 edition = "2024"
+description = "A responsive terminal weather app with an hourly precipitation chart, powered by Open-Meteo"
+# Every dependency in the graph is permissively licensed (MIT, Apache-2.0,
+# Unicode-3.0, Zlib, ISC, BSD-3-Clause, MPL-2.0), all of which may be
+# incorporated into a GPL-3.0 work. Note Apache-2.0 is compatible with GPL-3.0
+# but not GPL-2.0, so the version here is load-bearing.
+license = "GPL-3.0-or-later"
+repository = "https://github.com/t-shahan/virga"
+readme = "README.md"
+# Not the edition floor of 1.85: ratatui 0.30.2 and ratatui-core 0.1.2 both
+# declare 1.88.0, and a dependency graph's minimum is not the same thing as
+# edition support.
+rust-version = "1.88"
+keywords = ["weather", "tui", "terminal", "cli", "forecast"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.104"
 chrono = "0.4.45"
-const_format = "0.2.36"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
 ureq = { version = "3.3.0", features = ["json"] }
 
+[dev-dependencies]
+# Only the DTO tests parse JSON by hand; at runtime ureq's `json` feature
+# supplies it, so the binary does not need it as a direct dependency.
+serde_json = "1.0.151"
+
 [[bin]]
-name = "weather"
+name = "virga"
 path = "src/main.rs"
 
 [profile.release]
