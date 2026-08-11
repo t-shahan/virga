@@ -9,58 +9,11 @@ of daily highs, and an hourly precipitation chart — no account, no API key.
 *Virga* is precipitation that evaporates before it reaches the ground. It is
 also, most weeks, what the precipitation chart draws.
 
-```
-┌FREDERICK, MARYLAND, UNITED STATES────────────────Overcast───AQI 66 Moderate┐
-│           ███████    ██            feels like  76°F                        │
-│                ██    ██            high / low  90°F / 69°F                 │
-│                ██    ██   °F       rain        65% · 0.03 in / 1 h         │
-│                ██    ██            wind        16, gusts 19 mph SE         │
-│                ██    ██            daylight    13h 54m                     │
-└4°F above the 22-day average───────────────────────────────────────────Today┘
-┌Forecast────────────────────────────────────────────────────────────────────┐
-│      day     high     low   rain    wind     uv   sunrise   sunset         │
-│      Today   90°F    69°F    65%  16 mph      8     06:17    20:11   🌧     │
-│      Tue     89°F    70°F    18%  10 mph      7     06:18    20:10   ☁     │
-│      Wed     86°F    69°F    23%  11 mph      8     06:19    20:09   🌧     │
-│      Thu     87°F    67°F    18%  12 mph      7     06:20    20:08   🌧     │
-│      Fri     87°F    65°F    35%  15 mph      7     06:21    20:06   ☁     │
-│      Sat     85°F    57°F     6%   9 mph      7     06:22    20:05   ☁     │
-│      Sun     94°F    63°F    39%  14 mph      7     06:23    20:04   🌧     │
-│      Mon     90°F    64°F    39%  18 mph      7     06:24    20:02   🌧     │
-└────────────────────────────────────────────────────────────────────────────┘
-┌Daily Highs · 78–94°F───────────────────────────────────────────────────────┐
-│                                       ▇▇                         ██        │
-│                                    ██ ██    ██ ▇▇ ▃▃             ██ ▅▅     │
-│      ██          ▅▅ ▅▅    ▇▇ ▄▄    ██ ██ ▄▄ ██ ██ ██ ▆▆ ██ ██ ▂▂ ██ ██     │
-│      ██ ▇▇    ▂▂ ██ ██    ██ ██ ▆▆ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██     │
-│      ██ ██ ██ ██ ██ ██ ▆▆ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██     │
-└────────────────────────────────────────────────────────────────────────────┘
-  [q] quit   [←→] day   [n] now   [p] precip   [r] refresh   [u] units
-  [l] location
-```
+<img width="800" height="571" alt="CleanShot 2026-08-11 at 18 48 34" src="https://github.com/user-attachments/assets/365ad586-50a8-4f14-a8e8-1b2f8780dbb7" />
 
 Press `p` for the hourly precipitation screen. Chance rises from the centre
 rule, forecast amount hangs below it — a tall spike with nothing beneath it
 means "might drizzle"; tall above *and* below means take the umbrella.
-
-```
-┌FREDERICK, MARYLAND, UNITED STATES──────────────────────────────────Overcast┐
-│               ███████             amount      none expected                │
-│               ██   ██             temperature 71°F                         │
-│               ███████ %           24 h total  none expected                │
-│               ██   ██             24 h peak   18% at 4 PM                  │
-│               ███████             wet hours   0 of 24                      │
-└next rain Wed 12 Aug, 11 PM─────────────────────────────Mon 10 Aug, 10:00 PM┘
-┌Precipitation · next 25 h · chance ▲ · amount ▼ 0–0.28 in───────────────────┐
-│                                                                            │
-│                                                       ▁▁                   │
-│ ▄▄ ▄▄    ▁▁ ▂▂ ▄▄ ▄▄ ▄▄ ▄▄ ▃▃ ▃▃ ▃▃ ▂▂ ▃▃ ▆▆ ▇▇ ▅▅ ▇▇ ██ ██ ▅▅ ▃▃ ▆▆ ▅▅ ▂▂ │
-│ ══ ── ┼┼ ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── │
-│                                                                            │
-└no rain or snow in the next 25 h────────────────────────────────────────────┘
-  [q] quit   [b] back   [←→] hour   [↑↓] day   [n] now   [r] refresh
-  [u] units
-```
 
 ## Features
 
