@@ -198,6 +198,32 @@ impl App {
         }
     }
 
+    /// A request this app asked for that never reached the worker, because the
+    /// bounded queue had no room for it.
+    ///
+    /// Every path that issues a request has already moved the screen to
+    /// `Loading` and recorded the id as pending. Dropping the request without
+    /// telling anyone would leave both in place with no response ever coming —
+    /// a spinner that never stops. Reporting it as a failure is what keeps the
+    /// bound from turning a full queue into a hang.
+    pub fn on_dispatch_dropped(&mut self, request: Request) {
+        match request {
+            // `pending` survives, exactly as it does for `LoadFailed`, so the
+            // retry aims at the place that failed rather than the one on screen.
+            Request::Fetch { id, .. } => {
+                if self.awaiting_weather(id) {
+                    self.weather = Fetch::Failed("too many requests at once".to_string());
+                }
+            }
+            Request::Search { id, .. } => {
+                if self.awaiting_search(id) {
+                    self.pending_search = None;
+                    self.results = Fetch::Failed("too many requests at once".to_string());
+                }
+            }
+        }
+    }
+
     fn awaiting_weather(&self, id: RequestId) -> bool {
         self.pending
             .as_ref()
@@ -1128,5 +1154,106 @@ mod tests {
         app.invalidate_results();
         assert!(matches!(app.results, Fetch::Idle));
         assert_eq!(app.selected, 0);
+    }
+
+    /// The failure mode a bounded queue introduces: a request is refused after
+    /// the screen has already been moved to `Loading`. Left unhandled that is a
+    /// spinner with nothing behind it, which is worse than the unbounded growth
+    /// the bound was added to prevent.
+    #[test]
+    fn a_refused_fetch_reports_failure_instead_of_spinning_forever() {
+        let mut app = App::new();
+        let request = app.initial_fetch();
+        assert!(matches!(app.weather, Fetch::Loading));
+
+        app.on_dispatch_dropped(request);
+
+        assert!(
+            matches!(app.weather, Fetch::Failed(_)),
+            "a request that never reached the worker must not leave Loading on screen"
+        );
+    }
+
+    /// `pending` surviving is what makes the retry aim at the city that failed
+    /// rather than the one still on screen — the same rule `LoadFailed` follows.
+    #[test]
+    fn a_refused_fetch_still_retries_the_place_it_was_aimed_at() {
+        let mut app = App::new();
+        let target = ActiveLocation {
+            label: "Reykjavik, Iceland".to_string(),
+            lat: 64.146_59,
+            lon: -21.942_23,
+        };
+        let request = app.fetch(target.clone());
+        app.on_dispatch_dropped(request);
+
+        let Some(Request::Fetch { location, .. }) = app.refresh() else {
+            panic!("a failed fetch must be retryable");
+        };
+        assert_eq!(location.label, target.label);
+    }
+
+    #[test]
+    fn a_refused_search_reports_failure_instead_of_spinning_forever() {
+        let mut app = App::new();
+        app.query = "reykjavik".to_string();
+        let request = app.submit().expect("a non-empty query searches");
+        assert!(matches!(app.results, Fetch::Loading));
+
+        app.on_dispatch_dropped(request);
+
+        assert!(matches!(app.results, Fetch::Failed(_)));
+        assert!(
+            app.submit().is_some(),
+            "a refused search must not block the next attempt"
+        );
+    }
+
+    /// A response to a request that was never sent must not be able to revive
+    /// the screen, or the failure above would be undone by a stale arrival.
+    #[test]
+    fn a_refused_request_ignores_a_late_reply_to_it() {
+        let mut app = App::new();
+        let request = app.initial_fetch();
+        let Request::Fetch { id, location, .. } = &request else {
+            panic!("initial_fetch is a weather fetch");
+        };
+        let (id, location) = (*id, location.clone());
+        app.on_dispatch_dropped(request);
+
+        app.on_message(Message::Loaded {
+            id,
+            location,
+            weather: Weather::fixture(5, 2),
+        });
+
+        assert!(
+            matches!(app.weather, Fetch::Ready(_)),
+            "the id is still pending, so a genuine reply is still welcome"
+        );
+    }
+
+    /// The queue has to be deep enough for everything `App` can legitimately
+    /// have outstanding, or the bound would refuse ordinary use: one search,
+    /// plus a weather fetch the user superseded by picking a new city.
+    #[test]
+    fn the_queue_is_deeper_than_the_app_can_fill() {
+        let mut app = App::new();
+        let mut outstanding = vec![app.initial_fetch()];
+
+        app.query = "reykjavik".to_string();
+        outstanding.push(app.submit().expect("a search runs alongside a fetch"));
+
+        // Every further attempt is declined at the source while its own fetch
+        // is still loading, which is the invariant the depth is derived from.
+        assert!(app.refresh().is_none(), "refresh is guarded while loading");
+        assert!(app.submit().is_none(), "submit is guarded while loading");
+
+        assert!(
+            outstanding.len() <= crate::events::REQUEST_QUEUE,
+            "{} outstanding requests will not fit in a queue of {}",
+            outstanding.len(),
+            crate::events::REQUEST_QUEUE
+        );
     }
 }

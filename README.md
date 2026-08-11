@@ -124,7 +124,7 @@ for the session only — nothing is written to disk.
 ## Development
 
 ```bash
-cargo test                                  # 176 deterministic tests
+cargo test                                  # 196 deterministic tests
 cargo test -- --ignored                     # 2 live-API tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt
@@ -152,8 +152,10 @@ Open-Meteo's JSON touches one conversion rather than the whole app.
   location needs a rebuild to change.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface.
-- Selection and "today" are distinguished by colour alone in the forecast table
-  and the daily chart; only the precipitation chart also marks them by shape.
+- "Today" is distinguished by colour alone in the daily chart. The selection is
+  not: every screen marks it by shape as well — a `>` in the forecast table's
+  gutter, a `^` under the selected bar, and the precipitation chart's centre
+  rule.
 - Linux and Windows are covered by CI but have only been driven by hand on
   macOS. Passing unit tests does not validate console rendering, font fallback,
   or held-key behaviour on a real terminal.
@@ -172,9 +174,10 @@ Open-Meteo's [terms](https://open-meteo.com/en/terms) and
 [licence](https://open-meteo.com/en/license).
 
 A missing or null reading degrades to a dash rather than failing the fetch. The
-AQI shown for today is the endpoint's current reading; for any other date it is
-that day's maximum, and both render under the same label. Air-quality coverage
-runs out a couple of days short of the forecast horizon.
+AQI shown for today is the endpoint's current reading, labelled `AQI`; for any
+other date it is that day's maximum, labelled `AQI max` — a day's worst hour is
+not its prevailing air. Air-quality coverage runs out a couple of days short of
+the forecast horizon.
 
 ### Attribution
 

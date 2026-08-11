@@ -11,6 +11,20 @@ use std::thread;
 /// flight, and the app has to be able to tell which one came back.
 pub type RequestId = u64;
 
+/// How many requests may sit unclaimed before the channel refuses more.
+///
+/// `App` already declines to queue a duplicate — `refresh` and `submit` both
+/// bail while their fetch is `Loading` — so the reachable depth is one search
+/// plus a weather fetch the user superseded by picking a new city. Two slots
+/// is that invariant; four is headroom for it being wrong.
+///
+/// The bound is the point. The guards in `App` are a promise made in prose,
+/// and prose does not survive a refactor: drop one and an unbounded channel
+/// would absorb the mistake silently, growing without limit behind a worker
+/// that handles one request at a time. A bounded channel makes that same
+/// mistake fail loudly and immediately instead.
+pub const REQUEST_QUEUE: usize = 4;
+
 pub enum Request {
     Fetch {
         id: RequestId,

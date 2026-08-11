@@ -41,15 +41,20 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     let summary = day.map_or_else(String::new, |d| comparison(weather, d, unit));
 
     // Air quality rides the border beside the condition, where it costs no
-    // rows. Today shows the live reading; other days show that day's worst,
-    // derived from the hourly series. Days past the endpoint's horizon simply
-    // have none, and the border omits it rather than showing a placeholder.
-    let aqi = if showing_today {
-        weather.air_quality.as_ref().map(|aq| aq.us_aqi)
+    // rows. Days past the endpoint's horizon simply have none, and the border
+    // omits it rather than showing a placeholder.
+    //
+    // The two readings are not the same measurement and must not share a
+    // label. Today's is the endpoint's reading for right now; any other day's
+    // is the worst of that day's hourly values. Rendering both as a bare `AQI`
+    // invited reading a day's peak as its prevailing air, which is a different
+    // and rosier claim than the number supports.
+    let (reading, qualifier) = if showing_today {
+        (weather.air_quality.as_ref().map(|aq| aq.us_aqi), "")
     } else {
-        day.and_then(|d| d.aqi)
-    }
-    .map(|value| format!("AQI {value} {}", aqi_label(value)));
+        (day.and_then(|d| d.aqi), "max ")
+    };
+    let aqi = reading.map(|value| format!("AQI {qualifier}{value} {}", aqi_label(value)));
 
     let (city, condition, aqi) = top_titles(name, condition, aqi.as_deref(), area.width);
     let (summary, when) = bottom_titles(&summary, &when, area.width);
@@ -564,6 +569,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Today's figure is a reading taken now; another day's is the worst hour
+    /// of that day. They are different measurements, so the border has to say
+    /// which one it is showing — otherwise a day's peak reads as its average.
+    #[test]
+    fn a_days_worst_hour_is_not_labelled_like_a_current_reading() {
+        use crate::app::App;
+        use crate::weather::model::AirQuality;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let border = |selected: usize| -> String {
+            let mut weather = Weather::fixture(22, 14);
+            weather.air_quality = Some(AirQuality { us_aqi: 66 });
+
+            let mut app = App::new();
+            app.weather = Fetch::Ready(Weather::fixture(22, 14));
+            app.selected_day = selected;
+            app.location = ActiveLocation {
+                label: CITY.to_string(),
+                ..Default::default()
+            };
+
+            let mut t = Terminal::new(TestBackend::new(120, 9)).unwrap();
+            t.draw(|f| current_area_render(f, &app, &weather, f.area()))
+                .unwrap();
+            let buf = t.backend().buffer();
+            (0..120).map(|x| buf[(x, 0)].symbol()).collect()
+        };
+
+        let today = border(14);
+        let other = border(20);
+
+        assert!(
+            today.contains("AQI 66"),
+            "today should carry the live reading unqualified: {today:?}"
+        );
+        assert!(
+            other.contains("AQI max 42"),
+            "another day should be marked as that day's worst: {other:?}"
+        );
+        assert!(
+            !today.contains("max"),
+            "the live reading is not a maximum: {today:?}"
+        );
     }
 
     #[test]

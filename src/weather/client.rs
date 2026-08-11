@@ -40,30 +40,67 @@ fn bounded_agent(global: Duration, connect: Duration) -> Agent {
     )
 }
 
-pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
-    let aqi = thread::spawn(move || fetch_air_quality(lat, lon));
-
-    // Hold the result rather than propagating it. `?` here would return while
-    // the air-quality thread was still running, detaching it — so a run of
-    // early forecast failures left a pile of orphaned requests behind.
-    let forecast = fetch_daily(lat, lon);
-
-    let report = match aqi.join() {
-        Ok(Ok(report)) => report,
-        _ => AirQualityReport::default(),
-    };
-
-    let mut weather = forecast?;
-    weather.air_quality = report.current;
-    for day in &mut weather.daily {
-        day.aqi = report.daily_max.get(&day.date).copied();
-    }
-
-    Ok(weather)
+/// The hosts this client talks to.
+///
+/// A seam, not a feature: with the URLs hardcoded the only reachable test was
+/// one that never got a reply, so every *answered* failure — a 5xx, a body that
+/// is not JSON, a captive portal returning its login page with a cheerful 200 —
+/// was reasoned about rather than exercised. Pointing these at a loopback
+/// server makes each of them a test.
+#[derive(Debug, Clone)]
+pub struct Endpoints {
+    pub forecast: String,
+    pub geocode: String,
+    pub air_quality: String,
 }
 
-fn fetch_daily(lat: f64, lon: f64) -> Result<Weather> {
-    let mut response = agent().get("https://api.open-meteo.com/v1/forecast")
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            forecast: "https://api.open-meteo.com/v1/forecast".to_string(),
+            geocode: "https://geocoding-api.open-meteo.com/v1/search".to_string(),
+            air_quality: "https://air-quality-api.open-meteo.com/v1/air-quality".to_string(),
+        }
+    }
+}
+
+pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
+    fetch_forecast_with(agent(), &Endpoints::default(), lat, lon)
+}
+
+fn fetch_forecast_with(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+) -> Result<Weather> {
+    // A scoped thread rather than a detached one. The rule this encodes was
+    // already here in prose: `?` on the forecast while air quality was still
+    // running used to detach it, so a run of early failures left a pile of
+    // orphaned requests behind. `scope` will not return until the child has,
+    // so the borrow checker now enforces what the comment used to ask for.
+    thread::scope(|scope| {
+        let aqi = scope.spawn(|| fetch_air_quality_with(agent, endpoints, lat, lon));
+        let forecast = fetch_daily_with(agent, endpoints, lat, lon);
+
+        let report = match aqi.join() {
+            Ok(Ok(report)) => report,
+            _ => AirQualityReport::default(),
+        };
+
+        let mut weather = forecast?;
+        weather.air_quality = report.current;
+        for day in &mut weather.daily {
+            day.aqi = report.daily_max.get(&day.date).copied();
+        }
+
+        Ok(weather)
+    })
+}
+
+fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) -> Result<Weather> {
+    let mut response = agent
+        .get(&endpoints.forecast)
         .query("latitude", lat.to_string())
         .query("longitude", lon.to_string())
         .query(
@@ -91,8 +128,16 @@ fn fetch_daily(lat: f64, lon: f64) -> Result<Weather> {
 }
 
 pub fn search_locations(query: &str) -> Result<Vec<Location>> {
-    let mut response = agent()
-        .get("https://geocoding-api.open-meteo.com/v1/search")
+    search_locations_with(agent(), &Endpoints::default(), query)
+}
+
+fn search_locations_with(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    query: &str,
+) -> Result<Vec<Location>> {
+    let mut response = agent
+        .get(&endpoints.geocode)
         .query("name", query)
         .query("count", "5")
         .query("language", "en")
@@ -108,12 +153,20 @@ pub fn search_locations(query: &str) -> Result<Vec<Location>> {
         .collect())
 }
 
-pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<AirQualityReport> {
+/// Air quality is only ever fetched as part of a forecast — it shares that
+/// request's coordinates and window — so it takes the endpoints from its
+/// caller rather than reaching for the defaults itself.
+fn fetch_air_quality_with(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+) -> Result<AirQualityReport> {
     // The window matches the forecast request so nearly every day the user can
     // browse to carries a figure. Coverage runs out a couple of days short of
     // the forecast horizon, which the UI shows as absence rather than zero.
-    let mut response = agent()
-        .get("https://air-quality-api.open-meteo.com/v1/air-quality")
+    let mut response = agent
+        .get(&endpoints.air_quality)
         .query("latitude", lat.to_string())
         .query("longitude", lon.to_string())
         .query("current", "us_aqi")
@@ -132,9 +185,139 @@ pub fn fetch_air_quality(lat: f64, lon: f64) -> Result<AirQualityReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Instant;
+
+    /// A loopback server that answers every request with the same canned
+    /// response, and `Endpoints` pointing all three URLs at it.
+    ///
+    /// The failure that matters is not the network going away — that is the
+    /// timeout case, already covered. It is a server that answers *promptly*
+    /// and wrongly: an error status, a body that is not JSON, or the hotel
+    /// wifi's login page delivered with a cheerful 200.
+    fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                // Drain enough of the request that the client is not blocked
+                // writing while we are blocked replying.
+                let mut scratch = [0u8; 4096];
+                let _ = stream.read(&mut scratch);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let base = format!("http://{addr}/");
+        Endpoints {
+            forecast: base.clone(),
+            geocode: base.clone(),
+            air_quality: base,
+        }
+    }
+
+    /// Short bounds: these servers answer at once, so a test that hangs is a
+    /// bug in the test, and should say so in a moment rather than in 15s.
+    fn test_agent() -> Agent {
+        bounded_agent(Duration::from_secs(5), Duration::from_secs(2))
+    }
+
+    const CAPTIVE_PORTAL: &str =
+        "<!doctype html><html><body><h1>Sign in to WiFi</h1></body></html>";
+
+    #[test]
+    fn a_server_error_is_not_mistaken_for_a_forecast() {
+        let endpoints = serving("500 Internal Server Error", "text/plain", "upstream down");
+        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+
+        assert!(result.is_err(), "a 500 must not read as weather");
+    }
+
+    #[test]
+    fn a_captive_portal_answering_200_is_not_read_as_weather() {
+        let endpoints = serving("200 OK", "text/html", CAPTIVE_PORTAL);
+        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+
+        assert!(
+            result.is_err(),
+            "a login page with a 200 must fail, not render as a blank forecast"
+        );
+    }
+
+    /// Every *measurement* is optional so one null cannot cost the series — but
+    /// the rule has to stop at the top level. If `current` and `daily` were
+    /// optional too, this body would parse into an empty screen with no error.
+    #[test]
+    fn a_forecast_missing_its_required_blocks_fails_rather_than_emptying_the_screen() {
+        let endpoints = serving("200 OK", "application/json", "{}");
+        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+
+        assert!(result.is_err(), "an empty object is not a forecast");
+    }
+
+    #[test]
+    fn a_truncated_body_fails_rather_than_parsing_to_nothing() {
+        let endpoints = serving("200 OK", "application/json", "{\"current\":{\"tem");
+        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+
+        assert!(result.is_err(), "half a document is not a forecast");
+    }
+
+    /// The degradation rule, exercised rather than asserted: air quality is
+    /// supplementary, so losing it costs the reading, never the forecast.
+    #[test]
+    fn air_quality_failing_does_not_cost_the_forecast() {
+        let good = serving(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        let broken = serving("503 Service Unavailable", "text/plain", "no aqi today");
+        let endpoints = Endpoints {
+            air_quality: broken.air_quality,
+            ..good
+        };
+
+        let weather = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
+            .expect("a dead air-quality endpoint must not fail the forecast");
+
+        assert!(!weather.daily.is_empty(), "the forecast still arrived");
+        assert!(
+            weather.air_quality.is_none(),
+            "no reading is the right answer, not a fabricated one"
+        );
+        assert!(
+            weather.daily.iter().all(|d| d.aqi.is_none()),
+            "and no day should carry one either"
+        );
+    }
+
+    #[test]
+    fn a_search_error_status_is_not_an_empty_result_list() {
+        let endpoints = serving("404 Not Found", "text/plain", "nope");
+        let result = search_locations_with(&test_agent(), &endpoints, "reykjavik");
+
+        assert!(
+            result.is_err(),
+            "a 404 must not be indistinguishable from 'no cities matched'"
+        );
+    }
+
+    #[test]
+    fn a_captive_portal_on_search_is_not_an_empty_result_list() {
+        let endpoints = serving("200 OK", "text/html", CAPTIVE_PORTAL);
+        let result = search_locations_with(&test_agent(), &endpoints, "reykjavik");
+
+        assert!(result.is_err(), "a login page is not a list of cities");
+    }
 
     /// The agent every request shares must actually carry the bounds, not just
     /// have constants declared near it. With ureq's defaults both of these are
