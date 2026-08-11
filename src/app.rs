@@ -16,7 +16,7 @@ pub enum Screen {
 
 /// How far the vertical arrows jump. Eight days is a long way at one press
 /// per hour.
-const HOURS_PER_DAY: isize = 24;
+const HOURS_PER_DAY: usize = 24;
 
 /// A place the app can fetch for, with its label and coordinates in one value.
 /// They were separate before: selecting a search result stored the label and
@@ -176,6 +176,20 @@ impl App {
         self.selected_hour = (self.selected_hour as isize + delta).rem_euclid(count) as usize;
     }
 
+    /// The fixture's window is a whole number of days, which is exactly the
+    /// case the day-step bug hid behind, so tests build partial ones too.
+    #[cfg(test)]
+    fn forecast_hour_stamps(&self) -> Vec<String> {
+        match &self.weather {
+            Fetch::Ready(weather) => weather
+                .forecast_hours()
+                .iter()
+                .map(|h| h.time.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn select_prev_hour(&mut self) {
         self.step_hour(-1);
     }
@@ -184,12 +198,43 @@ impl App {
         self.step_hour(1);
     }
 
+    /// A day's step, wrapping to the *same time of day* at the other end.
+    ///
+    /// The forward window is however many hours are left of the forecast, so it
+    /// is only a whole number of days at the top of the hour it was fetched —
+    /// 173 hours, say, which is seven days and five hours. Wrapping on the raw
+    /// index therefore shifted the clock by those five hours every lap, walking
+    /// 7 PM to 2 PM to 9 AM. The days it landed on looked arbitrary because the
+    /// time of day was silently sliding. Wrapping within the hours that share a
+    /// time of day keeps it pinned.
+    fn step_day(&mut self, forward: bool) {
+        let Some(count) = self.hour_count() else {
+            return;
+        };
+        let time_of_day = self.selected_hour % HOURS_PER_DAY;
+
+        self.selected_hour = if forward {
+            match self.selected_hour + HOURS_PER_DAY {
+                next if next < count => next,
+                // Back to the first hour sharing this time of day.
+                _ => time_of_day,
+            }
+        } else if let Some(previous) = self.selected_hour.checked_sub(HOURS_PER_DAY) {
+            previous
+        } else {
+            // The last day that reaches this time of day. The final day of the
+            // window is usually partial, so that is not always the last day.
+            let days = (count - 1 - time_of_day) / HOURS_PER_DAY;
+            time_of_day + days * HOURS_PER_DAY
+        };
+    }
+
     pub fn select_prev_hour_day(&mut self) {
-        self.step_hour(-HOURS_PER_DAY);
+        self.step_day(false);
     }
 
     pub fn select_next_hour_day(&mut self) {
-        self.step_hour(HOURS_PER_DAY);
+        self.step_day(true);
     }
 
     /// Hour zero of the forward window is the current hour, by construction.
@@ -305,6 +350,110 @@ mod tests {
 
         app.select_next_hour();
         assert_eq!(app.selected_hour, 0, "and forward again returns");
+    }
+
+    /// A window of 173 hours — seven days and five — is the ordinary case: it
+    /// is however much forecast is left at whatever hour you happened to open
+    /// the app. The fixture's 192 is the lucky one, which is why this bug
+    /// survived a full test suite.
+    fn app_with_a_partial_last_day() -> App {
+        let mut app = app_with(22, 14);
+        if let Fetch::Ready(weather) = &mut app.weather {
+            weather.hourly.truncate(weather.now_hour + 173);
+        }
+        app.selected_hour = 0;
+        app
+    }
+
+    fn clock_of(app: &App) -> String {
+        let stamps = app.forecast_hour_stamps();
+        stamps[app.selected_hour][11..].to_string()
+    }
+
+    /// The regression. Stepping by whole days must never move the clock, and
+    /// wrapping on the raw index did: 7 PM became 2 PM became 9 AM, so the days
+    /// it landed on looked arbitrary.
+    #[test]
+    fn the_day_arrows_never_shift_the_time_of_day() {
+        for start in [0usize, 5, 19, 23, 100, 172] {
+            let mut app = app_with_a_partial_last_day();
+            app.selected_hour = start;
+            let expected = clock_of(&app);
+
+            for press in 1..=30 {
+                app.select_next_hour_day();
+                assert_eq!(
+                    clock_of(&app),
+                    expected,
+                    "start {start}, {press} presses down landed on a different clock hour"
+                );
+            }
+            for press in 1..=30 {
+                app.select_prev_hour_day();
+                assert_eq!(
+                    clock_of(&app),
+                    expected,
+                    "start {start}, {press} presses up landed on a different clock hour"
+                );
+            }
+        }
+    }
+
+    /// Every press has to move somewhere, and a full cycle has to come home —
+    /// otherwise the arrows either stick or drift.
+    #[test]
+    fn a_lap_of_day_steps_visits_each_day_once_and_returns() {
+        let mut app = app_with_a_partial_last_day();
+        app.selected_hour = 19;
+
+        let mut seen = vec![app.selected_hour];
+        loop {
+            app.select_next_hour_day();
+            if app.selected_hour == 19 {
+                break;
+            }
+            assert!(
+                !seen.contains(&app.selected_hour),
+                "hour {} came round twice in one lap: {seen:?}",
+                app.selected_hour
+            );
+            seen.push(app.selected_hour);
+            assert!(seen.len() < 20, "the lap never closed: {seen:?}");
+        }
+
+        // 173 hours from 19:00 reaches that clock hour on seven days.
+        assert_eq!(seen, vec![19, 43, 67, 91, 115, 139, 163]);
+    }
+
+    /// The last day of the window is usually a partial one, so stepping back
+    /// from the first day must reach the last day that actually has this hour,
+    /// not simply the end of the series.
+    #[test]
+    fn stepping_back_from_the_first_day_lands_on_a_real_hour() {
+        let mut app = app_with_a_partial_last_day();
+
+        for start in 0..24usize {
+            app.selected_hour = start;
+            app.select_prev_hour_day();
+
+            let stamps = app.forecast_hour_stamps();
+            assert!(
+                app.selected_hour < stamps.len(),
+                "start {start} left hour {} off the end of {} hours",
+                app.selected_hour,
+                stamps.len()
+            );
+            assert_eq!(
+                stamps[app.selected_hour][11..],
+                stamps[start][11..],
+                "start {start} changed the clock"
+            );
+            assert!(
+                app.selected_hour + HOURS_PER_DAY >= stamps.len(),
+                "start {start} stopped short of the last day at {}",
+                app.selected_hour
+            );
+        }
     }
 
     #[test]
