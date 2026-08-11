@@ -9,7 +9,7 @@ of daily highs, and an hourly precipitation chart — no account, no API key.
 *Virga* is precipitation that evaporates before it reaches the ground. It is
 also, most weeks, what the precipitation chart draws.
 
-<img width="800" height="571" alt="CleanShot 2026-08-11 at 18 48 34" src="https://github.com/user-attachments/assets/365ad586-50a8-4f14-a8e8-1b2f8780dbb7" />
+<img width="800" height="534" alt="CleanShot 2026-08-11 at 19 15 09" src="https://github.com/user-attachments/assets/413771fb-d6d8-4438-842f-14625039f806" />
 
 Press `p` for the hourly precipitation screen. Chance rises from the centre
 rule, forecast amount hangs below it — a tall spike with nothing beneath it
