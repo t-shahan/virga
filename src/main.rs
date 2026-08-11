@@ -128,8 +128,12 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                             }
                             KeyCode::Left => app.select_prev_hour(),
                             KeyCode::Right => app.select_next_hour(),
-                            KeyCode::Up => app.select_prev_hour_day(),
-                            KeyCode::Down => app.select_next_hour_day(),
+                            // Up advances and down goes back, pairing the
+                            // vertical arrows with the horizontal ones by
+                            // direction of travel rather than by the list
+                            // convention where down means "next".
+                            KeyCode::Up => app.select_next_hour_day(),
+                            KeyCode::Down => app.select_prev_hour_day(),
                             KeyCode::Char('n') | KeyCode::Home => app.select_now(),
                             _ => {}
                         },
