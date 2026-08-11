@@ -1,0 +1,339 @@
+//! Terminal keys in, domain actions out.
+//!
+//! This is the only module that knows what a `KeyEvent` is. Everything past it
+//! deals in `Action`, which keeps `App` free of Ratatui and Crossterm types and
+//! — more usefully — makes the whole of "which key does what" testable without
+//! a terminal.
+
+use crate::app::Screen;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+/// Something the user asked for, named in the app's own terms.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Action {
+    Quit,
+    /// Leave the current screen. Where that goes is the app's business.
+    Back,
+    Refresh,
+    ToggleUnits,
+    OpenSearch,
+    OpenPrecipitation,
+    PrevDay,
+    NextDay,
+    Today,
+    PrevHour,
+    NextHour,
+    PrevHourDay,
+    NextHourDay,
+    Now,
+    Insert(char),
+    Backspace,
+    Submit,
+    PrevResult,
+    NextResult,
+}
+
+impl Action {
+    /// Whether holding the key down may fire this action repeatedly.
+    ///
+    /// Moving around and editing text are what people actually hold a key for.
+    /// Everything else either sends a network request or changes screen, and a
+    /// held key doing that repeatedly is how an unbounded queue of requests
+    /// gets built by accident.
+    fn repeatable(self) -> bool {
+        matches!(
+            self,
+            Action::PrevDay
+                | Action::NextDay
+                | Action::PrevHour
+                | Action::NextHour
+                | Action::PrevHourDay
+                | Action::NextHourDay
+                | Action::PrevResult
+                | Action::NextResult
+                | Action::Insert(_)
+                | Action::Backspace
+        )
+    }
+}
+
+/// The action a key means on `screen`, or `None` if it means nothing there.
+///
+/// Event *kind* is filtered here rather than deeper in: Crossterm's Windows
+/// backend reports press and release for every keystroke, and enhanced
+/// terminal protocols can add repeats on Unix too. Acting on a release would
+/// double every keystroke and every request.
+pub fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
+    match key.kind {
+        KeyEventKind::Release => return None,
+        KeyEventKind::Repeat => {
+            let action = binding(key, screen)?;
+            return action.repeatable().then_some(action);
+        }
+        KeyEventKind::Press => {}
+    }
+    binding(key, screen)
+}
+
+fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
+    // Checked before the screen bindings so it works even where the plain key
+    // means something else — `c` is ordinary text on the search screen.
+    // `contains` rather than equality, because terminals do not all report the
+    // same modifier set alongside Control.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Some(Action::Quit);
+    }
+
+    match screen {
+        Screen::Weather => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+            KeyCode::Char('r') => Some(Action::Refresh),
+            KeyCode::Char('u') => Some(Action::ToggleUnits),
+            KeyCode::Char('l') => Some(Action::OpenSearch),
+            KeyCode::Char('p') => Some(Action::OpenPrecipitation),
+            KeyCode::Left => Some(Action::PrevDay),
+            KeyCode::Right => Some(Action::NextDay),
+            KeyCode::Char('n') | KeyCode::Home => Some(Action::Today),
+            _ => None,
+        },
+        Screen::Precipitation => match key.code {
+            KeyCode::Char('q') => Some(Action::Quit),
+            // `p` closes the screen as well as opening it, so the key that got
+            // you here is always a way back out.
+            KeyCode::Char('b' | 'p') | KeyCode::Enter | KeyCode::Esc => Some(Action::Back),
+            KeyCode::Char('r') => Some(Action::Refresh),
+            KeyCode::Char('u') => Some(Action::ToggleUnits),
+            KeyCode::Char('l') => Some(Action::OpenSearch),
+            KeyCode::Left => Some(Action::PrevHour),
+            KeyCode::Right => Some(Action::NextHour),
+            // Up advances and down goes back, pairing the vertical arrows with
+            // the horizontal ones by direction of travel rather than by the
+            // list convention where down means "next".
+            KeyCode::Up => Some(Action::NextHourDay),
+            KeyCode::Down => Some(Action::PrevHourDay),
+            KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
+            _ => None,
+        },
+        // Every printable key is text here, so none of the command letters
+        // apply — `q` types a q rather than quitting.
+        Screen::Search => match key.code {
+            KeyCode::Esc => Some(Action::Back),
+            KeyCode::Enter => Some(Action::Submit),
+            KeyCode::Backspace => Some(Action::Backspace),
+            KeyCode::Char(c) => Some(Action::Insert(c)),
+            KeyCode::Up => Some(Action::PrevResult),
+            KeyCode::Down => Some(Action::NextResult),
+            _ => None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn of_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        let mut key = press(code);
+        key.kind = kind;
+        key
+    }
+
+    const SCREENS: [Screen; 3] = [Screen::Weather, Screen::Precipitation, Screen::Search];
+
+    /// The Windows backend reports a release for every press. Acting on both
+    /// types every character twice and fires every action twice.
+    #[test]
+    fn a_key_release_never_means_anything() {
+        for screen in SCREENS {
+            for code in [
+                KeyCode::Char('r'),
+                KeyCode::Char('q'),
+                KeyCode::Char('a'),
+                KeyCode::Left,
+                KeyCode::Enter,
+                KeyCode::Esc,
+                KeyCode::Backspace,
+            ] {
+                assert_eq!(
+                    action_for(of_kind(code, KeyEventKind::Release), screen),
+                    None,
+                    "{code:?} on {screen:?} acted on release"
+                );
+            }
+        }
+    }
+
+    /// A Windows-style press/release pair must insert exactly one character.
+    #[test]
+    fn a_press_and_release_pair_types_one_character() {
+        let typed: Vec<Action> = [KeyEventKind::Press, KeyEventKind::Release]
+            .into_iter()
+            .filter_map(|kind| action_for(of_kind(KeyCode::Char('x'), kind), Screen::Search))
+            .collect();
+
+        assert_eq!(typed, vec![Action::Insert('x')]);
+    }
+
+    /// Holding an arrow should scroll. Holding `r` should not queue a fetch per
+    /// frame, which is how the request channel grows without bound.
+    #[test]
+    fn only_movement_and_typing_repeat_when_a_key_is_held() {
+        let repeat = |code, screen| action_for(of_kind(code, KeyEventKind::Repeat), screen);
+
+        assert_eq!(
+            repeat(KeyCode::Left, Screen::Weather),
+            Some(Action::PrevDay)
+        );
+        assert_eq!(
+            repeat(KeyCode::Up, Screen::Precipitation),
+            Some(Action::NextHourDay)
+        );
+        assert_eq!(
+            repeat(KeyCode::Char('a'), Screen::Search),
+            Some(Action::Insert('a'))
+        );
+        assert_eq!(
+            repeat(KeyCode::Backspace, Screen::Search),
+            Some(Action::Backspace)
+        );
+
+        for (code, screen) in [
+            (KeyCode::Char('r'), Screen::Weather),
+            (KeyCode::Char('l'), Screen::Weather),
+            (KeyCode::Char('u'), Screen::Weather),
+            (KeyCode::Char('p'), Screen::Weather),
+            (KeyCode::Char('q'), Screen::Weather),
+            (KeyCode::Char('r'), Screen::Precipitation),
+            (KeyCode::Enter, Screen::Search),
+            (KeyCode::Esc, Screen::Search),
+        ] {
+            assert_eq!(
+                repeat(code, screen),
+                None,
+                "held {code:?} repeated on {screen:?}"
+            );
+        }
+    }
+
+    /// Ctrl-C quits from anywhere, including where `c` is ordinary text.
+    #[test]
+    fn ctrl_c_quits_from_every_screen() {
+        for screen in SCREENS {
+            let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert_eq!(action_for(key, screen), Some(Action::Quit), "{screen:?}");
+        }
+    }
+
+    /// Terminals do not all report the same modifier set, so an exact match on
+    /// CONTROL would miss Ctrl-Shift-C and friends.
+    #[test]
+    fn ctrl_c_survives_extra_modifiers() {
+        for extra in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+        ] {
+            let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL | extra);
+            assert_eq!(
+                action_for(key, Screen::Weather),
+                Some(Action::Quit),
+                "{extra:?}"
+            );
+        }
+    }
+
+    /// Plain `c` on the search screen is a letter, not a quit.
+    #[test]
+    fn an_unmodified_c_is_text_on_the_search_screen() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('c')), Screen::Search),
+            Some(Action::Insert('c'))
+        );
+    }
+
+    /// Every command letter is text once the search box has focus, or typing a
+    /// city with a `q` or an `r` in it would set the app off.
+    #[test]
+    fn command_letters_are_text_on_the_search_screen() {
+        for c in ['q', 'r', 'u', 'l', 'p', 'b', 'n'] {
+            assert_eq!(
+                action_for(press(KeyCode::Char(c)), Screen::Search),
+                Some(Action::Insert(c)),
+                "{c:?} was treated as a command"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arrows_mean_different_things_on_each_screen() {
+        assert_eq!(
+            action_for(press(KeyCode::Left), Screen::Weather),
+            Some(Action::PrevDay)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Left), Screen::Precipitation),
+            Some(Action::PrevHour)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Down), Screen::Search),
+            Some(Action::NextResult)
+        );
+    }
+
+    /// Up advances through time and down goes back — the reverse of the list
+    /// convention, and deliberate.
+    #[test]
+    fn the_day_arrows_point_the_way_they_read() {
+        assert_eq!(
+            action_for(press(KeyCode::Up), Screen::Precipitation),
+            Some(Action::NextHourDay)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Down), Screen::Precipitation),
+            Some(Action::PrevHourDay)
+        );
+    }
+
+    /// Esc quits the weather screen but only backs out of the others, so a
+    /// stray Esc while searching cannot close the app.
+    #[test]
+    fn escape_quits_only_from_the_weather_screen() {
+        assert_eq!(
+            action_for(press(KeyCode::Esc), Screen::Weather),
+            Some(Action::Quit)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), Screen::Precipitation),
+            Some(Action::Back)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Esc), Screen::Search),
+            Some(Action::Back)
+        );
+    }
+
+    #[test]
+    fn p_both_opens_and_closes_the_precipitation_screen() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('p')), Screen::Weather),
+            Some(Action::OpenPrecipitation)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('p')), Screen::Precipitation),
+            Some(Action::Back)
+        );
+    }
+
+    #[test]
+    fn unbound_keys_are_ignored_rather_than_guessed_at() {
+        for screen in [Screen::Weather, Screen::Precipitation] {
+            assert_eq!(action_for(press(KeyCode::Tab), screen), None);
+            assert_eq!(action_for(press(KeyCode::F(5)), screen), None);
+        }
+        assert_eq!(action_for(press(KeyCode::Tab), Screen::Search), None);
+    }
+}

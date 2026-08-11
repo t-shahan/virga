@@ -1,14 +1,14 @@
-use crate::app::{ActiveLocation, App, Fetch, Screen};
-use crate::events::{Message, Request};
+use crate::app::{App, Fetch, Screen};
 use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event;
-use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
+use ratatui::crossterm::event::Event;
 use std::sync::mpsc;
 use std::time::Duration;
 
 mod app;
 mod events;
+mod input;
 mod ui;
 mod units;
 mod weather;
@@ -20,13 +20,17 @@ fn main() -> Result<()> {
     result
 }
 
+/// Terminal setup, the draw loop, and carrying messages between the worker and
+/// the app. Every state transition lives in `App` and every decision about what
+/// a key means lives in `input`, so what remains here is the part that
+/// genuinely needs a terminal and a channel.
 fn run(mut terminal: DefaultTerminal) -> Result<()> {
     let (request_tx, request_rx) = mpsc::channel();
     let (message_tx, message_rx) = mpsc::channel();
     events::spawn_worker(request_rx, message_tx);
 
     let mut app = App::new();
-    request_tx.send(Request::Fetch(app.request(ActiveLocation::default())))?;
+    request_tx.send(app.initial_fetch())?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
@@ -59,12 +63,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
 
         while let Ok(message) = message_rx.try_recv() {
             dirty = true;
-            match message {
-                Message::Loaded(location, w) => app.commit(location, w),
-                Message::LoadFailed(e) => app.weather = Fetch::Failed(e),
-                Message::Located(l) => app.results = Fetch::Ready(l),
-                Message::SearchFailed(e) => app.results = Fetch::Failed(e),
-            }
+            app.on_message(message);
         }
 
         if event::poll(Duration::from_millis(100))? {
@@ -74,101 +73,17 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                 // change, the resize has to say so itself.
                 Event::Resize(_, _) => dirty = true,
                 Event::Key(key) => {
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        break Ok(());
-                    }
+                    // Keys that mean nothing on this screen — and every key
+                    // release — leave no mark, so they do not even cost a redraw.
+                    if let Some(action) = input::action_for(key, app.screen) {
+                        dirty = true;
 
-                    dirty = true;
-
-                    match app.screen {
-                        Screen::Weather => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                            KeyCode::Char('r') => {
-                                let target = app.refresh_target();
-                                request_tx.send(Request::Fetch(app.request(target)))?;
-                            }
-                            KeyCode::Char('u') => {
-                                app.unit = app.unit.toggle();
-                            }
-                            KeyCode::Char('l') => app.open_search(),
-                            KeyCode::Char('p') => {
-                                app.screen = Screen::Precipitation;
-                                app.select_now();
-                            }
-                            KeyCode::Left => app.select_prev_day(),
-                            KeyCode::Right => app.select_next_day(),
-                            KeyCode::Char('n') | KeyCode::Home => app.select_today(),
-                            _ => {}
-                        },
-                        // Refresh and location stay live here rather than
-                        // bouncing to the main screen first: both are about the
-                        // place, not the screen, and a stale hourly forecast is
-                        // exactly when you want to refresh.
-                        Screen::Precipitation => match key.code {
-                            KeyCode::Char('q') => break Ok(()),
-                            // `p` toggles: whatever opened the screen closes
-                            // it, so the key you pressed to get here is always
-                            // a way back out.
-                            KeyCode::Char('b' | 'p') | KeyCode::Enter | KeyCode::Esc => {
-                                app.screen = Screen::Weather;
-                            }
-                            KeyCode::Char('r') => {
-                                let target = app.refresh_target();
-                                request_tx.send(Request::Fetch(app.request(target)))?;
-                            }
-                            KeyCode::Char('u') => app.unit = app.unit.toggle(),
-                            KeyCode::Char('l') => app.open_search(),
-                            KeyCode::Left => app.select_prev_hour(),
-                            KeyCode::Right => app.select_next_hour(),
-                            // Up advances and down goes back, pairing the
-                            // vertical arrows with the horizontal ones by
-                            // direction of travel rather than by the list
-                            // convention where down means "next".
-                            KeyCode::Up => app.select_next_hour_day(),
-                            KeyCode::Down => app.select_prev_hour_day(),
-                            KeyCode::Char('n') | KeyCode::Home => app.select_now(),
-                            _ => {}
-                        },
-                        Screen::Search => match key.code {
-                            KeyCode::Esc => app.close_search(),
-                            KeyCode::Backspace => {
-                                app.query.pop();
-                                app.invalidate_results();
-                            }
-                            KeyCode::Enter => {
-                                let picked = match &app.results {
-                                    Fetch::Ready(locations) => {
-                                        locations.get(app.selected).map(ActiveLocation::from)
-                                    }
-                                    _ => None,
-                                };
-
-                                if let Some(picked) = picked {
-                                    app.results = Fetch::Idle;
-                                    app.close_search();
-                                    request_tx.send(Request::Fetch(app.request(picked)))?;
-                                } else if !app.query.is_empty() {
-                                    app.results = Fetch::Loading;
-                                    app.selected = 0;
-                                    request_tx.send(Request::Search(app.query.clone()))?;
-                                }
-                            }
-                            KeyCode::Char(c) => {
-                                app.query.push(c);
-                                app.invalidate_results();
-                            }
-                            KeyCode::Up => app.selected = app.selected.saturating_sub(1),
-                            KeyCode::Down => {
-                                if let Fetch::Ready(locations) = &app.results
-                                    && app.selected + 1 < locations.len()
-                                {
-                                    app.selected += 1;
-                                }
-                            }
-                            _ => {}
-                        },
+                        if let Some(request) = app.on_action(action) {
+                            request_tx.send(request)?;
+                        }
+                        if app.should_quit {
+                            break Ok(());
+                        }
                     }
                 }
                 _ => {}
