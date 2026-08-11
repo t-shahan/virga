@@ -628,6 +628,23 @@ mod tests {
         }
     }
 
+    /// The bottom border must land inside the area, not one cell past it — a
+    /// pty reconstruction made it look like it wrapped.
+    #[test]
+    fn the_box_closes_inside_its_own_width() {
+        let weather = Weather::fixture(22, 14);
+        for (w, h) in [(118u16, 22u16), (118, 26), (90, 12), (119, 20), (37, 14)] {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 3))
+                .unwrap();
+            let b = t.backend().buffer().clone();
+            let bottom: String = (0..w).map(|x| b[(x, h - 1)].symbol()).collect();
+            assert!(bottom.starts_with('└'), "{w}x{h}: {bottom:?}");
+            assert!(bottom.ends_with('┘'), "{w}x{h}: {bottom:?}");
+            assert_eq!(bottom.chars().count(), w as usize, "{w}x{h}");
+        }
+    }
+
     /// Day boundaries are landmarks rather than readings, so the mark takes the
     /// accent while the bars above it stay ordinary.
     #[test]
