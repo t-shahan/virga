@@ -5,7 +5,7 @@
 
 use crate::app::App;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
-use crate::ui::precip_chart::{MAX_HEIGHT as CHART_MAX_HEIGHT, precip_chart_render};
+use crate::ui::precip_chart::precip_chart_render;
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
 use crate::units::Unit;
 use crate::weather::code::description;
@@ -43,24 +43,17 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, area: Rect) {
     let selected = app.selected_hour;
     let hour = hours.get(selected);
 
-    // The pane is sized to its content and the chart takes the rest, capped so
-    // a tall terminal does not stretch it into mostly-empty headroom. Letting
-    // the pane stretch instead left blank rows inside its own border, which
-    // reads as a bug rather than as spare room.
+    // The pane is sized to its content and the chart takes every remaining
+    // row. Capping the chart instead left a band of dead space between it and
+    // the legend, which reads far worse than the honest headroom a chance
+    // scaled 0-100 leaves above a quiet week's bars. Extra rows are not wasted
+    // either: they are what give the eighth-resolution bars room to tell 19%
+    // from 25%.
     let [pane, chart] =
         Layout::vertical([Constraint::Length(DETAIL_ROWS), Constraint::Fill(1)]).areas(area);
 
     detail_pane_render(frame, app, hours, hour, pane);
-    precip_chart_render(
-        frame,
-        weather,
-        Rect {
-            height: chart.height.min(CHART_MAX_HEIGHT),
-            ..chart
-        },
-        app.unit,
-        selected,
-    );
+    precip_chart_render(frame, weather, chart, app.unit, selected);
 }
 
 fn detail_pane_render(

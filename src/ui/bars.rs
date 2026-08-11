@@ -15,13 +15,21 @@ pub(super) struct Columns {
 }
 
 impl Columns {
-    /// Widen the bars if the whole series would leave room to spare, but never
-    /// past `max_stride` — beyond that they grow fat rather than informative.
-    /// Never below `min_stride` either: on a cramped chart it is better to show
-    /// fewer bars than to render every one of them as a spike.
-    pub fn fit(width: u16, count: usize, min_stride: u16, max_stride: u16) -> Self {
+    /// Lay out `wanted` bars across `width`, widening them if that leaves room
+    /// to spare but never past `max_stride` — beyond that they grow fat rather
+    /// than informative. Never below `min_stride` either: on a cramped chart it
+    /// is better to show fewer bars than to render every one of them as a
+    /// spike.
+    ///
+    /// `wanted` is how many bars the caller would *like* on screen, which is
+    /// not always the length of its series. The daily chart wants all 22 days
+    /// and passes that. The hourly chart's series is eight days long and never
+    /// fits, so passing its length would peg the stride at the minimum on every
+    /// terminal however wide; it passes the span it actually wants to show and
+    /// spends surplus width on broader bars instead.
+    pub fn fit(width: u16, wanted: usize, min_stride: u16, max_stride: u16) -> Self {
         let room = width as usize + GAP as usize;
-        let stride = (room / count.max(1)).clamp(min_stride as usize, max_stride as usize);
+        let stride = (room / wanted.max(1)).clamp(min_stride as usize, max_stride as usize);
 
         Self {
             stride: stride as u16,

@@ -5,8 +5,17 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
-    let binds: &[(&str, &str)] = match app.screen {
+/// Columns of indent, and the gap between one binding and the next.
+const INDENT: usize = 2;
+const SPACING: usize = 3;
+
+/// Rows the legend may take before it starts dropping bindings. Two covers
+/// every screen at any width the app renders at; past that it would be eating
+/// rows the chart needs more.
+const MAX_ROWS: u16 = 2;
+
+fn bindings(app: &App) -> &'static [(&'static str, &'static str)] {
+    match app.screen {
         Screen::Weather => &[
             ("q", "quit"),
             ("←→", "day"),
@@ -16,8 +25,8 @@ pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
             ("u", "units"),
             ("l", "location"),
         ],
-        // Quit and back lead, as they do on the weather screen: a narrow
-        // terminal clips the tail, and those are the two worth keeping.
+        // Quit and back lead, as they do on the weather screen: if anything is
+        // going to be dropped, those are the two worth keeping.
         Screen::Precipitation => &[
             ("q", "quit"),
             ("b", "back"),
@@ -33,15 +42,76 @@ pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
             }
             _ => &[("enter", "search"), ("esc", "cancel")],
         },
-    };
+    }
+}
 
-    let mut spans = vec![Span::from("  ")];
-    for (key, label) in binds {
-        spans.push(Span::from(format!("[{key}]")).yellow());
-        spans.push(Span::from(format!(" {label}   ")).dark_gray());
+/// Wrap the bindings onto as many rows as they need, up to `MAX_ROWS`.
+///
+/// One row that simply clipped sheared bindings mid-word as the terminal
+/// narrowed, leaving something like `[u] uni` against the edge that read as a
+/// rendering fault. Breaking between whole bindings keeps every one that is
+/// shown legible, and lets a narrow terminal keep them all rather than losing
+/// the tail.
+fn wrapped(app: &App, width: u16) -> Vec<Line<'static>> {
+    let room = width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    let mut row: Vec<Span> = Vec::new();
+    let mut used = INDENT;
+
+    for (key, label) in bindings(app) {
+        let entry = format!("[{key}] {label}").chars().count();
+
+        // Wider than the whole bar even on a row of its own. Nothing can be
+        // shown without shearing it, so show nothing. Only reachable below the
+        // app's minimum width, where the size warning replaces the interface.
+        if INDENT + entry > room {
+            continue;
+        }
+
+        // Only the gap *between* bindings counts; the first on a row is flush
+        // against the indent.
+        let needed = if row.is_empty() {
+            entry
+        } else {
+            SPACING + entry
+        };
+
+        if !row.is_empty() && used + needed > room {
+            if lines.len() + 1 >= MAX_ROWS as usize {
+                // No rows left to give, so the remaining bindings go unshown
+                // rather than overflowing the area.
+                break;
+            }
+            lines.push(Line::from(std::mem::take(&mut row)));
+            used = INDENT;
+        }
+
+        if row.is_empty() {
+            row.push(Span::from(" ".repeat(INDENT)));
+        } else {
+            row.push(Span::from(" ".repeat(SPACING)));
+            used += SPACING;
+        }
+
+        row.push(Span::from(format!("[{key}]")).yellow());
+        row.push(Span::from(format!(" {label}")).dark_gray());
+        used += entry;
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if !row.is_empty() {
+        lines.push(Line::from(row));
+    }
+    lines
+}
+
+/// How many rows the legend needs at this width, so the caller can reserve
+/// them before laying out everything else.
+pub(super) fn legend_rows(app: &App, width: u16) -> u16 {
+    (wrapped(app, width).len() as u16).clamp(1, MAX_ROWS)
+}
+
+pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
+    frame.render_widget(Paragraph::new(wrapped(app, area.width)), area);
 }
 
 #[cfg(test)]
@@ -51,25 +121,33 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn legend_at(width: u16, screen: Screen) -> String {
+    fn app_on(screen: Screen) -> App {
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
         app.screen = screen;
+        app
+    }
 
-        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+    fn legend_at(width: u16, screen: Screen) -> Vec<String> {
+        let app = app_on(screen);
+        let height = legend_rows(&app, width);
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| keybind_legend_render(f, &app, f.area()))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
-        (0..width).map(|x| buffer[(x, 0)].symbol()).collect()
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
     }
 
     /// Nothing else on the weather screen mentions that `p` exists, so the
     /// legend is the only thing making the screen discoverable at all.
     #[test]
     fn the_weather_legend_advertises_the_precipitation_screen() {
-        let legend = legend_at(120, Screen::Weather);
+        let legend = legend_at(120, Screen::Weather).join("\n");
         assert!(legend.contains("[p]"), "{legend:?}");
         assert!(legend.contains("precip"), "{legend:?}");
     }
@@ -78,22 +156,84 @@ mod tests {
     /// its legend must not still describe the weather screen's bindings.
     #[test]
     fn the_precipitation_legend_describes_its_own_keys() {
-        let legend = legend_at(120, Screen::Precipitation);
+        let legend = legend_at(120, Screen::Precipitation).join("\n");
 
         assert!(legend.contains("[b] back"), "{legend:?}");
         assert!(legend.contains("hour"), "{legend:?}");
-        assert!(!legend.contains("[p]"), "already there: {legend:?}");
         assert!(
             !legend.contains("location"),
             "l returns to search: {legend:?}"
         );
     }
 
-    /// A narrow terminal clips the tail of the bar, so the two keys that get
-    /// you out have to come first.
+    /// The bug: a single row simply clipped, so narrowing the terminal sheared
+    /// bindings mid-word. Every binding that appears must appear whole.
     #[test]
-    fn quitting_and_leaving_survive_a_narrow_terminal() {
-        let legend = legend_at(24, Screen::Precipitation);
+    fn narrowing_never_cuts_a_binding_in_half() {
+        for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
+            for width in 8u16..=160 {
+                let rows = legend_at(width, screen);
+
+                for row in &rows {
+                    assert!(
+                        row.chars().count() <= width as usize,
+                        "width {width}: row overflows: {row:?}"
+                    );
+                    // A sheared binding leaves an opening bracket with no
+                    // closing one.
+                    assert_eq!(
+                        row.matches('[').count(),
+                        row.matches(']').count(),
+                        "width {width}: cut a key in half: {row:?}"
+                    );
+                }
+
+                // Any key that made it onto the bar brought its label with it.
+                let shown = rows.join(" ");
+                for (key, label) in bindings(&app_on(screen)) {
+                    if shown.contains(&format!("[{key}]")) {
+                        assert!(
+                            shown.contains(&format!("[{key}] {label}")),
+                            "width {width}: {key:?} lost its label: {shown:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wrapping is what lets a narrow terminal keep bindings it would
+    /// otherwise have clipped off the end.
+    #[test]
+    fn a_narrow_terminal_wraps_rather_than_dropping_the_tail() {
+        let app = app_on(Screen::Precipitation);
+        assert_eq!(legend_rows(&app, 120), 1, "one row is plenty at 120");
+
+        let narrow = legend_at(50, Screen::Precipitation);
+        assert_eq!(narrow.len(), 2, "50 columns needs two rows: {narrow:?}");
+
+        let shown = narrow.join(" ");
+        for key in ["[q]", "[b]", "[←→]", "[↑↓]", "[n]"] {
+            assert!(shown.contains(key), "50 columns lost {key}: {shown:?}");
+        }
+    }
+
+    /// Two rows is the ceiling however little room there is, or the legend
+    /// would start taking rows the chart needs more.
+    #[test]
+    fn the_legend_never_takes_more_than_its_share() {
+        for width in 1u16..=200 {
+            for screen in [Screen::Weather, Screen::Precipitation] {
+                let rows = legend_rows(&app_on(screen), width);
+                assert!((1..=MAX_ROWS).contains(&rows), "width {width}: {rows} rows");
+            }
+        }
+    }
+
+    /// Whatever gets dropped, the two keys that get you out come first.
+    #[test]
+    fn quitting_and_leaving_survive_a_very_narrow_terminal() {
+        let legend = legend_at(20, Screen::Precipitation).join(" ");
         assert!(legend.contains("[q]"), "{legend:?}");
         assert!(legend.contains("[b]"), "{legend:?}");
     }

@@ -111,7 +111,10 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                         // exactly when you want to refresh.
                         Screen::Precipitation => match key.code {
                             KeyCode::Char('q') => break Ok(()),
-                            KeyCode::Char('b') | KeyCode::Enter | KeyCode::Esc => {
+                            // `p` toggles: whatever opened the screen closes
+                            // it, so the key you pressed to get here is always
+                            // a way back out.
+                            KeyCode::Char('b' | 'p') | KeyCode::Enter | KeyCode::Esc => {
                                 app.screen = Screen::Weather;
                             }
                             KeyCode::Char('r') => {

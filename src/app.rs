@@ -8,6 +8,7 @@ pub enum Fetch<T> {
     Failed(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Screen {
     Weather,
     Search,
