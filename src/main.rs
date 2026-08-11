@@ -92,10 +92,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                             KeyCode::Char('u') => {
                                 app.unit = app.unit.toggle();
                             }
-                            KeyCode::Char('l') => {
-                                app.screen = Screen::Search;
-                                app.query.clear();
-                            }
+                            KeyCode::Char('l') => app.open_search(),
                             KeyCode::Char('p') => {
                                 app.screen = Screen::Precipitation;
                                 app.select_now();
@@ -122,10 +119,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 request_tx.send(Request::Fetch(app.request(target)))?;
                             }
                             KeyCode::Char('u') => app.unit = app.unit.toggle(),
-                            KeyCode::Char('l') => {
-                                app.screen = Screen::Search;
-                                app.query.clear();
-                            }
+                            KeyCode::Char('l') => app.open_search(),
                             KeyCode::Left => app.select_prev_hour(),
                             KeyCode::Right => app.select_next_hour(),
                             // Up advances and down goes back, pairing the
@@ -138,7 +132,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                             _ => {}
                         },
                         Screen::Search => match key.code {
-                            KeyCode::Esc => app.screen = Screen::Weather,
+                            KeyCode::Esc => app.close_search(),
                             KeyCode::Backspace => {
                                 app.query.pop();
                                 app.invalidate_results();
@@ -153,7 +147,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
 
                                 if let Some(picked) = picked {
                                     app.results = Fetch::Idle;
-                                    app.screen = Screen::Weather;
+                                    app.close_search();
                                     request_tx.send(Request::Fetch(app.request(picked)))?;
                                 } else if !app.query.is_empty() {
                                     app.results = Fetch::Loading;
