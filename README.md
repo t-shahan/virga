@@ -257,6 +257,10 @@ cargo fmt
 cargo +1.88.0 test --locked --all-targets   # the declared minimum
 ```
 
+CI runs those on Linux, macOS and Windows, plus `cargo package` and a pinned
+`cargo audit`. Every job proves one thing, so a red build names the contract
+that broke. See [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
 Two tests are `#[ignore]`d because they hit the live API; run them with
 `cargo test -- --ignored`.
 
@@ -298,7 +302,9 @@ contains no rendering.
 - Selection and "today" are distinguished by colour in the forecast table and
   the daily chart. The precipitation chart also marks them by shape; the others
   do not yet.
-- There is no CI, so the only verified platform is the maintainer's.
+- Windows and Linux are covered by CI but have never been driven by hand.
+  Compiling and passing unit tests does not validate console rendering, font
+  fallback, or held-key behaviour on a real terminal there.
 
 ## License
 
