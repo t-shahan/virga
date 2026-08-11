@@ -3,11 +3,7 @@ name = "virga-tui"
 version = "0.1.0"
 edition = "2024"
 description = "A responsive terminal weather app with an hourly precipitation chart, powered by Open-Meteo"
-# Every dependency in the graph is permissively licensed (MIT, Apache-2.0,
-# Unicode-3.0, Zlib, ISC, BSD-3-Clause, MPL-2.0), all of which may be
-# incorporated into a GPL-3.0 work. Note Apache-2.0 is compatible with GPL-3.0
-# but not GPL-2.0, so the version here is load-bearing.
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/t-shahan/virga"
 readme = "README.md"
 # Not the edition floor of 1.85: ratatui 0.30.2 and ratatui-core 0.1.2 both

@@ -1,7 +1,7 @@
 # virga
 
 [![CI](https://github.com/t-shahan/virga/actions/workflows/ci.yml/badge.svg)](https://github.com/t-shahan/virga/actions/workflows/ci.yml)
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A terminal weather app: current conditions, an eight-day forecast, three weeks
 of daily highs, and an hourly precipitation chart — no account, no API key.
@@ -206,7 +206,16 @@ requires that both be credited.
 
 ## License
 
-Licensed under the **GNU General Public License v3.0 or later**; see
-[LICENSE](LICENSE) for the full text. It covers this program's own source,
-which is separate from the licensing of the data it fetches — see
-[Data](#data).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option. This covers the program's own source, which is separate from
+the licensing of the data it fetches — see [Data](#data).
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.

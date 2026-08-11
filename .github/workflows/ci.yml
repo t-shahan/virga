@@ -69,8 +69,11 @@ jobs:
       # a missing fixture or an untracked file gets caught before a release
       # rather than after one.
       - run: cargo package --locked
-      - name: The package must carry its licence
-        run: cargo package --locked --list | grep -qx LICENSE
+      - name: The package must carry both licences
+        run: |
+          list=$(cargo package --locked --list)
+          grep -qx LICENSE-MIT <<<"$list"
+          grep -qx LICENSE-APACHE <<<"$list"
 
   audit:
     name: advisories
