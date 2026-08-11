@@ -16,7 +16,7 @@ mod search;
 use chart::chart_area_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
-use legend::keybind_legend_render;
+use legend::{keybind_legend_render, legend_rows};
 use precip::precip_render;
 use search::search_render;
 
@@ -68,9 +68,14 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     }
 
     // The legend is pinned to the bottom; everything else is laid out inside
-    // what remains so panes can be sized to their content.
-    let [content, legend_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+    // what remains so panes can be sized to their content. It asks for its own
+    // height, because a narrow terminal wraps it onto a second row rather than
+    // clipping bindings mid-word.
+    let [content, legend_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(legend_rows(app, area.width)),
+    ])
+    .areas(area);
 
     match app.screen {
         Screen::Weather => match &app.weather {

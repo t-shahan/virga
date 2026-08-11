@@ -94,7 +94,7 @@ On the precipitation screen:
 | `←` `→` | Move an hour through the forecast; wraps at both ends |
 | `↑` `↓` | Move a whole day |
 | `n` / `Home` | Jump back to the current hour |
-| `b` / `Enter` / `Esc` | Back to the weather |
+| `b` / `p` / `Enter` / `Esc` | Back to the weather |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `l` | Search for a city |

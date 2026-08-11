@@ -19,9 +19,16 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 
-/// Matches the daily chart, so the two read as the same visual language.
+/// The span the chart aims to show. Surplus width buys broader bars rather
+/// than more hours: a day ahead is the decision-relevant window, and the full
+/// eight-day series at a readable stride would need some 575 columns, so more
+/// hours on screen just means thinner ones.
+const TARGET_HOURS: usize = 24;
+/// Two-cell bars at the narrow end, matching the daily chart; four at the wide
+/// end, where the daily chart's three would leave the hourly bars looking
+/// starved on a terminal with room to spare.
 const MIN_STRIDE: u16 = 3;
-const MAX_STRIDE: u16 = 4;
+const MAX_STRIDE: u16 = 5;
 
 /// Bottom-anchored eighths, so a partial cell at the top of a rising bar fills
 /// from below and meets the cell beneath it.
@@ -47,10 +54,18 @@ const RULE_MIDNIGHT: &str = "┼";
 
 /// Rows the two halves and the rule need before the chart says anything.
 const MIN_HEIGHT: u16 = 3 + 2;
-/// Chance is scaled 0-100 whatever the forecast, so a quiet week leaves real
-/// headroom above the bars — honest, but past this the chart is mostly empty
-/// space rather than more information.
-pub(super) const MAX_HEIGHT: u16 = 12;
+/// Rows the amount half may take. It grows with the chart so a heavy hour has
+/// somewhere to go, but it is near-empty most weeks and must not take the
+/// chart over.
+const MAX_FALL_ROWS: usize = 6;
+
+/// Rows the plot itself may take. The box fills the terminal — a chart floating
+/// above a band of dead space looks broken — but the plot inside it does not
+/// stretch to match. Chance is scaled 0-100 and a typical week peaks under
+/// half, so on a very tall terminal an unbounded plot puts twenty blank rows
+/// above the bars. Capped and centred, the same window reads as a chart with
+/// air around it.
+const MAX_PLOT_HEIGHT: u16 = 16;
 
 /// Below this the amount half is scaled as if this were the wettest hour on
 /// record. Roughly moderate rainfall: without a floor, a week whose heaviest
@@ -72,7 +87,7 @@ pub(super) fn precip_chart_render(
         return;
     }
 
-    let columns = Columns::fit(inner.width, hours.len(), MIN_STRIDE, MAX_STRIDE);
+    let columns = Columns::fit(inner.width, TARGET_HOURS, MIN_STRIDE, MAX_STRIDE);
     let shown = columns.capacity.min(hours.len());
     let start = window_start(selected, columns.capacity, hours.len());
     let visible = &hours[start..start + shown];
@@ -92,10 +107,14 @@ pub(super) fn precip_chart_render(
         .title_bottom(Line::from(dry_spell(visible, shown)).dark_gray());
     frame.render_widget(block, area);
 
-    // Centre the columns on their measured width, as the daily chart does.
+    // Centre the columns on their measured width, as the daily chart does,
+    // then centre the plot within whatever height the box has been given.
     let [plot] = Layout::horizontal([Constraint::Length(columns.width_of(shown))])
         .flex(Flex::Center)
         .areas(inner);
+    let [plot] = Layout::vertical([Constraint::Length(inner.height.min(MAX_PLOT_HEIGHT))])
+        .flex(Flex::Center)
+        .areas(plot);
 
     let rows = Rows::split(plot.height);
 
@@ -155,7 +174,7 @@ struct Rows {
 impl Rows {
     fn split(height: u16) -> Self {
         let interior = height as usize;
-        let fall = (interior / 4).max(1);
+        let fall = (interior / 4).clamp(1, MAX_FALL_ROWS);
         Self {
             rise: interior.saturating_sub(fall + 1),
             fall,
@@ -347,6 +366,10 @@ mod tests {
             );
             assert!(rows.fall >= 1, "height {height} left no room to fall");
             assert!(
+                rows.fall <= MAX_FALL_ROWS,
+                "height {height} let the amount half take over"
+            );
+            assert!(
                 rows.rise >= rows.fall,
                 "height {height}: chance should keep the majority"
             );
@@ -378,7 +401,9 @@ mod tests {
     /// is what proves they coexist rather than overwriting each other.
     #[test]
     fn the_rule_carries_now_the_selection_and_midnight_at_once() {
-        let text = buffer_text(100, 10, 5);
+        // Wide enough to span a day boundary: the bars are broader now, so a
+        // screenful is fewer hours than it used to be.
+        let text = buffer_text(120, 10, 5);
         let rule_row = text
             .lines()
             .find(|line| line.contains(RULE_SELECTED))
@@ -545,18 +570,76 @@ mod tests {
         }
     }
 
+    /// The box fills the terminal so nothing floats above dead space, but the
+    /// plot inside it stays proportionate however tall the window gets.
+    #[test]
+    fn a_tall_terminal_fills_its_box_without_stretching_the_plot() {
+        let weather = Weather::fixture(22, 14);
+
+        for height in [8u16, 12, 18, 24, 44, 60] {
+            let mut terminal = Terminal::new(TestBackend::new(90, height)).unwrap();
+            terminal
+                .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 3))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+
+            let rows: Vec<String> = (0..height)
+                .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+
+            // The border reaches the last row, so the box fills its area.
+            assert!(
+                rows[height as usize - 1].contains('└'),
+                "height {height}: the box did not reach the bottom:\n{}",
+                rows.join("\n")
+            );
+
+            // Rows the plot drew on. Matching the plain rule would catch the
+            // border too — it is the same glyph — so look for marks only the
+            // plot makes.
+            let plotted = |row: &String| {
+                row.chars().any(|c| {
+                    RISING[1..].contains(&c.to_string().as_str())
+                        || [
+                            FALL_FULL,
+                            FALL_HALF,
+                            FALL_TRACE,
+                            RULE_SELECTED,
+                            RULE_NOW,
+                            RULE_MIDNIGHT,
+                        ]
+                        .contains(&c.to_string().as_str())
+                })
+            };
+            let drawn: Vec<usize> = (0..height as usize)
+                .filter(|&y| plotted(&rows[y]))
+                .collect();
+            let first = *drawn.first().expect("something was plotted");
+            let last = *drawn.last().expect("something was plotted");
+
+            assert!(
+                last - first < MAX_PLOT_HEIGHT as usize,
+                "height {height}: the plot spans {} rows:\n{}",
+                last - first + 1,
+                rows.join("\n")
+            );
+            // And it never runs into the border it sits inside.
+            assert!(first >= 1 && last <= height as usize - 2, "height {height}");
+        }
+    }
+
     /// Day boundaries are landmarks rather than readings, so the mark takes the
     /// accent while the bars above it stay ordinary.
     #[test]
     fn midnight_is_marked_in_the_accent_colour() {
         let weather = Weather::fixture(22, 14);
-        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
         terminal
             .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 5))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
-        let midnight = (0..100u16)
+        let midnight = (0..120u16)
             .flat_map(|x| (0..10u16).map(move |y| (x, y)))
             .find(|&(x, y)| buffer[(x, y)].symbol() == RULE_MIDNIGHT)
             .expect("a midnight rule cell");
