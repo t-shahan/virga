@@ -1,15 +1,15 @@
 use crate::app::{App, Fetch};
 use crate::theme::Palette;
-use crate::ui::{centered, clear_to_ground, spinner};
+use crate::ui::{centered, spinner};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let area = centered(area, 50, 12);
-    clear_to_ground(frame, area, palette);
+    frame.render_widget(Clear, area);
 
     let block = Block::bordered()
         // Styled explicitly: a block title takes the block's own style rather

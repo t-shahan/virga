@@ -15,17 +15,33 @@ const SPACING: usize = 3;
 /// rows the chart needs more.
 const MAX_ROWS: u16 = 2;
 
-/// The bar doubles as the theme readout: `t` is labelled with the palette
-/// currently in use, so pressing it is its own feedback. That is why this
-/// returns owned rows rather than a static slice — the label varies. Nothing
-/// is allocated per name; theme names are static strings.
+/// What `t` is labelled with: the word, then the palette in use in brackets
+/// after it.
+///
+/// The name alone — `[t] nord` — said what was on but not what the key did,
+/// which is the one job every other label on the bar has. Naming both costs a
+/// few columns and reads as a binding rather than as a status.
+fn theme_label(app: &App) -> String {
+    format!("theme ({})", app.theme.name())
+}
+
+/// The bar doubles as the theme readout: `t` carries the palette currently in
+/// use, so pressing it is its own feedback. That is why this returns owned
+/// rows rather than a static slice — one label varies.
 ///
 /// `t` goes last on both screens because the wrapping below drops from the
 /// tail, and of everything here the palette is what a cramped terminal can
 /// most afford to lose.
-fn bindings(app: &App) -> Vec<(&'static str, &'static str)> {
+fn bindings(app: &App) -> Vec<(&'static str, String)> {
+    let owned = |pairs: Vec<(&'static str, &str)>| -> Vec<(&'static str, String)> {
+        pairs
+            .into_iter()
+            .map(|(key, label)| (key, label.to_string()))
+            .collect()
+    };
+
     match app.screen {
-        Screen::Weather => vec![
+        Screen::Weather => owned(vec![
             ("q", "quit"),
             ("←→", "day"),
             ("n", "now"),
@@ -33,11 +49,11 @@ fn bindings(app: &App) -> Vec<(&'static str, &'static str)> {
             ("r", "refresh"),
             ("u", "units"),
             ("l", "location"),
-            ("t", app.theme.name()),
-        ],
+            ("t", &theme_label(app)),
+        ]),
         // Quit and back lead, as they do on the weather screen: if anything is
         // going to be dropped, those are the two worth keeping.
-        Screen::Precipitation => vec![
+        Screen::Precipitation => owned(vec![
             ("q", "quit"),
             ("b", "back"),
             ("←→", "hour"),
@@ -45,13 +61,15 @@ fn bindings(app: &App) -> Vec<(&'static str, &'static str)> {
             ("n", "now"),
             ("r", "refresh"),
             ("u", "units"),
-            ("t", app.theme.name()),
-        ],
+            ("t", &theme_label(app)),
+        ]),
         Screen::Search => match &app.results {
-            Fetch::Ready(l) if !l.is_empty() => {
-                vec![("↑↓", "navigate"), ("enter", "select"), ("esc", "cancel")]
-            }
-            _ => vec![("enter", "search"), ("esc", "cancel")],
+            Fetch::Ready(l) if !l.is_empty() => owned(vec![
+                ("↑↓", "navigate"),
+                ("enter", "select"),
+                ("esc", "cancel"),
+            ]),
+            _ => owned(vec![("enter", "search"), ("esc", "cancel")]),
         },
     }
 }
@@ -184,25 +202,43 @@ mod tests {
         );
     }
 
-    /// The bar is the only thing that says which palette is on, so the label
-    /// on `t` has to be the palette itself rather than the word "theme".
+    /// `t` has to say both things: what the key does, like every other binding
+    /// on the bar, and which palette is on — the bar being the only thing that
+    /// says so.
     #[test]
-    fn the_bar_names_the_theme_that_is_on() {
+    fn the_bar_names_the_key_and_the_theme_that_is_on() {
         let mut app = app_on(Screen::Weather);
 
         let before = legend_at_with(&app, 120).join(" ");
         assert!(
-            before.contains(&format!("[t] {}", app.theme.name())),
+            before.contains(&format!("[t] theme ({})", app.theme.name())),
             "{before:?}"
         );
 
         app.theme = app.theme.next();
         let after = legend_at_with(&app, 120).join(" ");
         assert!(
-            after.contains(&format!("[t] {}", app.theme.name())),
+            after.contains(&format!("[t] theme ({})", app.theme.name())),
             "the bar did not follow the theme: {after:?}"
         );
         assert_ne!(before, after, "cycling left the bar unchanged");
+    }
+
+    /// The word stays put while only the palette in brackets changes — the
+    /// readout is a detail hung off the binding, not the binding itself.
+    #[test]
+    fn the_word_theme_survives_every_palette() {
+        for theme in Theme::ALL {
+            let mut app = app_on(Screen::Weather);
+            app.theme = theme;
+
+            let legend = legend_at_with(&app, 120).join(" ");
+            assert!(
+                legend.contains("[t] theme ("),
+                "{}: {legend:?}",
+                theme.name()
+            );
+        }
     }
 
     /// The bug: a single row simply clipped, so narrowing the terminal sheared

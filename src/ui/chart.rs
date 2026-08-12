@@ -83,7 +83,7 @@ pub(super) fn chart_area_render(
             } else if day == weather.today_index {
                 palette.now
             } else {
-                palette.series
+                palette.accent
             };
             let value = BAR_FLOOR + (((d.high_c - coolest) / span) * scale).round() as u64;
             Bar::default()

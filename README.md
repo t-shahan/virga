@@ -59,7 +59,7 @@ builds unoptimised and is noticeably slower to render.
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
-| `t` | Cycle the colour theme — the key bar names the one in use |
+| `t` | Cycle the colour theme — the key bar reads `[t] theme (nord)` for the one in use |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
 The precipitation chart's centre rule marks the current hour (`┬`), the
@@ -73,8 +73,8 @@ opened from.
 ## Themes
 
 `t` steps through six palettes, from either weather screen. The key bar doubles
-as the readout — it reads `[t] nord` for whichever theme is on — so there is no
-menu to open and nothing to remember.
+as the readout — it reads `[t] theme (nord)` for whichever theme is on — so
+there is no menu to open and nothing to remember.
 
 | Theme | Notes |
 |---|---|
@@ -85,15 +85,13 @@ menu to open and nothing to remember.
 | `tokyo night` | Blue-leaning, high contrast |
 | `dracula` | The loudest of the six |
 
-The five named palettes are 24-bit colour, and each brings its own background
-rather than borrowing the terminal's: all five are designed against a dark
-ground, and on a light terminal their text would otherwise sit at barely more
-than 1:1. `terminal` is the exception and imposes nothing — it is the sixteen
-ANSI colours on whatever background you already had.
+Every palette sets foregrounds only. None of them paints a background: your
+terminal's own is left alone, so a theme layers over whatever scheme you have
+already configured rather than stamping a rectangle of its own dark over it.
 
-On a terminal without truecolor the named palettes are approximated or ignored,
-which is why `terminal` is the default: nothing about the out-of-the-box
-appearance depends on it.
+The five named palettes are 24-bit colour. On a terminal without truecolor they
+are approximated or ignored, which is why `terminal` is the default: nothing
+about the out-of-the-box appearance depends on it.
 
 Set `VIRGA_THEME` to start somewhere other than the default. The name is the one
 in the table, and it is forgiving about case and separators, so `tokyo night`,

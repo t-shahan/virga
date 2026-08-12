@@ -75,11 +75,6 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
 fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     let area = frame.area();
 
-    // Before anything else, and over the whole frame including the rows the
-    // legend will take. A palette that sets only foregrounds is a palette that
-    // is correct on a dark terminal and unreadable on a light one.
-    ground(frame, area, palette);
-
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         too_small_render(frame, area, palette);
         return;
@@ -187,26 +182,6 @@ fn too_small_render(frame: &mut Frame, area: Rect, palette: Palette) {
     );
 }
 
-/// Lay the palette's ground over `area`, leaving whatever is already drawn
-/// there alone: only the background is patched, so this is safe to call before
-/// the content and only affects cells the theme is entitled to.
-fn ground(frame: &mut Frame, area: Rect, palette: Palette) {
-    frame
-        .buffer_mut()
-        .set_style(area, Style::new().bg(palette.background));
-}
-
-/// `Clear` and then the ground put back.
-///
-/// `Clear` resets a cell wholesale — style as well as symbol — so a popup or
-/// the search box would otherwise punch a terminal-coloured hole through a
-/// themed background, which is exactly the kind of gap the ground was added to
-/// close.
-pub(super) fn clear_to_ground(frame: &mut Frame, area: Rect, palette: Palette) {
-    frame.render_widget(Clear, area);
-    ground(frame, area, palette);
-}
-
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
@@ -228,7 +203,7 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
         palette.text
     };
 
-    clear_to_ground(frame, area, palette);
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(body)
             .style(Style::new().fg(colour))
@@ -358,33 +333,30 @@ mod tests {
             .collect()
     }
 
-    /// Nine colours that appear in no palette, one per role. Rendering in these
+    /// Seven colours that appear in no palette, one per role. Rendering in these
     /// makes every painted cell traceable back to the role that painted it —
     /// and any cell wearing something else a call site that never got a
     /// palette.
     fn probe() -> Palette {
         Palette {
-            background: Color::Rgb(0, 9, 0),
             accent: Color::Rgb(1, 0, 0),
             text: Color::Rgb(2, 0, 0),
             muted: Color::Rgb(3, 0, 0),
             selection: Color::Rgb(4, 0, 0),
             now: Color::Rgb(5, 0, 0),
-            series: Color::Rgb(6, 0, 0),
             error: Color::Rgb(7, 0, 0),
             border: Color::Rgb(8, 0, 0),
         }
     }
 
     /// The foreground roles, for checking a cell's colour came from one of them.
-    fn roles(palette: Palette) -> [Color; 8] {
+    fn roles(palette: Palette) -> [Color; 7] {
         [
             palette.accent,
             palette.text,
             palette.muted,
             palette.selection,
             palette.now,
-            palette.series,
             palette.error,
             palette.border,
         ]
@@ -439,27 +411,31 @@ mod tests {
         }
     }
 
-    /// The palettes are all designed against a dark ground, so the theme has to
-    /// bring one: left to the terminal, Nord text sits at about 1.15:1 on a
-    /// light scheme. Every cell, in every state — `Clear` resets a cell's style
-    /// along with its symbol, so the search box and the popups are the two
-    /// places the ground can be punched back out.
+    /// A theme paints foregrounds and leaves the ground alone.
+    ///
+    /// An earlier version gave every palette a background of its own and
+    /// painted it over the whole frame. It reads fine on a bare terminal and
+    /// wrong on a themed one — a carefully configured scheme ends up with a
+    /// rectangle of somebody else's idea of dark stamped over it. So the rule
+    /// is that no cell may carry a background at all, and `Color::Reset` is
+    /// what a cell nobody has touched carries.
     #[test]
-    fn the_ground_reaches_every_cell() {
-        let probe = probe();
-
+    fn no_theme_paints_a_background() {
         for (state, app) in states() {
-            for (width, height) in SIZES {
-                let buffer = drawn(&app, probe, width, height);
+            for theme in Theme::ALL {
+                for (width, height) in SIZES {
+                    let buffer = drawn(&app, theme.palette(), width, height);
 
-                for y in 0..height {
-                    for x in 0..width {
-                        assert_eq!(
-                            buffer[(x, y)].bg,
-                            probe.background,
-                            "{state} at {width}x{height}: cell ({x}, {y}) \
-                             kept the terminal's own ground"
-                        );
+                    for y in 0..height {
+                        for x in 0..width {
+                            assert_eq!(
+                                buffer[(x, y)].bg,
+                                Color::Reset,
+                                "{} on {state} at {width}x{height}: cell ({x}, {y}) \
+                                 painted over the terminal's own background",
+                                theme.name()
+                            );
+                        }
                     }
                 }
             }
@@ -551,5 +527,49 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol())
             .collect();
         assert!(text.contains("feels like"), "the minimum should be usable");
+    }
+    /// The complaint this replaced a role for: the bars in both charts were a
+    /// colour of their own, so the hero digits and the columns below them read
+    /// as two unrelated things rather than one reading at two sizes. They share
+    /// `accent` now, and the way to keep them sharing it is to assert that
+    /// nothing on either chart reaches for a fourth colour.
+    #[test]
+    fn the_bars_are_drawn_in_the_same_colour_as_the_hero_digits() {
+        // Every glyph either chart draws a column out of, and the ones the big
+        // digits are built from — they overlap, which is the point.
+        const BLOCKS: [&str; 12] = [
+            "\u{2588}", "\u{2587}", "\u{2586}", "\u{2585}", "\u{2584}", "\u{2583}", "\u{2582}",
+            "\u{2581}", "\u{2580}", "\u{2594}", "\u{258c}", "\u{2590}",
+        ];
+
+        let probe = probe();
+        let allowed = [probe.accent, probe.selection, probe.now];
+
+        for screen in [Screen::Weather, Screen::Precipitation] {
+            let app = ready(screen);
+            let buffer = drawn(&app, probe, 120, 40);
+            let mut saw_accent = false;
+
+            for y in 0..40u16 {
+                for x in 0..120u16 {
+                    let cell = &buffer[(x, y)];
+                    if !BLOCKS.contains(&cell.symbol()) {
+                        continue;
+                    }
+                    assert!(
+                        allowed.contains(&cell.fg),
+                        "{screen:?}: the block at ({x}, {y}) is {:?}, which is neither \
+                         the selection, nor now, nor the colour the hero digits use",
+                        cell.fg
+                    );
+                    saw_accent |= cell.fg == probe.accent;
+                }
+            }
+
+            assert!(
+                saw_accent,
+                "{screen:?} drew no ordinary blocks at all, so this proved nothing"
+            );
+        }
     }
 }

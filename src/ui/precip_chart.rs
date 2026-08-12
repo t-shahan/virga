@@ -137,7 +137,7 @@ pub(super) fn precip_chart_render(
             // Hour zero of the forward window is always now.
             palette.now
         } else {
-            palette.series
+            palette.accent
         };
 
         let rising = rising_column(fraction(hour.chance.map(f64::from), 100.0), rows.rise);
@@ -701,8 +701,8 @@ mod tests {
         let (x, y) = midnight;
         assert_eq!(
             buffer[(x, y - 1)].style().fg,
-            Some(palette().series),
-            "only the boundary itself takes the accent"
+            Some(palette().accent),
+            "only the boundary itself takes the midnight mark"
         );
     }
 
