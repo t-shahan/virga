@@ -4,7 +4,7 @@ use crate::units::Unit;
 use crate::weather::model::Weather;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Bar, BarChart, BarGroup, Block};
 
@@ -31,12 +31,17 @@ pub(super) fn chart_area_render(
 
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title(format!(
-            "Daily Highs · {:.0}–{:.0}{}",
-            unit.temp(coolest_all),
-            unit.temp(warmest_all),
-            unit.temp_symbol(),
-        ));
+        // Styled rather than left to the block: a title takes the block's own
+        // style, not the border's, so unstyled it ignores the theme entirely.
+        .title(
+            Line::from(format!(
+                "Daily Highs · {:.0}–{:.0}{}",
+                unit.temp(coolest_all),
+                unit.temp(warmest_all),
+                unit.temp_symbol(),
+            ))
+            .fg(palette.muted),
+        );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

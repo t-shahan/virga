@@ -10,14 +10,20 @@
 
 use ratatui::style::Color;
 
-/// The eight meanings the interface actually has, in the order they appear in
-/// the table in the README.
+/// The nine meanings the interface actually has: one ground and eight things
+/// drawn on it.
 ///
 /// `accent` and `series` are the same blue in the terminal palette but are
 /// separate roles: one is the app's voice — the city, the temperature — and
 /// the other is data. A theme is free to split them, and most do.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Palette {
+    /// The ground the whole frame is painted on, before anything is drawn on
+    /// top. Every named palette here was designed against a dark terminal, so
+    /// leaving this to the terminal put light-scheme users in front of text at
+    /// barely over 1:1 — the palette has to bring its own background or it is
+    /// only correct by luck. `Reset` hands the ground back to the terminal.
+    pub background: Color,
     /// City name, hero digits, the search prompt.
     pub accent: Color,
     /// Readings: the values the app went to the network for.
@@ -112,6 +118,7 @@ impl Theme {
             // the point of this palette is to be whatever the terminal's own
             // scheme says those colours are.
             Theme::Terminal => Palette {
+                background: Color::Reset,
                 accent: Color::Blue,
                 text: Color::White,
                 muted: Color::DarkGray,
@@ -122,6 +129,7 @@ impl Theme {
                 border: Color::Reset,
             },
             Theme::CatppuccinMocha => Palette {
+                background: Color::Rgb(30, 30, 46),   // base
                 accent: Color::Rgb(137, 180, 250),    // blue
                 text: Color::Rgb(205, 214, 244),      // text
                 muted: Color::Rgb(108, 112, 134),     // overlay0
@@ -132,6 +140,7 @@ impl Theme {
                 border: Color::Rgb(69, 71, 90),       // surface1
             },
             Theme::GruvboxDark => Palette {
+                background: Color::Rgb(40, 40, 40),  // bg0
                 accent: Color::Rgb(131, 165, 152),   // aqua
                 text: Color::Rgb(235, 219, 178),     // fg1
                 muted: Color::Rgb(146, 131, 116),    // gray
@@ -142,9 +151,13 @@ impl Theme {
                 border: Color::Rgb(80, 73, 69),      // bg2
             },
             Theme::Nord => Palette {
-                accent: Color::Rgb(136, 192, 208),    // nord8
-                text: Color::Rgb(236, 239, 244),      // nord6
-                muted: Color::Rgb(76, 86, 106),       // nord3
+                background: Color::Rgb(46, 52, 64), // nord0
+                accent: Color::Rgb(136, 192, 208),  // nord8
+                text: Color::Rgb(236, 239, 244),    // nord6
+                // nord-vim's brightened nord3 rather than nord3 itself, which
+                // the spec reserves for invisibles: against nord0 it lands at
+                // 1.7:1, and `muted` here carries labels, not indent guides.
+                muted: Color::Rgb(97, 110, 136),
                 selection: Color::Rgb(235, 203, 139), // nord13
                 now: Color::Rgb(163, 190, 140),       // nord14
                 series: Color::Rgb(129, 161, 193),    // nord9
@@ -152,6 +165,7 @@ impl Theme {
                 border: Color::Rgb(67, 76, 94),       // nord2
             },
             Theme::TokyoNight => Palette {
+                background: Color::Rgb(26, 27, 38),   // bg
                 accent: Color::Rgb(122, 162, 247),    // blue
                 text: Color::Rgb(192, 202, 245),      // fg
                 muted: Color::Rgb(86, 95, 137),       // comment
@@ -162,6 +176,7 @@ impl Theme {
                 border: Color::Rgb(59, 66, 97),       // bg_highlight
             },
             Theme::Dracula => Palette {
+                background: Color::Rgb(40, 42, 54),   // background
                 accent: Color::Rgb(189, 147, 249),    // purple
                 text: Color::Rgb(248, 248, 242),      // foreground
                 muted: Color::Rgb(98, 114, 164),      // comment
@@ -224,6 +239,11 @@ mod tests {
     fn the_terminal_theme_keeps_todays_colours() {
         let p = Theme::Terminal.palette();
 
+        assert_eq!(
+            p.background,
+            Color::Reset,
+            "the terminal palette must not impose a ground of its own"
+        );
         assert_eq!(p.accent, Color::Blue);
         assert_eq!(p.text, Color::White);
         assert_eq!(p.muted, Color::DarkGray);
@@ -315,5 +335,96 @@ mod tests {
             assert_ne!(p.muted, p.text, "{}", theme.name());
             assert_ne!(p.muted, p.accent, "{}", theme.name());
         }
+    }
+
+    /// The named palettes bring their own ground, so a light terminal is no
+    /// longer allowed to decide whether they are legible — and once the ground
+    /// is ours, so is the contrast, which is the thing worth asserting.
+    ///
+    /// `Terminal` is excluded on purpose: its colours are whatever the user
+    /// configured them to be, and there is nothing here to measure.
+    #[test]
+    fn every_role_clears_its_ground_in_every_named_theme() {
+        for theme in Theme::ALL.into_iter().filter(|t| *t != Theme::Terminal) {
+            let p = theme.palette();
+
+            // Three floors, because the roles are not doing the same job.
+            // Readings have to be read; labels are meant to recede but still be
+            // legible beside them; a border is a rule, and being nearly
+            // invisible is the point of it.
+            let roles = [
+                ("accent", p.accent, 3.0),
+                ("text", p.text, 3.0),
+                ("selection", p.selection, 3.0),
+                ("now", p.now, 3.0),
+                ("series", p.series, 3.0),
+                ("error", p.error, 3.0),
+                ("muted", p.muted, 2.4),
+                ("border", p.border, 1.4),
+            ];
+
+            for (role, colour, floor) in roles {
+                let ratio = contrast(colour, p.background);
+                assert!(
+                    ratio >= floor,
+                    "{}: {role} is {ratio:.2}:1 against its own background, \
+                     under the {floor:.1}:1 this role has to clear",
+                    theme.name()
+                );
+            }
+        }
+    }
+
+    /// A background no darker than the foregrounds drawn on it would mean the
+    /// palette had been half-inverted, which the ratios above cannot catch:
+    /// contrast is symmetric and would be just as happy either way round.
+    #[test]
+    fn named_grounds_are_the_darkest_thing_in_their_palette() {
+        for theme in Theme::ALL.into_iter().filter(|t| *t != Theme::Terminal) {
+            let p = theme.palette();
+            let ground = luminance(p.background);
+
+            for (role, colour) in [
+                ("accent", p.accent),
+                ("text", p.text),
+                ("muted", p.muted),
+                ("selection", p.selection),
+                ("now", p.now),
+                ("series", p.series),
+                ("error", p.error),
+                ("border", p.border),
+            ] {
+                assert!(
+                    luminance(colour) > ground,
+                    "{}: {role} is darker than the ground it sits on",
+                    theme.name()
+                );
+            }
+        }
+    }
+
+    /// WCAG relative luminance. Only defined for the 24-bit palettes — an ANSI
+    /// colour has no fixed value to measure, which is why `Terminal` is left
+    /// out of the tests above.
+    fn luminance(colour: Color) -> f64 {
+        let Color::Rgb(r, g, b) = colour else {
+            panic!("{colour:?} has no measurable luminance");
+        };
+        let channel = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    /// WCAG contrast ratio, 1.0 for two identical colours and 21.0 for black
+    /// against white.
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 }

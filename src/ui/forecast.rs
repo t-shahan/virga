@@ -22,7 +22,10 @@ pub(super) fn forecast_area_render(
 
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title("Forecast");
+        // A block title takes the block's own style rather than the border's,
+        // so left unstyled it stays the terminal's default foreground however
+        // the theme is set. It is a header, so it takes the header's role.
+        .title(Line::from("Forecast").fg(palette.muted));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

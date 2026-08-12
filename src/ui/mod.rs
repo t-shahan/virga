@@ -2,7 +2,8 @@ use crate::app::{App, Fetch, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Style, Stylize};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 mod bars;
@@ -73,6 +74,11 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
 /// colour survived being hard-coded.
 fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     let area = frame.area();
+
+    // Before anything else, and over the whole frame including the rows the
+    // legend will take. A palette that sets only foregrounds is a palette that
+    // is correct on a dark terminal and unreadable on a light one.
+    ground(frame, area, palette);
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         too_small_render(frame, area, palette);
@@ -181,6 +187,26 @@ fn too_small_render(frame: &mut Frame, area: Rect, palette: Palette) {
     );
 }
 
+/// Lay the palette's ground over `area`, leaving whatever is already drawn
+/// there alone: only the background is patched, so this is safe to call before
+/// the content and only affects cells the theme is entitled to.
+fn ground(frame: &mut Frame, area: Rect, palette: Palette) {
+    frame
+        .buffer_mut()
+        .set_style(area, Style::new().bg(palette.background));
+}
+
+/// `Clear` and then the ground put back.
+///
+/// `Clear` resets a cell wholesale — style as well as symbol — so a popup or
+/// the search box would otherwise punch a terminal-coloured hole through a
+/// themed background, which is exactly the kind of gap the ground was added to
+/// close.
+pub(super) fn clear_to_ground(frame: &mut Frame, area: Rect, palette: Palette) {
+    frame.render_widget(Clear, area);
+    ground(frame, area, palette);
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
@@ -202,7 +228,7 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
         palette.text
     };
 
-    frame.render_widget(Clear, area);
+    clear_to_ground(frame, area, palette);
     frame.render_widget(
         Paragraph::new(body)
             .style(Style::new().fg(colour))
@@ -210,7 +236,10 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
             .block(
                 Block::bordered()
                     .border_style(Style::new().fg(palette.border))
-                    .title(title),
+                    // A block title takes the block's own style, not the
+                    // border's, so left alone it renders in the terminal's
+                    // default foreground — invisible on a themed ground.
+                    .title(Line::from(title).fg(colour)),
             ),
         area,
     )
@@ -225,21 +254,93 @@ fn spinner(tick: usize) -> &'static str {
 mod tests {
     use super::*;
     use crate::theme::Theme;
-    use crate::weather::model::Weather;
+    use crate::weather::model::{Location, Weather};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
 
     /// Sizes that between them exercise every branch of the layout: side by
-    /// side, stacked, and the minimum the app will draw at.
-    const SIZES: [(u16, u16); 4] = [(120, 40), (100, 20), (60, 24), (MIN_WIDTH, MIN_HEIGHT)];
+    /// side, stacked, the minimum the app will draw at, and one below it,
+    /// where the size warning replaces the interface entirely and is otherwise
+    /// never seen by the palette sweeps.
+    const SIZES: [(u16, u16); 5] = [
+        (120, 40),
+        (100, 20),
+        (60, 24),
+        (MIN_WIDTH, MIN_HEIGHT),
+        (20, 8),
+    ];
 
     fn ready(screen: Screen) -> App {
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
         app.screen = screen;
         app
+    }
+
+    fn found() -> Vec<Location> {
+        vec![
+            Location {
+                name: "Frederick".to_string(),
+                admin1: Some("Maryland".to_string()),
+                country: Some("United States".to_string()),
+                lat: 39.414_27,
+                lon: -77.410_54,
+            },
+            Location {
+                name: "Fredericksburg".to_string(),
+                admin1: Some("Virginia".to_string()),
+                country: Some("United States".to_string()),
+                lat: 38.301_8,
+                lon: -77.460_5,
+            },
+        ]
+    }
+
+    /// Every state the frame can be drawn in, named.
+    ///
+    /// A sweep is only as good as the branches it reaches: the previous one
+    /// rendered ready and failed and nothing else, so two search statuses that
+    /// never asked the palette for a colour sat behind it unnoticed. Anything
+    /// `render_with` can put on screen belongs in here.
+    fn states() -> Vec<(String, App)> {
+        let mut states = Vec::new();
+
+        for screen in [Screen::Weather, Screen::Precipitation] {
+            for name in ["ready", "loading", "failed", "idle"] {
+                let mut app = ready(screen);
+                app.weather = match name {
+                    "loading" => Fetch::Loading,
+                    "failed" => Fetch::Failed("the network went away".to_string()),
+                    "idle" => Fetch::Idle,
+                    _ => app.weather,
+                };
+                states.push((format!("{screen:?}/{name}"), app));
+            }
+        }
+
+        // The search box floats over a loaded screen, so the weather stays
+        // ready underneath: whatever it draws has to survive being cleared.
+        for (name, query, results) in [
+            ("prompt", "", Fetch::Idle),
+            ("typing", "freder", Fetch::Idle),
+            ("searching", "freder", Fetch::Loading),
+            ("no matches", "freder", Fetch::Ready(Vec::new())),
+            ("results", "freder", Fetch::Ready(found())),
+            (
+                "failed",
+                "freder",
+                Fetch::Failed("the network went away".to_string()),
+            ),
+        ] {
+            let mut app = ready(Screen::Search);
+            app.query = query.to_string();
+            app.results = results;
+            states.push((format!("Search/{name}"), app));
+        }
+
+        states
     }
 
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
@@ -257,12 +358,13 @@ mod tests {
             .collect()
     }
 
-    /// Eight colours that appear in no palette, one per role. Rendering in
-    /// these makes every painted cell traceable back to the role that painted
-    /// it — and every cell still wearing one of the old literals a call site
-    /// that never got a palette.
+    /// Nine colours that appear in no palette, one per role. Rendering in these
+    /// makes every painted cell traceable back to the role that painted it —
+    /// and any cell wearing something else a call site that never got a
+    /// palette.
     fn probe() -> Palette {
         Palette {
+            background: Color::Rgb(0, 9, 0),
             accent: Color::Rgb(1, 0, 0),
             text: Color::Rgb(2, 0, 0),
             muted: Color::Rgb(3, 0, 0),
@@ -274,35 +376,89 @@ mod tests {
         }
     }
 
+    /// The foreground roles, for checking a cell's colour came from one of them.
+    fn roles(palette: Palette) -> [Color; 8] {
+        [
+            palette.accent,
+            palette.text,
+            palette.muted,
+            palette.selection,
+            palette.now,
+            palette.series,
+            palette.error,
+            palette.border,
+        ]
+    }
+
     /// The test that makes the feature real rather than mostly-real. Before
     /// themes there were around thirty colour literals scattered across seven
     /// modules; a single one left behind is a widget that ignores the theme,
     /// and reading the diff is not a reliable way to know they all moved.
+    ///
+    /// Stated as what a cell *must* be rather than as a list of colours it must
+    /// not be. The list was the first version and it was too weak twice over:
+    /// it passed any literal that happened not to be one of the six, and it
+    /// passed a glyph with no colour at all — which is precisely what the two
+    /// search statuses were, and why they went unnoticed.
+    ///
+    /// The alternative of grepping the source for colour literals was
+    /// considered and rejected: it cannot tell a colour that reaches the screen
+    /// from one that does not, and `theme.rs` would have to be excepted from
+    /// its own rule.
     #[test]
     fn no_widget_keeps_a_colour_of_its_own() {
-        let stale = [
-            Color::Blue,
-            Color::LightBlue,
-            Color::Yellow,
-            Color::DarkGray,
-            Color::White,
-            Color::Red,
-        ];
+        let probe = probe();
+        let roles = roles(probe);
 
-        for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
-            let mut app = ready(screen);
-            app.results = Fetch::Failed("no".to_string());
-
+        for (state, app) in states() {
             for (width, height) in SIZES {
-                let buffer = drawn(&app, probe(), width, height);
+                let buffer = drawn(&app, probe, width, height);
 
                 for y in 0..height {
                     for x in 0..width {
-                        let fg = buffer[(x, y)].style().fg;
+                        let cell = &buffer[(x, y)];
+                        let where_ = format!("{state} at {width}x{height}: cell ({x}, {y})");
+
+                        // `Color::Reset` is what an unstyled cell carries, so
+                        // it reads as "nobody painted this" rather than as a
+                        // colour — hence the second assertion below.
                         assert!(
-                            !fg.is_some_and(|c| stale.contains(&c)),
-                            "{screen:?} at {width}x{height}: cell ({x}, {y}) \
-                             painted itself {fg:?} instead of asking the palette"
+                            cell.fg == Color::Reset || roles.contains(&cell.fg),
+                            "{where_} is {:?}, which is no role in the palette",
+                            cell.fg
+                        );
+
+                        assert!(
+                            cell.symbol().trim().is_empty() || cell.fg != Color::Reset,
+                            "{where_} draws {:?} without asking the palette for a colour",
+                            cell.symbol()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The palettes are all designed against a dark ground, so the theme has to
+    /// bring one: left to the terminal, Nord text sits at about 1.15:1 on a
+    /// light scheme. Every cell, in every state — `Clear` resets a cell's style
+    /// along with its symbol, so the search box and the popups are the two
+    /// places the ground can be punched back out.
+    #[test]
+    fn the_ground_reaches_every_cell() {
+        let probe = probe();
+
+        for (state, app) in states() {
+            for (width, height) in SIZES {
+                let buffer = drawn(&app, probe, width, height);
+
+                for y in 0..height {
+                    for x in 0..width {
+                        assert_eq!(
+                            buffer[(x, y)].bg,
+                            probe.background,
+                            "{state} at {width}x{height}: cell ({x}, {y}) \
+                             kept the terminal's own ground"
                         );
                     }
                 }
@@ -320,9 +476,7 @@ mod tests {
     /// fits is `legend`'s business, and it sweeps every name to prove it.
     #[test]
     fn a_palette_never_moves_a_cell() {
-        for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
-            let app = ready(screen);
-
+        for (state, app) in states() {
             for (width, height) in SIZES {
                 let reference = symbols(
                     &drawn(&app, Theme::default().palette(), width, height),
@@ -334,7 +488,7 @@ mod tests {
                     assert_eq!(
                         symbols(&drawn(&app, theme.palette(), width, height), width, height),
                         reference,
-                        "{} moved the layout on {screen:?} at {width}x{height}",
+                        "{} moved the layout on {state} at {width}x{height}",
                         theme.name()
                     );
                 }

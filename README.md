@@ -85,9 +85,15 @@ menu to open and nothing to remember.
 | `tokyo night` | Blue-leaning, high contrast |
 | `dracula` | The loudest of the six |
 
-The five named palettes are 24-bit colour. On a terminal without truecolor they
-are approximated or ignored, which is why `terminal` is the default: nothing
-about the out-of-the-box appearance depends on it.
+The five named palettes are 24-bit colour, and each brings its own background
+rather than borrowing the terminal's: all five are designed against a dark
+ground, and on a light terminal their text would otherwise sit at barely more
+than 1:1. `terminal` is the exception and imposes nothing — it is the sixteen
+ANSI colours on whatever background you already had.
+
+On a terminal without truecolor the named palettes are approximated or ignored,
+which is why `terminal` is the default: nothing about the out-of-the-box
+appearance depends on it.
 
 Set `VIRGA_THEME` to start somewhere other than the default. The name is the one
 in the table, and it is forgiving about case and separators, so `tokyo night`,

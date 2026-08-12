@@ -1,18 +1,21 @@
 use crate::app::{App, Fetch};
 use crate::theme::Palette;
-use crate::ui::{centered, spinner};
+use crate::ui::{centered, clear_to_ground, spinner};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let area = centered(area, 50, 12);
-    frame.render_widget(Clear, area);
+    clear_to_ground(frame, area, palette);
 
     let block = Block::bordered()
-        .title("Search")
+        // Styled explicitly: a block title takes the block's own style rather
+        // than the border's, so an unstyled one keeps the terminal's default
+        // foreground whatever the theme says.
+        .title(Line::from("Search").fg(palette.muted))
         .border_style(Style::new().fg(palette.border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -51,9 +54,17 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area
 
     let body: Vec<Line> = match &app.results {
         Fetch::Idle => Vec::new(),
-        Fetch::Loading => vec![Line::from(format!("{} searching...", spinner(app.tick))).dim()],
+        // Both of these were `.dim()` and nothing else, which left them on the
+        // terminal's default foreground: on a themed ground they neither
+        // repainted nor stayed reliably readable. `muted` is the role for text
+        // that is meant to recede, and it carries the dimming itself — stacking
+        // DIM on top of a colour already chosen to be quiet is what makes a
+        // status message unreadable rather than merely secondary.
+        Fetch::Loading => {
+            vec![Line::from(format!("{} searching...", spinner(app.tick))).fg(palette.muted)]
+        }
         Fetch::Ready(locations) if locations.is_empty() => {
-            vec![Line::from("no matches").dim()]
+            vec![Line::from("no matches").fg(palette.muted)]
         }
         Fetch::Ready(locations) => locations
             .iter()

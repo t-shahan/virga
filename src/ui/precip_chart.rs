@@ -88,7 +88,7 @@ pub(super) fn precip_chart_render(
         frame.render_widget(
             Block::bordered()
                 .border_style(Style::new().fg(palette.border))
-                .title("Precipitation"),
+                .title(Line::from("Precipitation").fg(palette.muted)),
             area,
         );
         return;
@@ -111,7 +111,10 @@ pub(super) fn precip_chart_render(
 
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title(chart_title(shown, amount_scale, unit, inner.width))
+        // A block title takes the block's own style, not the border's, so both
+        // of these are given the header role explicitly rather than left on
+        // the terminal's default foreground.
+        .title(Line::from(chart_title(shown, amount_scale, unit, inner.width)).fg(palette.muted))
         .title_bottom(Line::from(dry_spell(visible, shown)).fg(palette.muted));
     frame.render_widget(block, area);
 

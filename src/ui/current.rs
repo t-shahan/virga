@@ -72,11 +72,14 @@ pub(super) fn current_area_render(
         .title_bottom(Line::from(when).fg(palette.text).right_aligned());
 
     if let Some(condition) = condition {
-        // The rule between them is left unstyled so it takes the border's own
-        // colour, and the border appears to run behind the text.
+        // The rule between them takes the border's colour so the border
+        // appears to run behind the text. It has to be said explicitly: a
+        // title is drawn with the block's style rather than the border's, so
+        // leaving it unstyled gave it the terminal's foreground, not the
+        // border's — which only looked right because `Reset` is both.
         let mut right = vec![Span::from(condition).fg(palette.text)];
         if let Some(aqi) = aqi {
-            right.push(Span::from(TITLE_RULE));
+            right.push(Span::from(TITLE_RULE).fg(palette.border));
             right.push(Span::from(aqi).fg(palette.text));
         }
         block = block.title_top(Line::from(right).right_aligned());
