@@ -27,7 +27,7 @@ fn validate(location: &ActiveLocation) -> Result<()> {
     Ok(())
 }
 
-pub fn load_from(path: &Path) -> Result<Option<ActiveLocation>> {
+pub(crate) fn load_from(path: &Path) -> Result<Option<ActiveLocation>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -44,7 +44,7 @@ pub fn load_from(path: &Path) -> Result<Option<ActiveLocation>> {
     Ok(Some(document.location))
 }
 
-pub fn save_to(path: &Path, location: &ActiveLocation) -> Result<()> {
+pub(crate) fn save_to(path: &Path, location: &ActiveLocation) -> Result<()> {
     validate(location)?;
     let parent = path.parent().context("state path has no parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
