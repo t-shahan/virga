@@ -11,6 +11,7 @@ use std::time::Duration;
 mod app;
 mod events;
 mod input;
+mod state;
 mod ui;
 mod units;
 mod weather;

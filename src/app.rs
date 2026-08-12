@@ -2,6 +2,7 @@ use crate::events::{Message, Request, RequestId};
 use crate::input::Action;
 use crate::units::Unit;
 use crate::weather::model::{Location, Weather};
+use serde::{Deserialize, Serialize};
 
 pub enum Fetch<T> {
     Idle,
@@ -25,7 +26,7 @@ const HOURS_PER_DAY: usize = 24;
 /// They were separate before: selecting a search result stored the label and
 /// discarded the coordinates, so refresh silently fell back to the default city
 /// while the border kept showing the chosen one.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActiveLocation {
     pub label: String,
     pub lat: f64,
