@@ -15,14 +15,20 @@ const SPACING: usize = 3;
 /// rows the chart needs more.
 const MAX_ROWS: u16 = 2;
 
-/// What `t` is labelled with: the word, then the palette in use in brackets
-/// after it.
+/// What `t` is labelled with: the word, and — for a few seconds after it is
+/// pressed — the palette it landed on, in brackets after it.
 ///
-/// The name alone — `[t] nord` — said what was on but not what the key did,
-/// which is the one job every other label on the bar has. Naming both costs a
-/// few columns and reads as a binding rather than as a status.
+/// The name alone, `[t] nord`, said what was on but not what the key did,
+/// which is the one job every other label on the bar has. The name is the
+/// answer to "which one did I just get", so it is worth showing while that is
+/// a live question and not after: left up it is a readout nobody is reading,
+/// and on a narrow terminal it costs a whole binding its place.
 fn theme_label(app: &App) -> String {
-    format!("theme ({})", app.theme.name())
+    if app.theme_readout_visible() {
+        format!("theme ({})", app.theme.name())
+    } else {
+        "theme".to_string()
+    }
 }
 
 /// The bar doubles as the theme readout: `t` carries the palette currently in
@@ -148,10 +154,12 @@ pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, palette: Palet
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::Action;
     use crate::theme::Theme;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::time::{Duration, Instant};
 
     fn app_on(screen: Screen) -> App {
         let mut app = App::new();
@@ -202,57 +210,112 @@ mod tests {
         );
     }
 
-    /// `t` has to say both things: what the key does, like every other binding
-    /// on the bar, and which palette is on — the bar being the only thing that
-    /// says so.
+    /// Pressing `t` has to be its own feedback: the bar is the only thing on
+    /// screen that says which palette you just landed on.
     #[test]
-    fn the_bar_names_the_key_and_the_theme_that_is_on() {
+    fn pressing_the_key_names_the_palette_it_landed_on() {
         let mut app = app_on(Screen::Weather);
 
-        let before = legend_at_with(&app, 120).join(" ");
+        app.on_action(Action::CycleTheme);
+        let first = legend_at_with(&app, 120).join(" ");
         assert!(
-            before.contains(&format!("[t] theme ({})", app.theme.name())),
-            "{before:?}"
+            first.contains(&format!("[t] theme ({})", app.theme.name())),
+            "{first:?}"
         );
 
-        app.theme = app.theme.next();
-        let after = legend_at_with(&app, 120).join(" ");
+        app.on_action(Action::CycleTheme);
+        let second = legend_at_with(&app, 120).join(" ");
         assert!(
-            after.contains(&format!("[t] theme ({})", app.theme.name())),
-            "the bar did not follow the theme: {after:?}"
+            second.contains(&format!("[t] theme ({})", app.theme.name())),
+            "the bar did not follow the theme: {second:?}"
         );
-        assert_ne!(before, after, "cycling left the bar unchanged");
+        assert_ne!(first, second, "cycling left the bar unchanged");
     }
 
-    /// The word stays put while only the palette in brackets changes — the
-    /// readout is a detail hung off the binding, not the binding itself.
+    /// Whichever palette is on, the readout that names it fits the bar. The
+    /// name is the only label here whose width is not fixed, so the longest of
+    /// them is what would shear first.
     #[test]
-    fn the_word_theme_survives_every_palette() {
+    fn every_palette_can_be_named_on_the_bar() {
         for theme in Theme::ALL {
             let mut app = app_on(Screen::Weather);
             app.theme = theme;
+            app.on_action(Action::CycleTheme);
 
             let legend = legend_at_with(&app, 120).join(" ");
             assert!(
-                legend.contains("[t] theme ("),
+                legend.contains(&format!("[t] theme ({})", app.theme.name())),
                 "{}: {legend:?}",
-                theme.name()
+                app.theme.name()
             );
         }
+    }
+
+    /// The key keeps its label once the name has gone — `t` is still a binding
+    /// like any other, it has just stopped answering a question nobody is
+    /// asking any more.
+    #[test]
+    fn the_name_goes_but_the_binding_stays() {
+        let mut app = app_on(Screen::Weather);
+
+        // Before it has ever been pressed there is nothing to report.
+        let untouched = legend_at_with(&app, 120).join(" ");
+        assert!(untouched.contains("[t] theme"), "{untouched:?}");
+        assert!(
+            !untouched.contains("[t] theme ("),
+            "the bar named a palette nobody had asked about: {untouched:?}"
+        );
+
+        app.on_action(Action::CycleTheme);
+        assert!(legend_at_with(&app, 120).join(" ").contains("[t] theme ("));
+
+        app.expire_theme_readout(Instant::now() + Duration::from_secs(60));
+        let lapsed = legend_at_with(&app, 120).join(" ");
+        assert!(lapsed.contains("[t] theme"), "{lapsed:?}");
+        assert!(
+            !lapsed.contains("[t] theme ("),
+            "the name outstayed its welcome: {lapsed:?}"
+        );
+    }
+
+    /// The readout is transient, so the room it takes has to come back — on a
+    /// narrow terminal it is the difference between the bar fitting on one row
+    /// and taking a row off the chart.
+    #[test]
+    fn the_bar_gets_its_columns_back() {
+        let mut app = app_on(Screen::Weather);
+        app.theme = Theme::GruvboxDark;
+        app.on_action(Action::CycleTheme);
+
+        let showing = legend_at_with(&app, 120).join(" ").trim_end().len();
+
+        app.expire_theme_readout(Instant::now() + Duration::from_secs(60));
+        let hidden = legend_at_with(&app, 120).join(" ").trim_end().len();
+
+        assert!(
+            hidden < showing,
+            "the name went but its columns did not: {hidden} vs {showing}"
+        );
     }
 
     /// The bug: a single row simply clipped, so narrowing the terminal sheared
     /// bindings mid-word. Every binding that appears must appear whole.
     ///
-    /// Swept across every theme as well as every width, because the label on
-    /// `t` is the theme's own name: the longest of them is what would shear
-    /// first, and it is the only binding whose width is not fixed.
+    /// Swept across every theme as well as every width, with the readout
+    /// showing: `[t] theme (gruvbox dark)` is the widest label the bar
+    /// ever carries, and it is the only one whose width is not fixed. Sweeping
+    /// with the readout hidden would test the *narrowest* case and call it
+    /// covered.
     #[test]
     fn narrowing_never_cuts_a_binding_in_half() {
         for theme in Theme::ALL {
             for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
                 for width in 8u16..=160 {
                     let mut app = app_on(screen);
+                    // Press first, then force the palette: the press is what
+                    // puts the name on the bar, and cycling would otherwise
+                    // land on a different theme than the one under test.
+                    app.on_action(Action::CycleTheme);
                     app.theme = theme;
                     let rows = legend_at_with(&app, width);
 

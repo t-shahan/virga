@@ -43,7 +43,7 @@ pub enum Theme {
     /// configured to look. The default, and the only palette that renders
     /// correctly without 24-bit colour.
     #[default]
-    Terminal,
+    Default,
     GruvboxDark,
     Nord,
     TokyoNight,
@@ -55,7 +55,7 @@ impl Theme {
     /// `cycling_visits_every_theme_and_comes_back`: `next` is the definition,
     /// and this array has to agree with it.
     pub const ALL: [Theme; 5] = [
-        Theme::Terminal,
+        Theme::Default,
         Theme::GruvboxDark,
         Theme::Nord,
         Theme::TokyoNight,
@@ -69,11 +69,11 @@ impl Theme {
     /// instead of quietly stranding it.
     pub fn next(self) -> Self {
         match self {
-            Theme::Terminal => Theme::GruvboxDark,
+            Theme::Default => Theme::GruvboxDark,
             Theme::GruvboxDark => Theme::Nord,
             Theme::Nord => Theme::TokyoNight,
             Theme::TokyoNight => Theme::Dracula,
-            Theme::Dracula => Theme::Terminal,
+            Theme::Dracula => Theme::Default,
         }
     }
 
@@ -81,7 +81,7 @@ impl Theme {
     /// accepts. Lower case because everything else on that bar is.
     pub fn name(self) -> &'static str {
         match self {
-            Theme::Terminal => "terminal",
+            Theme::Default => "default",
             Theme::GruvboxDark => "gruvbox dark",
             Theme::Nord => "nord",
             Theme::TokyoNight => "tokyo night",
@@ -107,7 +107,7 @@ impl Theme {
             // Deliberately the sixteen ANSI colours and not their RGB values:
             // the point of this palette is to be whatever the terminal's own
             // scheme says those colours are.
-            Theme::Terminal => Palette {
+            Theme::Default => Palette {
                 accent: Color::Blue,
                 text: Color::White,
                 muted: Color::DarkGray,
@@ -208,14 +208,14 @@ mod tests {
     /// correct without 24-bit colour, so nobody is downgraded by upgrading.
     #[test]
     fn the_default_is_the_terminals_own_colours() {
-        assert_eq!(Theme::default(), Theme::Terminal);
+        assert_eq!(Theme::default(), Theme::Default);
     }
 
     /// The regression guard for the look the app already had. Every one of
     /// these was a literal at a call site before there were themes.
     #[test]
     fn the_terminal_theme_keeps_todays_colours() {
-        let p = Theme::Terminal.palette();
+        let p = Theme::Default.palette();
 
         assert_eq!(p.accent, Color::Blue);
         assert_eq!(p.text, Color::White);
@@ -274,7 +274,7 @@ mod tests {
     /// A typo must not land silently on some other palette.
     #[test]
     fn an_unknown_name_is_rejected_rather_than_guessed_at() {
-        for name in ["", "catppuccin", "tokyo", "solarized", "nordic"] {
+        for name in ["", "terminal", "catppuccin", "tokyo", "solarized", "nordic"] {
             assert_eq!(Theme::from_name(name), None, "{name:?} was accepted");
         }
     }
@@ -324,7 +324,7 @@ mod tests {
 
         let named: Vec<Theme> = Theme::ALL
             .into_iter()
-            .filter(|t| *t != Theme::Terminal)
+            .filter(|t| *t != Theme::Default)
             .collect();
 
         for (i, one) in named.iter().enumerate() {
@@ -376,7 +376,7 @@ mod tests {
 
         let named: Vec<Theme> = Theme::ALL
             .into_iter()
-            .filter(|t| *t != Theme::Terminal)
+            .filter(|t| *t != Theme::Default)
             .collect();
 
         for (i, one) in named.iter().enumerate() {
@@ -397,7 +397,7 @@ mod tests {
     /// frame and starts reading as more text.
     #[test]
     fn a_border_never_matches_the_notes_written_on_it() {
-        for theme in Theme::ALL.into_iter().filter(|t| *t != Theme::Terminal) {
+        for theme in Theme::ALL.into_iter().filter(|t| *t != Theme::Default) {
             let p = theme.palette();
             assert!(
                 distance(p.border, p.muted) >= 24.0,

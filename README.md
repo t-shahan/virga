@@ -59,7 +59,7 @@ builds unoptimised and is noticeably slower to render.
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
-| `t` | Cycle the colour theme — the key bar reads `[t] theme (nord)` for the one in use |
+| `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
 The precipitation chart's centre rule marks the current hour (`┬`), the
@@ -72,13 +72,14 @@ opened from.
 
 ## Themes
 
-`t` steps through five palettes, from either weather screen. The key bar doubles
-as the readout — it reads `[t] theme (nord)` for whichever theme is on — so
-there is no menu to open and nothing to remember.
+`t` steps through five palettes, from either weather screen. The key bar names
+the one you land on — `[t] theme (nord)` — and drops the name again a few
+seconds later, so cycling tells you where you are without the bar carrying a
+readout nobody is reading. No menu to open and nothing to remember.
 
 | Theme | Notes |
 |---|---|
-| `terminal` | The sixteen ANSI colours, so virga looks the way your terminal is already configured to look. The default |
+| `default` | The sixteen ANSI colours, so virga looks the way your terminal is already configured to look |
 | `gruvbox dark` | Warm throughout — orange bars, gold selection, green today |
 | `nord` | Cool throughout — icy bars, aurora-purple selection |
 | `tokyo night` | Blue and violet, with the selection the one warm thing on screen |
@@ -89,7 +90,7 @@ terminal's own is left alone, so a theme layers over whatever scheme you have
 already configured rather than stamping a rectangle of its own dark over it.
 
 The five named palettes are 24-bit colour. On a terminal without truecolor they
-are approximated or ignored, which is why `terminal` is the default: nothing
+are approximated or ignored, which is why `default` is the default: nothing
 about the out-of-the-box appearance depends on it.
 
 Set `VIRGA_THEME` to start somewhere other than the default. The name is the one
@@ -100,7 +101,7 @@ in the table, and it is forgiving about case and separators, so `tokyo night`,
 VIRGA_THEME=gruvbox-dark virga
 ```
 
-An unrecognised name prints the list of known themes and starts in `terminal`
+An unrecognised name prints the list of known themes and starts in `default`
 rather than refusing to run. Nothing is written to disk — like the unit toggle,
 the choice lasts for the session.
 
@@ -113,7 +114,7 @@ chosen with `l` apply for the session only — nothing is written to disk.
 ## Development
 
 ```bash
-cargo test                                  # 221 deterministic tests
+cargo test                                  # 227 deterministic tests
 cargo test -- --ignored                     # 2 live-API tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt

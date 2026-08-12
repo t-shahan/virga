@@ -7,7 +7,7 @@ use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
 use std::sync::mpsc;
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod app;
 mod events;
@@ -102,6 +102,14 @@ fn run(mut terminal: DefaultTerminal, theme: Theme) -> Result<()> {
         let size = terminal.size()?;
         if size != last_size {
             last_size = size;
+            dirty = true;
+        }
+
+        // The palette's name leaves the key bar a few seconds after `t`, and
+        // nothing else would mark that frame dirty: by then the app is idle
+        // and, per the rule below, an idle app draws nothing at all. So the
+        // one frame that takes it back off has to be asked for here.
+        if app.expire_theme_readout(Instant::now()) {
             dirty = true;
         }
 
