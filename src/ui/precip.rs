@@ -483,7 +483,7 @@ mod tests {
 
         let rows: Vec<&str> = text
             .lines()
-            .skip_while(|line| !line.contains("The week"))
+            .skip_while(|line| !line.contains("this week"))
             // The title border, then the hour axis.
             .skip(2)
             .take_while(|line| !line.contains('└'))

@@ -114,6 +114,9 @@ const MAX_CELL: u16 = 3;
 /// without relying on the cell colour alone.
 const SELECTED_DAY: &str = "▸";
 
+/// One clause, so it needs no interpunct to join two halves.
+const TITLE: &str = "Chance of precipitation this week";
+
 /// Rows the box wants for `days`: the grid, its axis, and two borders.
 pub(super) fn box_rows(days: usize) -> u16 {
     days as u16 + AXIS_ROWS + 2
@@ -137,7 +140,9 @@ pub(super) fn precip_week_render(
 ) {
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title(Line::from("The week · chance of precipitation").fg(palette.muted));
+        // Right, opposite the chart's title above it, and phrased as one
+        // clause so it needs no separator to hold two halves apart.
+        .title_top(Line::from(TITLE).fg(palette.muted).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -685,6 +690,6 @@ mod tests {
 
         let buffer = terminal.backend().buffer().clone();
         let top: String = (0..60).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(top.contains("The week"), "{top:?}");
+        assert!(top.contains(TITLE), "{top:?}");
     }
 }
