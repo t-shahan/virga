@@ -11,12 +11,13 @@
 //! vertical bars, not up versus down. So this writes cells itself.
 
 use crate::theme::Palette;
+use crate::ui::axis::{TICK_ROWS, hour_ticks_render, put, put_right};
 use crate::ui::bars::{Columns, GAP, window_start};
 use crate::units::Unit;
 use crate::weather::model::{HourlyForecast, Weather};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 
@@ -55,18 +56,38 @@ const RULE_MIDNIGHT: &str = "┼";
 
 /// Rows the two halves and the rule need before the chart says anything.
 const MIN_HEIGHT: u16 = 3 + 2;
-/// Rows the amount half may take. It grows with the chart so a heavy hour has
-/// somewhere to go, but it is near-empty most weeks and must not take the
-/// chart over.
-const MAX_FALL_ROWS: usize = 6;
+/// Rows the amount half may take. Three, because that is what the half can
+/// actually use: its glyphs carry two levels a row, so three rows already
+/// resolve the scale more finely than the reading deserves. At six the extra
+/// rows were blank in every ordinary week and pushed the hour ticks away from
+/// the bars they label.
+const MAX_FALL_ROWS: usize = 3;
 
-/// Rows the plot itself may take. The box fills the terminal — a chart floating
-/// above a band of dead space looks broken — but the plot inside it does not
-/// stretch to match. Chance is scaled 0-100 and a typical week peaks under
-/// half, so on a very tall terminal an unbounded plot puts twenty blank rows
-/// above the bars. Capped and centred, the same window reads as a chart with
-/// air around it.
-const MAX_PLOT_HEIGHT: u16 = 16;
+/// Rows the plot itself may take.
+///
+/// Chance is scaled 0-100 and a typical week peaks under half, so the rows
+/// above the tallest bar are headroom rather than waste — that is what a
+/// percentage axis looks like. It only *read* as waste while there was no axis
+/// to explain it, which is why the gutter below exists. The cap is here so a
+/// very tall terminal spends its rows on the week strip instead, not because
+/// the headroom is a defect.
+const MAX_PLOT_HEIGHT: u16 = 28;
+
+/// Rows the whole box wants: the plot, its ticks, and two borders. The caller
+/// sizes the box from this rather than letting it fill, so the plot is never
+/// centred inside a taller box — blank rows *below* the bars are what made the
+/// chart look broken, and they are the ones an axis cannot explain.
+pub(super) const BOX_ROWS: u16 = MAX_PLOT_HEIGHT + TICK_ROWS + 2;
+
+/// Rows the box is content with — enough for the bars to separate readings,
+/// short of the cap it may grow to when no other box wants the space.
+pub(super) const COMFORT_ROWS: u16 = 12 + TICK_ROWS + 2;
+
+/// Columns the percentage gutter takes: "100%" and a space clear of the bars.
+const AXIS_WIDTH: u16 = 5;
+/// Narrower than this the gutter costs more than the axis is worth, and the
+/// bars are the content.
+const AXIS_NEEDS: u16 = 40;
 
 /// Below this the amount half is scaled as if this were the wettest hour on
 /// record. Roughly moderate rainfall: without a floor, a week whose heaviest
@@ -94,7 +115,12 @@ pub(super) fn precip_chart_render(
         return;
     }
 
-    let columns = Columns::fit(inner.width, TARGET_HOURS, MIN_STRIDE, MAX_STRIDE);
+    // Measured on the field the bars actually get, not the whole box: laying
+    // them out across the gutter's columns too ran the last one off the edge.
+    let axis = inner.width >= AXIS_NEEDS;
+    let field_width = inner.width - if axis { AXIS_WIDTH } else { 0 };
+
+    let columns = Columns::fit(field_width, TARGET_HOURS, MIN_STRIDE, MAX_STRIDE);
     let shown = columns.capacity.min(hours.len());
     let start = window_start(selected, columns.capacity, hours.len());
     let visible = &hours[start..start + shown];
@@ -118,16 +144,52 @@ pub(super) fn precip_chart_render(
         .title_bottom(Line::from(dry_spell(visible, shown)).fg(palette.muted));
     frame.render_widget(block, area);
 
-    // Centre the columns on their measured width, as the daily chart does,
-    // then centre the plot within whatever height the box has been given.
+    // The ticks come off the bottom before anything else: an axis the plot has
+    // overrun is worse than no axis, and the plot is what should give up the
+    // row. Below that the chart keeps the shape it has at its minimum.
+    let ticks = inner.height > MIN_HEIGHT;
+    let body = Rect {
+        height: inner
+            .height
+            .saturating_sub(if ticks { TICK_ROWS } else { 0 }),
+        ..inner
+    };
+
+    // Centre the columns on their measured width, as the daily chart does. The
+    // gutter is carved out first so the bars are centred in what is left of the
+    // box rather than sitting under their own labels.
+    let [_gutter, field] = Layout::horizontal([
+        Constraint::Length(if axis { AXIS_WIDTH } else { 0 }),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
+
     let [plot] = Layout::horizontal([Constraint::Length(columns.width_of(shown))])
         .flex(Flex::Center)
-        .areas(inner);
-    let [plot] = Layout::vertical([Constraint::Length(inner.height.min(MAX_PLOT_HEIGHT))])
-        .flex(Flex::Center)
+        .areas(field);
+    let [plot] = Layout::vertical([Constraint::Length(body.height.min(MAX_PLOT_HEIGHT))])
+        .flex(Flex::Start)
         .areas(plot);
 
     let rows = Rows::split(plot.height);
+
+    if axis {
+        chance_axis_render(frame, plot, &rows, palette);
+    }
+    if ticks {
+        let row = Rect {
+            y: plot.y + plot.height,
+            height: TICK_ROWS,
+            ..plot
+        };
+        hour_ticks_render(
+            frame,
+            row,
+            visible.iter().map(|h| h.time.clone()),
+            columns.stride,
+            palette,
+        );
+    }
 
     for (i, hour) in visible.iter().enumerate() {
         let index = start + i;
@@ -174,6 +236,34 @@ pub(super) fn precip_chart_render(
     }
 }
 
+/// The percentage gutter.
+///
+/// The rows above the tallest bar are the top of a 0-100 scale, not slack, and
+/// without these three labels there is nothing on screen that says so — which
+/// is the whole reason a half-empty chart read as a broken one. `0%` sits on
+/// the rule because the rule *is* zero: the amount half below it is a separate
+/// quantity on a separate scale, named in the title, and deliberately not given
+/// a second set of gridlines that would invite reading the two against each
+/// other.
+fn chance_axis_render(frame: &mut Frame, plot: Rect, rows: &Rows, palette: Palette) {
+    // Hung off the plot rather than off the box. The bars are centred in what
+    // the gutter leaves, so their left edge moves with the terminal's width
+    // while the box's does not — pinning the labels to the box drifted them a
+    // column or two away from the bars they measure, and by a different amount
+    // at every size.
+    let right = plot.x.saturating_sub(AXIS_WIDTH);
+    let width = AXIS_WIDTH - 1;
+    let rise = rows.rise as u16;
+
+    for (row, label) in [(0, "100%"), (rise / 2, "50%"), (rise, "0%")] {
+        // A plot too short to separate them would stack all three on one row.
+        if rise < 2 && row != rise {
+            continue;
+        }
+        put_right(frame, right, plot.y + row, width, label, palette.muted);
+    }
+}
+
 /// How the interior rows are divided. The chance half takes the majority: it
 /// is defined every hour and carries eight levels per cell, where the amount
 /// half is usually empty and limited to three.
@@ -191,19 +281,6 @@ impl Rows {
             fall,
         }
     }
-}
-
-fn put(frame: &mut Frame, x: u16, y: u16, symbol: &str, colour: Color) {
-    if symbol == " " {
-        return;
-    }
-    let area = frame.area();
-    if x >= area.right() || y >= area.bottom() {
-        return;
-    }
-    frame.buffer_mut()[(x, y)]
-        .set_symbol(symbol)
-        .set_style(Style::new().fg(colour));
 }
 
 /// `value` as a share of `scale`, clamped, with a missing reading reading as

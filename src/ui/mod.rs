@@ -6,6 +6,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+mod axis;
 mod bars;
 mod chart;
 mod current;
@@ -14,6 +15,7 @@ mod forecast;
 mod legend;
 mod precip;
 mod precip_chart;
+mod precip_week;
 mod search;
 
 use chart::chart_area_render;
