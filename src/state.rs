@@ -44,6 +44,30 @@ pub fn load_from(path: &Path) -> Result<Option<ActiveLocation>> {
     Ok(Some(document.location))
 }
 
+pub fn save_to(path: &Path, location: &ActiveLocation) -> Result<()> {
+    validate(location)?;
+    let parent = path.parent().context("state path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary state in {}", parent.display()))?;
+    serde_json::to_writer(
+        temporary.as_file_mut(),
+        &StateDocument {
+            version: VERSION,
+            location: location.clone(),
+        },
+    )?;
+    use std::io::Write as _;
+    temporary.write_all(b"\n")?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
 pub fn path() -> Result<PathBuf> {
     let project = directories::ProjectDirs::from("com", "t-shahan", "virga")
         .context("the operating system has no user state directory")?;
@@ -147,5 +171,29 @@ mod tests {
     #[test]
     fn state_path_uses_the_state_file_name() {
         assert_eq!(path().unwrap().file_name().unwrap(), "state.json");
+    }
+
+    #[test]
+    fn save_creates_a_document_that_load_can_read() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("nested").join("state.json");
+        let expected = location("Berlin, Germany", 52.52437, 13.41053);
+
+        save_to(&path, &expected).unwrap();
+
+        assert_eq!(load_from(&path).unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_previous_valid_document() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let previous = location("Berlin, Germany", 52.52437, 13.41053);
+        save_to(&path, &previous).unwrap();
+
+        let invalid = location("Nowhere", f64::NAN, 0.0);
+        assert!(save_to(&path, &invalid).is_err());
+
+        assert_eq!(load_from(&path).unwrap(), Some(previous));
     }
 }
