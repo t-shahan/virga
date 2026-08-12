@@ -35,9 +35,9 @@ pub struct ActiveLocation {
 impl Default for ActiveLocation {
     fn default() -> Self {
         Self {
-            label: "Frederick, Maryland, United States".to_string(),
-            lat: 39.414_27,
-            lon: -77.410_54,
+            label: "New York City, New York, United States".to_string(),
+            lat: 40.7128,
+            lon: -74.0060,
         }
     }
 }
@@ -88,6 +88,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        Self::with_location(ActiveLocation::default())
+    }
+
+    pub fn with_location(location: ActiveLocation) -> Self {
         Self {
             screen: Screen::Weather,
             query: String::new(),
@@ -98,7 +102,7 @@ impl App {
             selected: 0,
             selected_day: 0,
             selected_hour: 0,
-            location: ActiveLocation::default(),
+            location,
             pending: None,
             pending_search: None,
             next_request: 0,
@@ -774,6 +778,31 @@ mod tests {
             lat: 52.52437,
             lon: 13.41053,
         }
+    }
+
+    #[test]
+    fn the_builtin_location_is_new_york_city() {
+        assert_eq!(
+            ActiveLocation::default(),
+            ActiveLocation {
+                label: "New York City, New York, United States".to_string(),
+                lat: 40.7128,
+                lon: -74.0060,
+            }
+        );
+    }
+
+    #[test]
+    fn a_remembered_location_drives_the_initial_fetch() {
+        let remembered = berlin();
+        let mut app = App::with_location(remembered.clone());
+
+        let Request::Fetch { location, .. } = app.initial_fetch() else {
+            panic!("initial request was not a fetch")
+        };
+
+        assert_eq!(app.location, remembered);
+        assert_eq!(location, remembered);
     }
 
     /// Answer a request the way the worker would, so tests exercise the same
