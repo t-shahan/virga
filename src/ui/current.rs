@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
 use crate::units::Unit;
@@ -7,11 +8,17 @@ use crate::weather::model::{DailyForecast, Weather};
 use chrono::NaiveDate;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weather, area: Rect) {
+pub(super) fn current_area_render(
+    frame: &mut Frame,
+    app: &App,
+    weather: &Weather,
+    palette: Palette,
+    area: Rect,
+) {
     let unit = app.unit;
     let selected = app.selected_day;
     // The pane doubles as the day inspector. On today it shows live current
@@ -60,21 +67,22 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     let (summary, when) = bottom_titles(&summary, &when, area.width);
 
     let mut block = Block::bordered()
-        .title_top(Line::from(city).bold().blue().left_aligned())
-        .title_bottom(Line::from(when).white().right_aligned());
+        .border_style(Style::new().fg(palette.border))
+        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
+        .title_bottom(Line::from(when).fg(palette.text).right_aligned());
 
     if let Some(condition) = condition {
         // The rule between them is left unstyled so it takes the border's own
         // colour, and the border appears to run behind the text.
-        let mut right = vec![Span::from(condition).white()];
+        let mut right = vec![Span::from(condition).fg(palette.text)];
         if let Some(aqi) = aqi {
             right.push(Span::from(TITLE_RULE));
-            right.push(Span::from(aqi).white());
+            right.push(Span::from(aqi).fg(palette.text));
         }
         block = block.title_top(Line::from(right).right_aligned());
     }
     if let Some(summary) = summary {
-        block = block.title_bottom(Line::from(summary).dark_gray().left_aligned());
+        block = block.title_bottom(Line::from(summary).fg(palette.muted).left_aligned());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -136,11 +144,13 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
             // Hang the unit symbol off the middle row so it sits centred against the digits.
             if i == DIGIT_ROWS / 2 {
                 Line::from(vec![
-                    Span::from(row.clone()).bold().blue(),
-                    Span::from(symbol.to_string()).blue(),
+                    Span::from(row.clone()).bold().fg(palette.accent),
+                    Span::from(symbol.to_string()).fg(palette.accent),
                 ])
             } else {
-                Line::from(format!("{row}{symbol_pad}")).bold().blue()
+                Line::from(format!("{row}{symbol_pad}"))
+                    .bold()
+                    .fg(palette.accent)
             }
         })
         .collect();
@@ -152,7 +162,9 @@ pub(super) fn current_area_render(frame: &mut Frame, app: &App, weather: &Weathe
     // than any other day. Today swaps the period comparison for air quality,
     // which only exists for now; other days swap the live reading for the
     // day's feels-like range.
-    let details = day.map_or_else(Vec::new, |d| detail_lines(weather, d, unit, showing_today));
+    let details = day.map_or_else(Vec::new, |d| {
+        detail_lines(weather, d, palette, unit, showing_today)
+    });
 
     frame.render_widget(Paragraph::new(details), detail_area);
 }
@@ -174,6 +186,7 @@ const TITLE_RULE: &str = "───";
 fn detail_lines(
     weather: &Weather,
     day: &DailyForecast,
+    palette: Palette,
     unit: Unit,
     showing_today: bool,
 ) -> Vec<Line<'static>> {
@@ -205,11 +218,11 @@ fn detail_lines(
     };
 
     vec![
-        detail_line("feels like", &feels),
-        detail_line("high / low", &high_low(day, unit)),
-        detail_line("rain", &rain_line(day, unit)),
-        detail_line("wind", &wind),
-        detail_line("daylight", &daylight_line(day)),
+        detail_line("feels like", &feels, palette),
+        detail_line("high / low", &high_low(day, unit), palette),
+        detail_line("rain", &rain_line(day, unit), palette),
+        detail_line("wind", &wind, palette),
+        detail_line("daylight", &daylight_line(day), palette),
     ]
 }
 
@@ -361,10 +374,10 @@ fn bottom_titles(summary: &str, when: &str, width: u16) -> (Option<String>, Stri
     (None, when.to_string())
 }
 
-fn detail_line(label: &str, value: &str) -> Line<'static> {
+fn detail_line(label: &str, value: &str, palette: Palette) -> Line<'static> {
     Line::from(vec![
-        Span::from(format!("{label:<12}")).dark_gray(),
-        Span::from(value.to_string()).white(),
+        Span::from(format!("{label:<12}")).fg(palette.muted),
+        Span::from(value.to_string()).fg(palette.text),
     ])
 }
 
@@ -372,9 +385,14 @@ fn detail_line(label: &str, value: &str) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::app::{ActiveLocation, Fetch};
+    use crate::theme::Theme;
 
     use crate::units::Unit;
     use crate::weather::model::Weather;
+
+    fn palette() -> Palette {
+        Theme::default().palette()
+    }
 
     /// Today used to carry fewer lines than any other day, which read as a gap
     /// rather than a difference. They must also match the digit block's row
@@ -385,7 +403,7 @@ mod tests {
 
         for (day, today) in [(&w.daily[14], true), (&w.daily[3], false)] {
             assert_eq!(
-                detail_lines(&w, day, Unit::Imperial, today).len(),
+                detail_lines(&w, day, palette(), Unit::Imperial, today).len(),
                 DIGIT_ROWS,
                 "today = {today}"
             );
@@ -545,8 +563,10 @@ mod tests {
 
         for width in [44u16, 60, 80, 120, 200] {
             let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();
-            t.draw(|f| current_area_render(f, &app, &Weather::fixture(22, 14), f.area()))
-                .unwrap();
+            t.draw(|f| {
+                current_area_render(f, &app, &Weather::fixture(22, 14), palette(), f.area())
+            })
+            .unwrap();
 
             let buf = t.backend().buffer();
             let row = |y: u16| -> String { (0..width).map(|x| buf[(x, y)].symbol()).collect() };
@@ -594,7 +614,7 @@ mod tests {
             };
 
             let mut t = Terminal::new(TestBackend::new(120, 9)).unwrap();
-            t.draw(|f| current_area_render(f, &app, &weather, f.area()))
+            t.draw(|f| current_area_render(f, &app, &weather, palette(), f.area()))
                 .unwrap();
             let buf = t.backend().buffer();
             (0..120).map(|x| buf[(x, 0)].symbol()).collect()
@@ -645,8 +665,10 @@ mod tests {
 
         for width in [34u16, 44, 58, 59, 80] {
             let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();
-            t.draw(|f| current_area_render(f, &app, &Weather::fixture(22, 14), f.area()))
-                .unwrap();
+            t.draw(|f| {
+                current_area_render(f, &app, &Weather::fixture(22, 14), palette(), f.area())
+            })
+            .unwrap();
 
             let buf = t.backend().buffer();
             let text: String = (0..9u16)

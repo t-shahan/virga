@@ -1,16 +1,19 @@
 use crate::app::{App, Fetch};
+use crate::theme::Palette;
 use crate::ui::{centered, spinner};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
+pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let area = centered(area, 50, 12);
     frame.render_widget(Clear, area);
 
-    let block = Block::bordered().title("Search");
+    let block = Block::bordered()
+        .title("Search")
+        .border_style(Style::new().fg(palette.border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -22,14 +25,14 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
 
     let input_block = Block::new()
         .borders(Borders::BOTTOM)
-        .border_style(Style::new().fg(Color::DarkGray));
+        .border_style(Style::new().fg(palette.muted));
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
 
     let input_line = if app.query.is_empty() {
         Line::from(vec![
-            Span::from("❯ ").blue(),
-            Span::from("search for a city").dark_gray().italic(),
+            Span::from("❯ ").fg(palette.accent),
+            Span::from("search for a city").fg(palette.muted).italic(),
         ])
     } else {
         let cursor = if (app.tick / 5).is_multiple_of(2) {
@@ -38,9 +41,9 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
             " "
         };
         Line::from(vec![
-            Span::from("❯ ").blue(),
-            Span::from(app.query.as_str()).white(),
-            Span::from(cursor).blue(),
+            Span::from("❯ ").fg(palette.accent),
+            Span::from(app.query.as_str()).fg(palette.text),
+            Span::from(cursor).fg(palette.accent),
         ])
     };
 
@@ -59,13 +62,13 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, area: Rect) {
                 let marker = if i == app.selected { ">" } else { " " };
                 let text = format!("{marker} {}", l.label());
                 if i == app.selected {
-                    Line::from(text).yellow().bold()
+                    Line::from(text).fg(palette.selection).bold()
                 } else {
-                    Line::from(text).blue()
+                    Line::from(text).fg(palette.accent)
                 }
             })
             .collect(),
-        Fetch::Failed(e) => vec![Line::from(format!("error: {e}")).red()],
+        Fetch::Failed(e) => vec![Line::from(format!("error: {e}")).fg(palette.error)],
     };
 
     frame.render_widget(Paragraph::new(body), list_area);

@@ -4,6 +4,7 @@
 //! specific to it, and merging the two would tangle both.
 
 use crate::app::App;
+use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::precip_chart::precip_chart_render;
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
@@ -13,7 +14,7 @@ use crate::weather::model::HourlyForecast;
 use chrono::NaiveDateTime;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
@@ -34,7 +35,7 @@ const SUMMARY_HOURS: usize = 24;
 /// Past this an hour count stops being useful and a date reads better.
 const HOURS_BEFORE_A_DATE_READS_BETTER: usize = 24;
 
-pub(super) fn precip_render(frame: &mut Frame, app: &App, area: Rect) {
+pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let crate::app::Fetch::Ready(weather) = &app.weather else {
         return;
     };
@@ -52,8 +53,8 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, area: Rect) {
     let [pane, chart] =
         Layout::vertical([Constraint::Length(DETAIL_ROWS), Constraint::Fill(1)]).areas(area);
 
-    detail_pane_render(frame, app, hours, hour, pane);
-    precip_chart_render(frame, weather, chart, app.unit, selected);
+    detail_pane_render(frame, app, hours, hour, palette, pane);
+    precip_chart_render(frame, weather, palette, chart, app.unit, selected);
 }
 
 fn detail_pane_render(
@@ -61,6 +62,7 @@ fn detail_pane_render(
     app: &App,
     hours: &[HourlyForecast],
     hour: Option<&HourlyForecast>,
+    palette: Palette,
     area: Rect,
 ) {
     let unit = app.unit;
@@ -80,14 +82,15 @@ fn detail_pane_render(
     let (upcoming, when) = bottom_titles(&upcoming, &when, area.width);
 
     let mut block = Block::bordered()
-        .title_top(Line::from(city).bold().blue().left_aligned())
-        .title_bottom(Line::from(when).white().right_aligned());
+        .border_style(Style::new().fg(palette.border))
+        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
+        .title_bottom(Line::from(when).fg(palette.text).right_aligned());
 
     if let Some(condition) = condition {
-        block = block.title_top(Line::from(condition).white().right_aligned());
+        block = block.title_top(Line::from(condition).fg(palette.text).right_aligned());
     }
     if let Some(upcoming) = upcoming {
-        block = block.title_bottom(Line::from(upcoming).dark_gray().left_aligned());
+        block = block.title_bottom(Line::from(upcoming).fg(palette.muted).left_aligned());
     }
 
     let inner = block.inner(area);
@@ -121,13 +124,13 @@ fn detail_pane_render(
 
     if let Some(hero_area) = hero_area {
         frame.render_widget(
-            Paragraph::new(hero_chance(hour)).alignment(Alignment::Center),
+            Paragraph::new(hero_chance(hour, palette)).alignment(Alignment::Center),
             hero_area,
         );
     }
 
     frame.render_widget(
-        Paragraph::new(detail_lines(hours, app.selected_hour, unit)),
+        Paragraph::new(detail_lines(hours, app.selected_hour, palette, unit)),
         detail_area,
     );
 }
@@ -135,7 +138,7 @@ fn detail_pane_render(
 /// Chance is the hero because it is defined for every hour and it is what the
 /// rising half of the chart encodes. Amount would read `0` for most of the
 /// week. It appears here and nowhere else on the screen.
-fn hero_chance(hour: Option<&HourlyForecast>) -> Vec<Line<'static>> {
+fn hero_chance(hour: Option<&HourlyForecast>, palette: Palette) -> Vec<Line<'static>> {
     let value = hour
         .and_then(|h| h.chance)
         .map_or_else(|| "--".to_string(), |chance| chance.to_string());
@@ -148,11 +151,11 @@ fn hero_chance(hour: Option<&HourlyForecast>) -> Vec<Line<'static>> {
             // carrying the sign would sit offset. Pad the others to match.
             if i == DIGIT_ROWS / 2 {
                 Line::from(vec![
-                    Span::from(row.clone()).bold().blue(),
-                    Span::from("%").blue(),
+                    Span::from(row.clone()).bold().fg(palette.accent),
+                    Span::from("%").fg(palette.accent),
                 ])
             } else {
-                Line::from(format!("{row} ")).bold().blue()
+                Line::from(format!("{row} ")).bold().fg(palette.accent)
             }
         })
         .collect()
@@ -160,7 +163,12 @@ fn hero_chance(hour: Option<&HourlyForecast>) -> Vec<Line<'static>> {
 
 /// This hour, then the day ahead of it. Chance is deliberately absent — it is
 /// the hero, and saying it twice more was the first draft's mistake.
-fn detail_lines(hours: &[HourlyForecast], selected: usize, unit: Unit) -> Vec<Line<'static>> {
+fn detail_lines(
+    hours: &[HourlyForecast],
+    selected: usize,
+    palette: Palette,
+    unit: Unit,
+) -> Vec<Line<'static>> {
     let hour = hours.get(selected);
     let ahead = window_from(hours, selected);
 
@@ -170,11 +178,11 @@ fn detail_lines(hours: &[HourlyForecast], selected: usize, unit: Unit) -> Vec<Li
     );
 
     vec![
-        detail_line("amount", &amount_line(hour, unit)),
-        detail_line("temperature", &temperature),
-        detail_line("24 h total", &total_line(ahead, unit)),
-        detail_line("24 h peak", &peak_line(ahead)),
-        detail_line("wet hours", &wet_hours_line(ahead)),
+        detail_line("amount", &amount_line(hour, unit), palette),
+        detail_line("temperature", &temperature, palette),
+        detail_line("24 h total", &total_line(ahead, unit), palette),
+        detail_line("24 h peak", &peak_line(ahead), palette),
+        detail_line("wet hours", &wet_hours_line(ahead), palette),
     ]
 }
 
@@ -346,10 +354,10 @@ fn day_and_hour(time: &str) -> String {
     )
 }
 
-fn detail_line(label: &str, value: &str) -> Line<'static> {
+fn detail_line(label: &str, value: &str, palette: Palette) -> Line<'static> {
     Line::from(vec![
-        Span::from(format!("{label:<12}")).dark_gray(),
-        Span::from(value.to_string()).white(),
+        Span::from(format!("{label:<12}")).fg(palette.muted),
+        Span::from(value.to_string()).fg(palette.text),
     ])
 }
 
@@ -357,9 +365,14 @@ fn detail_line(label: &str, value: &str) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::app::{ActiveLocation, Fetch, Screen};
+    use crate::theme::Theme;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn palette() -> Palette {
+        Theme::default().palette()
+    }
 
     const CITY: &str = "Frederick, Maryland, United States";
 
@@ -600,7 +613,7 @@ mod tests {
 
         for unit in [Unit::Metric, Unit::Imperial] {
             for selected in [0usize, 11, 47] {
-                for line in detail_lines(&hours, selected, unit) {
+                for line in detail_lines(&hours, selected, palette(), unit) {
                     let width = line.width();
                     assert!(
                         width <= room + 12,
@@ -615,7 +628,9 @@ mod tests {
 
     fn rendered(width: u16, height: u16, app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| precip_render(f, app, f.area())).unwrap();
+        terminal
+            .draw(|f| precip_render(f, app, palette(), f.area()))
+            .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
         (0..height)

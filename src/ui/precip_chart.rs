@@ -10,6 +10,7 @@
 //! `BarChart` cannot draw this: its `.direction()` picks horizontal versus
 //! vertical bars, not up versus down. So this writes cells itself.
 
+use crate::theme::Palette;
 use crate::ui::bars::{Columns, GAP, window_start};
 use crate::units::Unit;
 use crate::weather::model::{HourlyForecast, Weather};
@@ -75,6 +76,7 @@ const AMOUNT_FLOOR_MM: f64 = 2.0;
 pub(super) fn precip_chart_render(
     frame: &mut Frame,
     weather: &Weather,
+    palette: Palette,
     area: Rect,
     unit: Unit,
     selected: usize,
@@ -83,7 +85,12 @@ pub(super) fn precip_chart_render(
     let inner = Block::bordered().inner(area);
 
     if hours.is_empty() || inner.width == 0 || area.height < MIN_HEIGHT {
-        frame.render_widget(Block::bordered().title("Precipitation"), area);
+        frame.render_widget(
+            Block::bordered()
+                .border_style(Style::new().fg(palette.border))
+                .title("Precipitation"),
+            area,
+        );
         return;
     }
 
@@ -103,8 +110,9 @@ pub(super) fn precip_chart_render(
     let amount_scale = heaviest.max(AMOUNT_FLOOR_MM);
 
     let block = Block::bordered()
+        .border_style(Style::new().fg(palette.border))
         .title(chart_title(shown, amount_scale, unit, inner.width))
-        .title_bottom(Line::from(dry_spell(visible, shown)).dark_gray());
+        .title_bottom(Line::from(dry_spell(visible, shown)).fg(palette.muted));
     frame.render_widget(block, area);
 
     // Centre the columns on their measured width, as the daily chart does,
@@ -121,12 +129,12 @@ pub(super) fn precip_chart_render(
     for (i, hour) in visible.iter().enumerate() {
         let index = start + i;
         let colour = if index == selected {
-            Color::Yellow
+            palette.selection
         } else if index == 0 {
             // Hour zero of the forward window is always now.
-            Color::LightBlue
+            palette.now
         } else {
-            Color::Blue
+            palette.series
         };
 
         let rising = rising_column(fraction(hour.chance.map(f64::from), 100.0), rows.rise);
@@ -142,7 +150,7 @@ pub(super) fn precip_chart_render(
         } else if index == 0 {
             (RULE_NOW, colour)
         } else if is_midnight(&hour.time) {
-            (RULE_MIDNIGHT, Color::Yellow)
+            (RULE_MIDNIGHT, palette.selection)
         } else {
             (RULE, colour)
         };
@@ -284,8 +292,16 @@ fn is_midnight(time: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// These tests assert on colour, so they name the roles rather than the
+    /// colours: what matters is that the selection differs from an ordinary
+    /// column, not that it happens to be yellow in the default palette.
+    fn palette() -> Palette {
+        Theme::default().palette()
+    }
 
     #[test]
     fn a_rising_bar_fills_from_the_bottom_up() {
@@ -380,7 +396,9 @@ mod tests {
         let weather = Weather::fixture(22, 14);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, selected))
+            .draw(|f| {
+                precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, selected)
+            })
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -450,7 +468,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         terminal
-            .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 0))
+            .draw(|f| precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, 0))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -519,7 +537,16 @@ mod tests {
             for selected in [0usize, 1, 95, 191] {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 terminal
-                    .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, selected))
+                    .draw(|f| {
+                        precip_chart_render(
+                            f,
+                            &weather,
+                            palette(),
+                            f.area(),
+                            Unit::Imperial,
+                            selected,
+                        )
+                    })
                     .unwrap();
             }
         }
@@ -535,7 +562,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         terminal
-            .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 0))
+            .draw(|f| precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, 0))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -554,12 +581,16 @@ mod tests {
 
         for selected in [0usize, 40, 7, 191, 12] {
             reused
-                .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, selected))
+                .draw(|f| {
+                    precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, selected)
+                })
                 .unwrap();
 
             let mut fresh = Terminal::new(TestBackend::new(90, 12)).unwrap();
             fresh
-                .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, selected))
+                .draw(|f| {
+                    precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, selected)
+                })
                 .unwrap();
 
             assert_eq!(
@@ -579,7 +610,7 @@ mod tests {
         for height in [8u16, 12, 18, 24, 44, 60] {
             let mut terminal = Terminal::new(TestBackend::new(90, height)).unwrap();
             terminal
-                .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 3))
+                .draw(|f| precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, 3))
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
 
@@ -635,7 +666,7 @@ mod tests {
         let weather = Weather::fixture(22, 14);
         for (w, h) in [(118u16, 22u16), (118, 26), (90, 12), (119, 20), (37, 14)] {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-            t.draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 3))
+            t.draw(|f| precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, 3))
                 .unwrap();
             let b = t.backend().buffer().clone();
             let bottom: String = (0..w).map(|x| b[(x, h - 1)].symbol()).collect();
@@ -652,7 +683,7 @@ mod tests {
         let weather = Weather::fixture(22, 14);
         let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
         terminal
-            .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 5))
+            .draw(|f| precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, 5))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
@@ -661,13 +692,13 @@ mod tests {
             .find(|&(x, y)| buffer[(x, y)].symbol() == RULE_MIDNIGHT)
             .expect("a midnight rule cell");
 
-        assert_eq!(buffer[midnight].style().fg, Some(Color::Yellow));
+        assert_eq!(buffer[midnight].style().fg, Some(palette().selection));
 
         // The column it marks is still an ordinary one above the rule.
         let (x, y) = midnight;
         assert_eq!(
             buffer[(x, y - 1)].style().fg,
-            Some(Color::Blue),
+            Some(palette().series),
             "only the boundary itself takes the accent"
         );
     }
@@ -678,7 +709,7 @@ mod tests {
         let weather = Weather::fixture(22, 14);
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         terminal
-            .draw(|f| precip_chart_render(f, &weather, f.area(), Unit::Imperial, 5))
+            .draw(|f| precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, 5))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -689,7 +720,7 @@ mod tests {
 
         assert_eq!(
             buffer[selected].style().fg,
-            Some(Color::Yellow),
+            Some(palette().selection),
             "the loud colour goes to the selection"
         );
     }

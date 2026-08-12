@@ -1,5 +1,6 @@
 use crate::events::{Message, Request, RequestId};
 use crate::input::Action;
+use crate::theme::Theme;
 use crate::units::Unit;
 use crate::weather::model::{Location, Weather};
 
@@ -58,6 +59,9 @@ pub struct App {
     pub results: Fetch<Vec<Location>>,
     pub weather: Fetch<Weather>,
     pub unit: Unit,
+    /// The palette in use. A name only — resolving it to colours is `ui`'s
+    /// business, which is what keeps this module free of Ratatui types.
+    pub theme: Theme,
     pub tick: usize,
     pub selected: usize,
     /// Index into `Weather::daily` of the day being inspected. Distinct from
@@ -94,6 +98,7 @@ impl App {
             results: Fetch::Idle,
             weather: Fetch::Loading,
             unit: Unit::Imperial,
+            theme: Theme::default(),
             tick: 0,
             selected: 0,
             selected_day: 0,
@@ -123,6 +128,7 @@ impl App {
             Action::Refresh => return self.refresh(),
             Action::Submit => return self.submit(),
             Action::ToggleUnits => self.unit = self.unit.toggle(),
+            Action::CycleTheme => self.theme = self.theme.next(),
             Action::OpenSearch => self.open_search(),
             Action::OpenPrecipitation => {
                 self.screen = Screen::Precipitation;
@@ -472,6 +478,40 @@ mod tests {
         app.weather = Fetch::Ready(Weather::fixture(days, today));
         app.selected_day = today;
         app
+    }
+
+    /// Changing the palette is a local change to one field. It must not move
+    /// the selection, touch the units, leave the screen, or — above all — send
+    /// anything to the network.
+    #[test]
+    fn cycling_the_theme_changes_nothing_else() {
+        let mut app = app_with(22, 14);
+        app.screen = Screen::Precipitation;
+        app.selected_hour = 7;
+
+        let before = app.theme;
+        let request = app.on_action(Action::CycleTheme);
+
+        assert!(request.is_none(), "a theme change asked for a fetch");
+        assert_eq!(app.theme, before.next());
+        assert_eq!(app.screen, Screen::Precipitation);
+        assert_eq!(app.selected_day, 14);
+        assert_eq!(app.selected_hour, 7);
+        assert_eq!(app.unit, Unit::Imperial);
+    }
+
+    /// Six presses is a lap, so a user who cycles past the one they wanted can
+    /// keep pressing rather than having to know a way back.
+    #[test]
+    fn cycling_all_the_way_round_returns_to_the_starting_theme() {
+        let mut app = app_with(22, 14);
+        let start = app.theme;
+
+        for _ in 0..Theme::ALL.len() {
+            app.on_action(Action::CycleTheme);
+        }
+
+        assert_eq!(app.theme, start);
     }
 
     #[test]

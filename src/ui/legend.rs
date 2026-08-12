@@ -1,4 +1,5 @@
 use crate::app::{App, Fetch, Screen};
+use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -14,9 +15,17 @@ const SPACING: usize = 3;
 /// rows the chart needs more.
 const MAX_ROWS: u16 = 2;
 
-fn bindings(app: &App) -> &'static [(&'static str, &'static str)] {
+/// The bar doubles as the theme readout: `t` is labelled with the palette
+/// currently in use, so pressing it is its own feedback. That is why this
+/// returns owned rows rather than a static slice — the label varies. Nothing
+/// is allocated per name; theme names are static strings.
+///
+/// `t` goes last on both screens because the wrapping below drops from the
+/// tail, and of everything here the palette is what a cramped terminal can
+/// most afford to lose.
+fn bindings(app: &App) -> Vec<(&'static str, &'static str)> {
     match app.screen {
-        Screen::Weather => &[
+        Screen::Weather => vec![
             ("q", "quit"),
             ("←→", "day"),
             ("n", "now"),
@@ -24,10 +33,11 @@ fn bindings(app: &App) -> &'static [(&'static str, &'static str)] {
             ("r", "refresh"),
             ("u", "units"),
             ("l", "location"),
+            ("t", app.theme.name()),
         ],
         // Quit and back lead, as they do on the weather screen: if anything is
         // going to be dropped, those are the two worth keeping.
-        Screen::Precipitation => &[
+        Screen::Precipitation => vec![
             ("q", "quit"),
             ("b", "back"),
             ("←→", "hour"),
@@ -35,12 +45,13 @@ fn bindings(app: &App) -> &'static [(&'static str, &'static str)] {
             ("n", "now"),
             ("r", "refresh"),
             ("u", "units"),
+            ("t", app.theme.name()),
         ],
         Screen::Search => match &app.results {
             Fetch::Ready(l) if !l.is_empty() => {
-                &[("↑↓", "navigate"), ("enter", "select"), ("esc", "cancel")]
+                vec![("↑↓", "navigate"), ("enter", "select"), ("esc", "cancel")]
             }
-            _ => &[("enter", "search"), ("esc", "cancel")],
+            _ => vec![("enter", "search"), ("esc", "cancel")],
         },
     }
 }
@@ -52,7 +63,7 @@ fn bindings(app: &App) -> &'static [(&'static str, &'static str)] {
 /// rendering fault. Breaking between whole bindings keeps every one that is
 /// shown legible, and lets a narrow terminal keep them all rather than losing
 /// the tail.
-fn wrapped(app: &App, width: u16) -> Vec<Line<'static>> {
+fn wrapped(app: &App, palette: Palette, width: u16) -> Vec<Line<'static>> {
     let room = width as usize;
     let mut lines: Vec<Line> = Vec::new();
     let mut row: Vec<Span> = Vec::new();
@@ -93,8 +104,8 @@ fn wrapped(app: &App, width: u16) -> Vec<Line<'static>> {
             used += SPACING;
         }
 
-        row.push(Span::from(format!("[{key}]")).yellow());
-        row.push(Span::from(format!(" {label}")).dark_gray());
+        row.push(Span::from(format!("[{key}]")).fg(palette.selection));
+        row.push(Span::from(format!(" {label}")).fg(palette.muted));
         used += entry;
     }
 
@@ -107,16 +118,19 @@ fn wrapped(app: &App, width: u16) -> Vec<Line<'static>> {
 /// How many rows the legend needs at this width, so the caller can reserve
 /// them before laying out everything else.
 pub(super) fn legend_rows(app: &App, width: u16) -> u16 {
-    (wrapped(app, width).len() as u16).clamp(1, MAX_ROWS)
+    // The palette cannot change how much room the bindings need, so measuring
+    // with any of them gives the same answer.
+    (wrapped(app, app.theme.palette(), width).len() as u16).clamp(1, MAX_ROWS)
 }
 
-pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, area: Rect) {
-    frame.render_widget(Paragraph::new(wrapped(app, area.width)), area);
+pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
+    frame.render_widget(Paragraph::new(wrapped(app, palette, area.width)), area);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -129,12 +143,16 @@ mod tests {
     }
 
     fn legend_at(width: u16, screen: Screen) -> Vec<String> {
-        let app = app_on(screen);
-        let height = legend_rows(&app, width);
+        legend_at_with(&app_on(screen), width)
+    }
+
+    fn legend_at_with(app: &App, width: u16) -> Vec<String> {
+        let height = legend_rows(app, width);
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let palette = app.theme.palette();
         terminal
-            .draw(|f| keybind_legend_render(f, &app, f.area()))
+            .draw(|f| keybind_legend_render(f, app, palette, f.area()))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -166,36 +184,68 @@ mod tests {
         );
     }
 
+    /// The bar is the only thing that says which palette is on, so the label
+    /// on `t` has to be the palette itself rather than the word "theme".
+    #[test]
+    fn the_bar_names_the_theme_that_is_on() {
+        let mut app = app_on(Screen::Weather);
+
+        let before = legend_at_with(&app, 120).join(" ");
+        assert!(
+            before.contains(&format!("[t] {}", app.theme.name())),
+            "{before:?}"
+        );
+
+        app.theme = app.theme.next();
+        let after = legend_at_with(&app, 120).join(" ");
+        assert!(
+            after.contains(&format!("[t] {}", app.theme.name())),
+            "the bar did not follow the theme: {after:?}"
+        );
+        assert_ne!(before, after, "cycling left the bar unchanged");
+    }
+
     /// The bug: a single row simply clipped, so narrowing the terminal sheared
     /// bindings mid-word. Every binding that appears must appear whole.
+    ///
+    /// Swept across every theme as well as every width, because the label on
+    /// `t` is the theme's own name: the longest of them is what would shear
+    /// first, and it is the only binding whose width is not fixed.
     #[test]
     fn narrowing_never_cuts_a_binding_in_half() {
-        for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
-            for width in 8u16..=160 {
-                let rows = legend_at(width, screen);
+        for theme in Theme::ALL {
+            for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
+                for width in 8u16..=160 {
+                    let mut app = app_on(screen);
+                    app.theme = theme;
+                    let rows = legend_at_with(&app, width);
 
-                for row in &rows {
-                    assert!(
-                        row.chars().count() <= width as usize,
-                        "width {width}: row overflows: {row:?}"
-                    );
-                    // A sheared binding leaves an opening bracket with no
-                    // closing one.
-                    assert_eq!(
-                        row.matches('[').count(),
-                        row.matches(']').count(),
-                        "width {width}: cut a key in half: {row:?}"
-                    );
-                }
-
-                // Any key that made it onto the bar brought its label with it.
-                let shown = rows.join(" ");
-                for (key, label) in bindings(&app_on(screen)) {
-                    if shown.contains(&format!("[{key}]")) {
+                    for row in &rows {
                         assert!(
-                            shown.contains(&format!("[{key}] {label}")),
-                            "width {width}: {key:?} lost its label: {shown:?}"
+                            row.chars().count() <= width as usize,
+                            "{} at {width}: row overflows: {row:?}",
+                            theme.name()
                         );
+                        // A sheared binding leaves an opening bracket with no
+                        // closing one.
+                        assert_eq!(
+                            row.matches('[').count(),
+                            row.matches(']').count(),
+                            "{} at {width}: cut a key in half: {row:?}",
+                            theme.name()
+                        );
+                    }
+
+                    // Any key that made it onto the bar brought its label with it.
+                    let shown = rows.join(" ");
+                    for (key, label) in bindings(&app) {
+                        if shown.contains(&format!("[{key}]")) {
+                            assert!(
+                                shown.contains(&format!("[{key}] {label}")),
+                                "{} at {width}: {key:?} lost its label: {shown:?}",
+                                theme.name()
+                            );
+                        }
                     }
                 }
             }

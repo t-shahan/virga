@@ -1,9 +1,10 @@
+use crate::theme::Palette;
 use crate::ui::bars::{Columns, GAP};
 use crate::units::Unit;
 use crate::weather::model::Weather;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Bar, BarChart, BarGroup, Block};
 
@@ -12,6 +13,7 @@ use ratatui::widgets::{Bar, BarChart, BarGroup, Block};
 pub(super) fn chart_area_render(
     frame: &mut Frame,
     weather: &Weather,
+    palette: Palette,
     area: Rect,
     unit: Unit,
     selected: usize,
@@ -27,12 +29,14 @@ pub(super) fn chart_area_render(
         .map(|d| d.high_c)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    let block = Block::bordered().title(format!(
-        "Daily Highs · {:.0}–{:.0}{}",
-        unit.temp(coolest_all),
-        unit.temp(warmest_all),
-        unit.temp_symbol(),
-    ));
+    let block = Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        .title(format!(
+            "Daily Highs · {:.0}–{:.0}{}",
+            unit.temp(coolest_all),
+            unit.temp(warmest_all),
+            unit.temp_symbol(),
+        ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -70,11 +74,11 @@ pub(super) fn chart_area_render(
             // reference, so the selection takes the loud colour.
             let day = start + i;
             let color = if day == selected {
-                Color::Yellow
+                palette.selection
             } else if day == weather.today_index {
-                Color::LightBlue
+                palette.now
             } else {
-                Color::Blue
+                palette.series
             };
             let value = BAR_FLOOR + (((d.high_c - coolest) / span) * scale).round() as u64;
             Bar::default()
@@ -103,9 +107,19 @@ pub(super) fn chart_area_render(
         .flex(Flex::Center)
         .areas(bars_row_area);
 
-    if let Some(marker_row) = marker_row {
-        render_selection_marker(
-            frame, chart_area, marker_row, &columns, selected, start, visible,
+    if let Some(marker_row) = marker_row
+        && let Some(offset) =
+            caret_offset(&columns, selected, start, visible.len(), chart_area.width)
+    {
+        let cell = Rect {
+            x: chart_area.x + offset,
+            y: marker_row.y,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(
+            Line::from("^").style(Style::new().fg(palette.selection)),
+            cell,
         );
     }
 
@@ -119,42 +133,26 @@ pub(super) fn chart_area_render(
     );
 }
 
-/// A caret centred under the selected bar, in the row reserved for it.
+/// How far into the chart the selection marker goes, if it goes anywhere.
 ///
 /// The selection can sit outside the drawn window — the chart drops the oldest
 /// history first when the pane is narrow — in which case there is nothing to
 /// point at and the row stays blank rather than pointing at the wrong day.
-fn render_selection_marker(
-    frame: &mut Frame,
-    chart_area: Rect,
-    marker_row: Rect,
+fn caret_offset(
     columns: &Columns,
     selected: usize,
     start: usize,
-    visible: &[crate::weather::model::DailyForecast],
-) {
-    let Some(column) = selected
-        .checked_sub(start)
-        .filter(|column| *column < visible.len())
-    else {
-        return;
-    };
+    shown: usize,
+    width: u16,
+) -> Option<u16> {
+    let column = selected.checked_sub(start).filter(|c| *c < shown)?;
 
-    let bar_width = columns.stride - GAP;
     // Centre it under the bar rather than its stride, so a two-cell bar with a
     // one-cell gap gets a caret over the bar and not over the gap beside it.
+    let bar_width = columns.stride - GAP;
     let offset = column as u16 * columns.stride + bar_width / 2;
-    if offset >= chart_area.width {
-        return;
-    }
 
-    let cell = Rect {
-        x: chart_area.x + offset,
-        y: marker_row.y,
-        width: 1,
-        height: 1,
-    };
-    frame.render_widget(Line::from("^").style(Style::new().fg(Color::Yellow)), cell);
+    (offset < width).then_some(offset)
 }
 
 /// Bars thinner than this read as a comb rather than a chart.
@@ -176,6 +174,11 @@ pub(super) const MAX_HEIGHT: u16 = 16;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
+
+    fn palette() -> Palette {
+        Theme::default().palette()
+    }
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -198,7 +201,7 @@ mod tests {
         let w = Weather::fixture(22, 14);
         for (width, height) in [(40, 12), (70, 30), (136, 24), (138, 20), (200, 50)] {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
-            t.draw(|f| chart_area_render(f, &w, f.area(), Unit::Imperial, 14))
+            t.draw(|f| chart_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
                 .unwrap();
         }
     }
@@ -208,7 +211,7 @@ mod tests {
     fn caret_column(width: u16, height: u16, selected: usize) -> Option<u16> {
         let w = Weather::fixture(22, 14);
         let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
-        t.draw(|f| chart_area_render(f, &w, f.area(), Unit::Imperial, selected))
+        t.draw(|f| chart_area_render(f, &w, palette(), f.area(), Unit::Imperial, selected))
             .unwrap();
 
         let buf = t.backend().buffer();
@@ -273,7 +276,7 @@ mod tests {
         let w = Weather::fixture(22, 14);
         for height in 3..=6u16 {
             let mut t = Terminal::new(TestBackend::new(80, height)).unwrap();
-            t.draw(|f| chart_area_render(f, &w, f.area(), Unit::Imperial, 14))
+            t.draw(|f| chart_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
                 .unwrap();
 
             let buf = t.backend().buffer();

@@ -1,16 +1,18 @@
+use crate::theme::Palette;
 use crate::units::Unit;
 use crate::weather::code::emoji;
 use crate::weather::model::Weather;
 use chrono::{Datelike, NaiveDate};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
 
 pub(super) fn forecast_area_render(
     frame: &mut Frame,
     weather: &Weather,
+    palette: Palette,
     area: Rect,
     unit: Unit,
     selected: usize,
@@ -18,7 +20,9 @@ pub(super) fn forecast_area_render(
     // Today onwards. The past stays exclusive to the chart.
     let upcoming = weather.daily.get(weather.today_index..).unwrap_or(&[]);
 
-    let block = Block::bordered().title("Forecast");
+    let block = Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        .title("Forecast");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -55,7 +59,7 @@ pub(super) fn forecast_area_render(
         header += &format!("{:>7}{:>10}{:>9}", "uv", "sunrise", "sunset");
     }
 
-    let mut lines = vec![Line::from(header).dark_gray()];
+    let mut lines = vec![Line::from(header).fg(palette.muted)];
 
     lines.extend(upcoming.iter().enumerate().map(|(i, d)| {
         let is_today = i == 0;
@@ -112,11 +116,11 @@ pub(super) fn forecast_area_render(
         // tint so it stays findable once the selection has moved off it.
         let line = Line::from(row);
         if is_selected {
-            line.yellow().bold()
+            line.fg(palette.selection).bold()
         } else if is_today {
-            line.light_blue()
+            line.fg(palette.now)
         } else {
-            line
+            line.fg(palette.text)
         }
     }));
 
@@ -151,6 +155,11 @@ fn weekday(date: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
+
+    fn palette() -> Palette {
+        Theme::default().palette()
+    }
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -173,7 +182,7 @@ mod tests {
         let w = Weather::fixture(22, 14);
         for width in [TABLE_MINIMAL, TABLE_COMPACT, TABLE_FULL, 100, 200] {
             let mut t = Terminal::new(TestBackend::new(width, 14)).unwrap();
-            t.draw(|f| forecast_area_render(f, &w, f.area(), Unit::Imperial, 14))
+            t.draw(|f| forecast_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
                 .unwrap();
         }
     }
@@ -183,7 +192,7 @@ mod tests {
     fn rows_without_colour(selected: usize) -> Vec<String> {
         let w = Weather::fixture(22, 14);
         let mut t = Terminal::new(TestBackend::new(100, 14)).unwrap();
-        t.draw(|f| forecast_area_render(f, &w, f.area(), Unit::Imperial, selected))
+        t.draw(|f| forecast_area_render(f, &w, palette(), f.area(), Unit::Imperial, selected))
             .unwrap();
 
         let buf = t.backend().buffer();

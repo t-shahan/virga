@@ -1,6 +1,8 @@
 use crate::app::{App, Fetch, Screen};
+use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 mod bars;
@@ -60,10 +62,20 @@ const MIN_WIDTH: u16 = 34;
 const MIN_HEIGHT: u16 = 12;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
+    render_with(frame, app, app.theme.palette());
+}
+
+/// The frame, drawn in a given palette.
+///
+/// The theme is resolved exactly once, here, and handed to every widget as a
+/// value — no widget reaches for `app.theme` itself. That is what lets a test
+/// render the whole app in a palette of its own choosing and check that no
+/// colour survived being hard-coded.
+fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     let area = frame.area();
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        too_small_render(frame, area);
+        too_small_render(frame, area, palette);
         return;
     }
 
@@ -123,36 +135,38 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
                     )
                 };
 
-                current_area_render(frame, app, w, current_area);
-                forecast_area_render(frame, w, forecast_area, app.unit, app.selected_day);
-                chart_area_render(frame, w, chart_area, app.unit, app.selected_day);
+                current_area_render(frame, app, w, palette, current_area);
+                forecast_area_render(frame, w, palette, forecast_area, app.unit, app.selected_day);
+                chart_area_render(frame, w, palette, chart_area, app.unit, app.selected_day);
             }
             Fetch::Loading => popup_render(
                 frame,
                 area,
+                palette,
                 "Loading",
                 &format!("{} fetching...", spinner(app.tick)),
             ),
-            Fetch::Failed(msg) => popup_render(frame, area, "Error", msg),
+            Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
         },
         Screen::Precipitation => match &app.weather {
-            Fetch::Ready(_) => precip_render(frame, app, content),
+            Fetch::Ready(_) => precip_render(frame, app, palette, content),
             Fetch::Loading => popup_render(
                 frame,
                 area,
+                palette,
                 "Loading",
                 &format!("{} fetching...", spinner(app.tick)),
             ),
-            Fetch::Failed(msg) => popup_render(frame, area, "Error", msg),
+            Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
         },
-        Screen::Search => search_render(frame, app, area),
+        Screen::Search => search_render(frame, app, palette, area),
     }
-    keybind_legend_render(frame, app, legend_area);
+    keybind_legend_render(frame, app, palette, legend_area);
 }
 
-fn too_small_render(frame: &mut Frame, area: Rect) {
+fn too_small_render(frame: &mut Frame, area: Rect, palette: Palette) {
     let message = format!(
         "Terminal too small\n\n{}x{}\nneeds {MIN_WIDTH}x{MIN_HEIGHT}",
         area.width, area.height
@@ -160,7 +174,9 @@ fn too_small_render(frame: &mut Frame, area: Rect) {
 
     // No border: at these sizes it would cost two of the few rows there are.
     frame.render_widget(
-        Paragraph::new(message).alignment(Alignment::Center),
+        Paragraph::new(message)
+            .style(Style::new().fg(palette.text))
+            .alignment(Alignment::Center),
         centered(area, area.width.min(MIN_WIDTH), 4.min(area.height)),
     );
 }
@@ -175,14 +191,27 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     area
 }
 
-fn popup_render(frame: &mut Frame, area: Rect, title: &str, body: &str) {
+fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, body: &str) {
     let area = centered(area, 40, 5);
+
+    // An error is the one message the reader has to act on, so it takes the
+    // error colour while the loading spinner stays ordinary text.
+    let colour = if title == "Error" {
+        palette.error
+    } else {
+        palette.text
+    };
 
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(body)
+            .style(Style::new().fg(colour))
             .alignment(Alignment::Center)
-            .block(Block::bordered().title(title)),
+            .block(
+                Block::bordered()
+                    .border_style(Style::new().fg(palette.border))
+                    .title(title),
+            ),
         area,
     )
 }
@@ -195,9 +224,141 @@ fn spinner(tick: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
+
+    /// Sizes that between them exercise every branch of the layout: side by
+    /// side, stacked, and the minimum the app will draw at.
+    const SIZES: [(u16, u16); 4] = [(120, 40), (100, 20), (60, 24), (MIN_WIDTH, MIN_HEIGHT)];
+
+    fn ready(screen: Screen) -> App {
+        let mut app = App::new();
+        app.weather = Fetch::Ready(Weather::fixture(22, 14));
+        app.screen = screen;
+        app
+    }
+
+    fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| render_with(f, app, palette))
+            .unwrap()
+            .buffer
+            .clone()
+    }
+
+    fn symbols(buffer: &Buffer, width: u16, height: u16) -> Vec<String> {
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// Eight colours that appear in no palette, one per role. Rendering in
+    /// these makes every painted cell traceable back to the role that painted
+    /// it — and every cell still wearing one of the old literals a call site
+    /// that never got a palette.
+    fn probe() -> Palette {
+        Palette {
+            accent: Color::Rgb(1, 0, 0),
+            text: Color::Rgb(2, 0, 0),
+            muted: Color::Rgb(3, 0, 0),
+            selection: Color::Rgb(4, 0, 0),
+            now: Color::Rgb(5, 0, 0),
+            series: Color::Rgb(6, 0, 0),
+            error: Color::Rgb(7, 0, 0),
+            border: Color::Rgb(8, 0, 0),
+        }
+    }
+
+    /// The test that makes the feature real rather than mostly-real. Before
+    /// themes there were around thirty colour literals scattered across seven
+    /// modules; a single one left behind is a widget that ignores the theme,
+    /// and reading the diff is not a reliable way to know they all moved.
+    #[test]
+    fn no_widget_keeps_a_colour_of_its_own() {
+        let stale = [
+            Color::Blue,
+            Color::LightBlue,
+            Color::Yellow,
+            Color::DarkGray,
+            Color::White,
+            Color::Red,
+        ];
+
+        for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
+            let mut app = ready(screen);
+            app.results = Fetch::Failed("no".to_string());
+
+            for (width, height) in SIZES {
+                let buffer = drawn(&app, probe(), width, height);
+
+                for y in 0..height {
+                    for x in 0..width {
+                        let fg = buffer[(x, y)].style().fg;
+                        assert!(
+                            !fg.is_some_and(|c| stale.contains(&c)),
+                            "{screen:?} at {width}x{height}: cell ({x}, {y}) \
+                             painted itself {fg:?} instead of asking the palette"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A palette may change what a cell looks like but never which cell it is.
+    /// If colour could move the layout, every size-related guarantee in this
+    /// module would hold for the default theme only.
+    ///
+    /// The app is held fixed and only the palette varies, so the legend's
+    /// theme readout — the one place a theme legitimately changes the glyphs —
+    /// does not mask the thing being tested. That the readout itself always
+    /// fits is `legend`'s business, and it sweeps every name to prove it.
+    #[test]
+    fn a_palette_never_moves_a_cell() {
+        for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
+            let app = ready(screen);
+
+            for (width, height) in SIZES {
+                let reference = symbols(
+                    &drawn(&app, Theme::default().palette(), width, height),
+                    width,
+                    height,
+                );
+
+                for theme in Theme::ALL {
+                    assert_eq!(
+                        symbols(&drawn(&app, theme.palette(), width, height), width, height),
+                        reference,
+                        "{} moved the layout on {screen:?} at {width}x{height}",
+                        theme.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The other half of the pair: proof the palette reaches the screen at
+    /// all, so `every_theme_draws_the_same_layout` cannot be satisfied by a
+    /// theme that simply does nothing.
+    #[test]
+    fn changing_the_theme_repaints_the_screen() {
+        let app = ready(Screen::Weather);
+        let reference = drawn(&app, Theme::default().palette(), 120, 40);
+
+        for theme in Theme::ALL.into_iter().skip(1) {
+            let themed = drawn(&app, theme.palette(), 120, 40);
+            let repainted = (0..40u16)
+                .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+                .any(|cell| themed[cell].style().fg != reference[cell].style().fg);
+
+            assert!(repainted, "{} left the screen unchanged", theme.name());
+        }
+    }
 
     /// A terminal below the minimum must say so rather than render a clipped
     /// mess — and must not panic doing it, including at one cell.
