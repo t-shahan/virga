@@ -70,9 +70,9 @@ opened from.
 
 ## Configuration
 
-There is none yet. The startup location is a `Default` impl in `src/app.rs`;
-change it and reinstall to start somewhere else. Cities chosen with `l` apply
-for the session only — nothing is written to disk.
+On its first run, Virga starts in New York City. Thereafter, it starts at the
+last location whose weather loaded successfully. That location is kept in the
+platform's per-user state/data directory.
 
 ## Development
 
@@ -101,8 +101,8 @@ Open-Meteo's JSON touches one conversion rather than the whole app.
 
 ## Limitations
 
-- No configuration file and no cache: every launch fetches, and the default
-  location needs a rebuild to change.
+- There is no general configuration file, and weather is never cached. Every
+  launch fetches fresh weather.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface.
 - "Today" is distinguished by colour alone in the daily chart. The selection is
@@ -120,10 +120,13 @@ Weather, air quality and geocoding all come from
 **for non-commercial use only** and is rate limited to 10,000 calls per day.
 Each weather load makes two requests, and each submitted search a third.
 
-Nothing is stored on disk — no account, no cache, no history — but the
-coordinates and city names you ask about are sent to Open-Meteo, whose
-free-service logs may retain IP addresses and coordinates for 90 days. See
-Open-Meteo's [terms](https://open-meteo.com/en/terms) and
+Virga stores only the last successfully loaded location label and coordinates
+locally, in its per-user state/data directory. It does not store weather
+responses, searches, or history. Weather and air-quality requests send the
+location coordinates to Open-Meteo; city searches submit their search text to
+its geocoder. Open-Meteo's free-service logs may retain IP addresses and
+coordinates for 90 days. See Open-Meteo's
+[terms](https://open-meteo.com/en/terms) and
 [licence](https://open-meteo.com/en/license).
 
 A missing or null reading degrades to a dash rather than failing the fetch. The
