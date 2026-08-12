@@ -24,7 +24,7 @@ use crate::theme::Palette;
 use crate::ui::axis::{clock, put, put_faint, put_right, put_text};
 use crate::units::Unit;
 use crate::weather::model::HourlyForecast;
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Style, Stylize};
@@ -254,29 +254,55 @@ fn group_by_day(hours: &[HourlyForecast]) -> Vec<Day> {
 
 fn grouped(hours: &[HourlyForecast]) -> Vec<Day> {
     let mut days: Vec<Day> = Vec::new();
-    let mut current = String::new();
+    let mut current = None;
 
     for (index, hour) in hours.iter().enumerate() {
-        let Some(at) = NaiveDateTime::parse_from_str(&hour.time, "%Y-%m-%dT%H:%M").ok() else {
-            continue;
-        };
-        let date = at.format("%Y-%m-%d").to_string();
+        let Some(at) = date_of(hour) else { continue };
 
-        if date != current {
+        if current != Some(at.date()) {
+            current = Some(at.date());
             days.push(Day {
                 name: at.format("%a").to_string(),
                 hours: [const { None }; HOURS_IN_A_DAY],
             });
-            current = date;
         }
 
         if let Some(day) = days.last_mut() {
-            day.hours[at.format("%H").to_string().parse::<usize>().unwrap_or(0) % HOURS_IN_A_DAY] =
-                Some((index, hour.clone()));
+            day.hours[at.hour() as usize % HOURS_IN_A_DAY] = Some((index, hour.clone()));
         }
     }
 
     days
+}
+
+/// The stamp an hour carries, or `None` where it will not parse.
+///
+/// The one place a date is derived from an hour. The strip draws a row per
+/// calendar date and the layout reserves rows per calendar date; while those
+/// were two separate calculations — one grouping by date, the other dividing
+/// the hour count by 24 — they disagreed for every window that did not open at
+/// midnight, and the strip silently lost its last row.
+fn date_of(hour: &HourlyForecast) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(&hour.time, "%Y-%m-%dT%H:%M").ok()
+}
+
+/// How many rows the strip would draw for these hours.
+///
+/// Equal to `group_by_day(hours).len()` by construction, and asserted to stay
+/// that way — this exists so the layout can ask without paying for the
+/// grouping, not so it can have an opinion of its own.
+pub(super) fn day_count(hours: &[HourlyForecast]) -> usize {
+    let mut count = 0;
+    let mut current = None;
+
+    for at in hours.iter().filter_map(date_of) {
+        if current != Some(at.date()) {
+            current = Some(at.date());
+            count += 1;
+        }
+    }
+
+    count
 }
 
 fn shade(chance: Option<u8>) -> &'static Step {
@@ -361,6 +387,51 @@ mod tests {
             "the next day starts at midnight"
         );
         assert!(days[1].hours.iter().all(Option::is_some), "a whole day");
+    }
+
+    /// The invariant the layout depends on. `day_count` exists so the caller
+    /// can reserve rows without paying for the grouping, which is only safe
+    /// while it answers exactly what the grouping would.
+    ///
+    /// Swept across every starting hour, because that is the axis the two came
+    /// apart on: `hours / 24` and a count of calendar dates agree only for a
+    /// window that opens at midnight, and the forward window opens whenever
+    /// the app happens to be started.
+    #[test]
+    fn the_row_count_the_layout_reserves_is_the_one_the_grid_draws() {
+        for start in 0..24 {
+            for count in [1usize, 6, 23, 24, 25, 60, 192] {
+                let series = hours(count, start);
+                assert_eq!(
+                    day_count(&series),
+                    group_by_day(&series).len(),
+                    "{count} hours from {start}:00"
+                );
+            }
+        }
+
+        assert_eq!(day_count(&[]), 0, "no hours, no rows");
+    }
+
+    /// The case the sweep above is really about, stated on its own so a
+    /// regression names the bug rather than a coordinate.
+    #[test]
+    fn an_evening_window_is_counted_by_date_and_not_by_elapsed_days() {
+        let series = hours(60, 18);
+
+        assert_eq!(day_count(&series), 4, "6 PM plus 60 hours touches 4 dates");
+        assert_eq!(60_usize.div_ceil(24), 3, "where the day count says 3");
+    }
+
+    /// An unparseable stamp must not open a row of its own, or a malformed
+    /// response would push the strip past the height reserved for it.
+    #[test]
+    fn hours_that_will_not_parse_are_not_days() {
+        let mut series = hours(48, 0);
+        series[5].time = "not-a-time".to_string();
+
+        assert_eq!(day_count(&series), 2);
+        assert_eq!(day_count(&series), group_by_day(&series).len());
     }
 
     /// The index carried alongside each hour is what the selection is matched
