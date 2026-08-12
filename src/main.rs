@@ -1,25 +1,53 @@
 use crate::app::{App, Fetch, Screen};
 use crate::events::Request;
+use crate::theme::Theme;
 use anyhow::{Result, anyhow};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
 use std::sync::mpsc;
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod app;
 mod events;
 mod input;
+mod theme;
 mod ui;
 mod units;
 mod weather;
 
 fn main() -> Result<()> {
+    // Read before the terminal is taken over: a complaint about the variable
+    // has to go to the ordinary screen, or it is written to the alternate
+    // screen and wiped the moment the app exits.
+    let theme = startup_theme(std::env::var("VIRGA_THEME").ok().as_deref());
+
     let terminal = ratatui::init();
-    let result = run(terminal);
+    let result = run(terminal, theme);
     ratatui::restore();
     result
+}
+
+/// The palette to start in, given whatever `VIRGA_THEME` was set to.
+///
+/// An unusable value is a warning and the default, not an exit: the variable
+/// is a convenience, and refusing to show the weather because of a typo in a
+/// shell profile is a poor trade.
+fn startup_theme(requested: Option<&str>) -> Theme {
+    let Some(name) = requested else {
+        return Theme::default();
+    };
+
+    Theme::from_name(name).unwrap_or_else(|| {
+        let known: Vec<&str> = Theme::ALL.into_iter().map(Theme::name).collect();
+        eprintln!(
+            "virga: VIRGA_THEME={name:?} is not a theme; using {}.\n       known themes: {}",
+            Theme::default().name(),
+            known.join(", "),
+        );
+        Theme::default()
+    })
 }
 
 /// Hand a request to the worker without ever blocking the draw loop.
@@ -48,7 +76,7 @@ fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result
 /// the app. Every state transition lives in `App` and every decision about what
 /// a key means lives in `input`, so what remains here is the part that
 /// genuinely needs a terminal and a channel.
-fn run(mut terminal: DefaultTerminal) -> Result<()> {
+fn run(mut terminal: DefaultTerminal, theme: Theme) -> Result<()> {
     // Bounded: see `events::REQUEST_QUEUE`. Messages back stay unbounded — the
     // worker produces at most one per request it was handed, so bounding the
     // requests bounds the replies too, and a blocking send on the worker side
@@ -58,6 +86,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
     events::spawn_worker(request_rx, message_tx);
 
     let mut app = App::new();
+    app.theme = theme;
     let initial = app.initial_fetch();
     dispatch(&request_tx, &mut app, initial)?;
 
@@ -73,6 +102,14 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
         let size = terminal.size()?;
         if size != last_size {
             last_size = size;
+            dirty = true;
+        }
+
+        // The palette's name leaves the key bar a few seconds after `t`, and
+        // nothing else would mark that frame dirty: by then the app is idle
+        // and, per the rule below, an idle app draws nothing at all. So the
+        // one frame that takes it back off has to be asked for here.
+        if app.expire_theme_readout(Instant::now()) {
             dirty = true;
         }
 
@@ -117,6 +154,31 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_environment_variable_means_the_default_theme() {
+        assert_eq!(startup_theme(None), Theme::default());
+    }
+
+    #[test]
+    fn the_environment_variable_picks_the_starting_theme() {
+        for theme in Theme::ALL {
+            assert_eq!(startup_theme(Some(theme.name())), theme);
+        }
+    }
+
+    /// A typo in a shell profile must not stop the weather from appearing.
+    #[test]
+    fn an_unusable_value_falls_back_rather_than_failing() {
+        for value in ["", "  ", "solarized", "Catppuccin Latte"] {
+            assert_eq!(startup_theme(Some(value)), Theme::default(), "{value:?}");
         }
     }
 }
