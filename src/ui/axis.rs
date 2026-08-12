@@ -10,7 +10,7 @@ use crate::theme::Palette;
 use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 
 /// Rows a row of hour ticks takes.
 pub(super) const TICK_ROWS: u16 = 1;
@@ -27,23 +27,9 @@ pub(super) fn put(frame: &mut Frame, x: u16, y: u16, symbol: &str, colour: Color
     put_styled(frame, x, y, symbol, Style::new().fg(colour));
 }
 
-/// As `put`, but dimmed — a second, theme-independent step on a value ramp.
-///
-/// `DIM` acts on whatever foreground the palette supplied, so it separates the
-/// low end of a scale in every theme without any of them defining a shade of
-/// their own. Terminals that ignore SGR 2 simply render it as an ordinary cell,
-/// which is why nothing is encoded by the dimming alone.
-pub(super) fn put_faint(frame: &mut Frame, x: u16, y: u16, symbol: &str, colour: Color) {
-    put_styled(
-        frame,
-        x,
-        y,
-        symbol,
-        Style::new().fg(colour).add_modifier(Modifier::DIM),
-    );
-}
-
-fn put_styled(frame: &mut Frame, x: u16, y: u16, symbol: &str, style: Style) {
+/// Write one cell in a caller-supplied style. The value ramps want a modifier
+/// as well as a colour, and which modifier depends on state the callers own.
+pub(super) fn put_styled(frame: &mut Frame, x: u16, y: u16, symbol: &str, style: Style) {
     if symbol == " " {
         return;
     }

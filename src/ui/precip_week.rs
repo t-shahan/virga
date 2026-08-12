@@ -21,13 +21,13 @@
 //! which is a table column and reads as one.
 
 use crate::theme::Palette;
-use crate::ui::axis::{clock, put, put_faint, put_right, put_text};
+use crate::ui::axis::{clock, put_right, put_styled, put_text};
 use crate::units::Unit;
 use crate::weather::model::HourlyForecast;
 use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 
@@ -49,7 +49,9 @@ const HOURS_IN_A_DAY: usize = 24;
 /// costs no columns and works in every theme, because `DIM` acts on whatever
 /// foreground the palette handed over rather than on a shade each theme would
 /// have to define. No step is identified by the dimming alone, so a terminal
-/// that ignores SGR 2 loses contrast and nothing else.
+/// that ignores SGR 2 loses contrast and nothing else. It applies to the ramp
+/// only: an hour carrying the selection or now is drawn at full strength
+/// whatever step it falls in, because those are states rather than readings.
 const SHADE: [Step; 5] = [
     Step::faint(10, "·"),
     Step::faint(30, "▂"),
@@ -194,13 +196,21 @@ pub(super) fn precip_week_render(
                 palette.accent
             };
 
+            // State outranks the ramp. The low steps are dimmed to push the
+            // quiet end of the scale back, but the hour the arrows are on is
+            // not part of that scale — and a dimmed selection colour on a dark
+            // ground is very nearly invisible, which is what it looked like for
+            // every selected hour under 30%. Marked hours are drawn at full
+            // strength and bold instead.
             let step = shade(forecast.chance);
+            let style = match (*index == selected || *index == 0, step.faint) {
+                (true, _) => Style::new().fg(colour).add_modifier(Modifier::BOLD),
+                (false, true) => Style::new().fg(colour).add_modifier(Modifier::DIM),
+                (false, false) => Style::new().fg(colour),
+            };
+
             for offset in 0..cell {
-                if step.faint {
-                    put_faint(frame, x + offset, y, step.symbol, colour);
-                } else {
-                    put(frame, x + offset, y, step.symbol, colour);
-                }
+                put_styled(frame, x + offset, y, step.symbol, style);
             }
         }
 
@@ -563,6 +573,85 @@ mod tests {
             text.contains(SELECTED_DAY),
             "the selected day is unmarked:\n{text}"
         );
+    }
+
+    /// The dimming is a step on the value ramp, and the selection is not a
+    /// value. Applied to it, a quiet hour's cell came out dim yellow on a dark
+    /// ground — present in the buffer and very nearly invisible on screen, for
+    /// every selected hour under 30%.
+    #[test]
+    fn a_marked_hour_is_never_dimmed_however_quiet_it_is() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in &mut weather.hourly {
+            // The bottom of the ramp, which is the step that dims.
+            hour.chance = Some(5);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 11)).unwrap();
+        terminal
+            .draw(|f| {
+                precip_week_render(
+                    f,
+                    weather.forecast_hours(),
+                    palette(),
+                    f.area(),
+                    Unit::Imperial,
+                    3,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let marked: Vec<_> = (0..90u16)
+            .flat_map(|x| (0..11u16).map(move |y| (x, y)))
+            .filter(|&cell| {
+                let style = buffer[cell].style();
+                style.fg == Some(palette().selection) && buffer[cell].symbol() != SELECTED_DAY
+            })
+            .collect();
+
+        assert!(
+            !marked.is_empty(),
+            "nothing was marked, so this proved nothing"
+        );
+        for cell in marked {
+            assert!(
+                !buffer[cell].style().add_modifier.contains(Modifier::DIM),
+                "the selected cell at {cell:?} is dimmed"
+            );
+        }
+    }
+
+    /// The other half of the pair: the ramp's own low steps must still dim, or
+    /// the fix above has quietly removed the second channel altogether.
+    #[test]
+    fn the_quiet_end_of_the_ramp_still_recedes() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in &mut weather.hourly {
+            hour.chance = Some(5);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 11)).unwrap();
+        terminal
+            .draw(|f| {
+                precip_week_render(
+                    f,
+                    weather.forecast_hours(),
+                    palette(),
+                    f.area(),
+                    Unit::Imperial,
+                    3,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let dimmed = (0..90u16)
+            .flat_map(|x| (0..11u16).map(move |y| (x, y)))
+            .filter(|&cell| buffer[cell].style().add_modifier.contains(Modifier::DIM))
+            .count();
+
+        assert!(dimmed > 0, "a week of 5% hours should be a quiet grid");
     }
 
     #[test]

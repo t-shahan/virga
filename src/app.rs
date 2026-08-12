@@ -456,12 +456,48 @@ impl App {
             }
         } else if let Some(previous) = self.selected_hour.checked_sub(HOURS_PER_DAY) {
             previous
+        } else if self.selected_hour >= self.hours_left_today() {
+            // Stepping back onto today, which the window opened partway
+            // through. A clock hour earlier than the one it opened at has no
+            // cell in that first day, so the step lands on its earliest hour —
+            // now — rather than preserving a time of day that day cannot
+            // offer.
+            //
+            // Preserving it is what the rest of this function exists to do, and
+            // it is right everywhere else. Here it made the first day
+            // unreachable by the day arrows from eighteen of the twenty-four
+            // clock hours: the cycle `t, t+24, t+48…` only ever touches the
+            // first day when `t` is one of the few hours left in it. Left and
+            // right could still walk onto today an hour at a time, which is
+            // what made the gap look like a rendering fault in the week strip
+            // rather than a navigation one.
+            0
         } else {
-            // The last day that reaches this time of day. The final day of the
-            // window is usually partial, so that is not always the last day.
+            // Already on the first day. The last day that reaches this time of
+            // day; the final day of the window is usually partial, so that is
+            // not always the last day.
             let days = (count - 1 - time_of_day) / HOURS_PER_DAY;
             time_of_day + days * HOURS_PER_DAY
         };
+    }
+
+    /// Hours of the current day the forward window still holds.
+    ///
+    /// The window opens at the current hour, so its first day is a partial one
+    /// — six hours of it at 6 PM — and it is the only day whose clock hours do
+    /// not run 0 to 23. Indices below this are today; the rest are whole days.
+    fn hours_left_today(&self) -> usize {
+        let Fetch::Ready(weather) = &self.weather else {
+            return HOURS_PER_DAY;
+        };
+
+        weather
+            .forecast_hours()
+            .first()
+            .and_then(|hour| hour.time.get(11..13))
+            .and_then(|clock| clock.parse::<usize>().ok())
+            .filter(|clock| *clock < HOURS_PER_DAY)
+            .map_or(HOURS_PER_DAY, |clock| HOURS_PER_DAY - clock)
     }
 
     pub fn select_prev_hour_day(&mut self) {
@@ -723,6 +759,100 @@ mod tests {
         }
         app.selected_hour = 0;
         app
+    }
+
+    /// A window that opens in the evening, so its first day holds only the six
+    /// hours left of it.
+    ///
+    /// The plain fixture opens at midnight, which makes every day a whole one
+    /// and hides everything about how the first is navigated — the same trap
+    /// the partial *last* day fixture above exists to avoid, at the other end.
+    fn app_with_an_evening_start() -> App {
+        let mut app = app_with(22, 14);
+        if let Fetch::Ready(weather) = &mut app.weather {
+            weather.now_hour += 18;
+        }
+        app.selected_hour = 0;
+        app
+    }
+
+    #[test]
+    fn the_first_day_is_measured_from_the_hour_the_window_opened() {
+        assert_eq!(app_with_an_evening_start().hours_left_today(), 6);
+        // The plain fixture opens at midnight, so its first day is whole.
+        assert_eq!(app_with(22, 14).hours_left_today(), HOURS_PER_DAY);
+        // Nothing loaded is not nothing left; the arrows still have to behave.
+        assert_eq!(App::new().hours_left_today(), HOURS_PER_DAY);
+    }
+
+    /// The complaint. With the window opened at 6 PM, today holds six hours,
+    /// and the day arrows step by a whole day at a fixed clock hour — so from
+    /// any of the eighteen clock hours today no longer reaches, the cycle
+    /// `t, t+24, t+48…` skipped straight over the first day and it could never
+    /// be selected. Left and right could still walk onto it an hour at a time,
+    /// which is what made it look like the week strip was failing to mark a row
+    /// rather than the arrows failing to land on one.
+    #[test]
+    fn the_day_arrows_can_always_reach_today() {
+        let today = app_with_an_evening_start().hours_left_today();
+
+        for start in 0..72usize {
+            let mut app = app_with_an_evening_start();
+            app.selected_hour = start;
+
+            let mut presses = 0;
+            while app.selected_hour >= today {
+                app.select_prev_hour_day();
+                presses += 1;
+                assert!(presses < 12, "start {start} never arrived on today");
+            }
+        }
+    }
+
+    /// Only the step that lands on today may move the clock, and only because
+    /// today has no cell at the hour it came from. Every other step keeps it.
+    #[test]
+    fn only_the_step_onto_today_moves_the_clock() {
+        let today = app_with_an_evening_start().hours_left_today();
+
+        for start in today..96usize {
+            let mut app = app_with_an_evening_start();
+            app.selected_hour = start;
+            let before = clock_of(&app);
+
+            app.select_prev_hour_day();
+
+            if start < HOURS_PER_DAY {
+                // These are the hours of the second day that today never
+                // reaches — before the hour the window opened at — so the step
+                // has nowhere on today to preserve the clock and clamps to now.
+                assert_eq!(
+                    app.selected_hour, 0,
+                    "start {start} should have clamped onto now"
+                );
+            } else {
+                // Everything from the second day on steps a whole day back and
+                // keeps its hour, including the steps that land on today: hour
+                // 25 is 7 PM and so is hour 1.
+                assert_eq!(clock_of(&app), before, "start {start} shifted the clock");
+            }
+        }
+    }
+
+    /// Stepping back off today still wraps to the far end, so the arrows keep
+    /// their cycle rather than jamming against the first day.
+    #[test]
+    fn today_still_wraps_to_the_last_day_that_has_the_hour() {
+        let mut app = app_with_an_evening_start();
+        app.selected_hour = 0;
+        app.select_prev_hour_day();
+
+        assert!(
+            app.selected_hour >= HOURS_PER_DAY,
+            "wrapping should reach the end of the window, not {}",
+            app.selected_hour
+        );
+        assert!(app.selected_hour < app.forecast_hour_stamps().len());
     }
 
     fn clock_of(app: &App) -> String {
