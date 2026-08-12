@@ -7,7 +7,9 @@ use crate::app::App;
 use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::precip_chart::precip_chart_render;
+use crate::ui::precip_week::precip_week_render;
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
+use crate::ui::{precip_chart, precip_week};
 use crate::units::Unit;
 use crate::weather::code::description;
 use crate::weather::model::HourlyForecast;
@@ -44,17 +46,59 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area
     let selected = app.selected_hour;
     let hour = hours.get(selected);
 
-    // The pane is sized to its content and the chart takes every remaining
-    // row. Capping the chart instead left a band of dead space between it and
-    // the legend, which reads far worse than the honest headroom a chance
-    // scaled 0-100 leaves above a quiet week's bars. Extra rows are not wasted
-    // either: they are what give the eighth-resolution bars room to tell 19%
-    // from 25%.
-    let [pane, chart] =
-        Layout::vertical([Constraint::Length(DETAIL_ROWS), Constraint::Fill(1)]).areas(area);
+    // Three readings of the same forecast, coarsening downward: this hour, the
+    // day or so either side of it, then the week. Each box answers a question
+    // the one above it cannot, which is what earns the rows — the alternative
+    // tried first was to spend surplus height on more of the hourly chart, and
+    // three bands of the same bars read as repetition rather than as depth.
+    //
+    // The chart's box is sized to its plot rather than filled. A plot centred
+    // in a taller box leaves blank rows below the bars as well as above, and
+    // the ones below are the pair an axis cannot explain away.
+    // Slack falls below the last box rather than inside any of them. Blank rows
+    // in a bordered box read as a chart that failed; the same rows under the
+    // last one read as the margin they are.
+    let week_days = week_days(hours, area);
+    let [pane, chart, week, _margin] = Layout::vertical([
+        Constraint::Length(DETAIL_ROWS),
+        Constraint::Max(precip_chart::BOX_ROWS),
+        Constraint::Length(week_days.map_or(0, precip_week::box_rows)),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
 
     detail_pane_render(frame, app, hours, hour, palette, pane);
     precip_chart_render(frame, weather, palette, chart, app.unit, selected);
+    if week_days.is_some() {
+        precip_week_render(frame, hours, palette, week, app.unit, selected);
+    }
+}
+
+/// How many days the week strip may show here, or `None` where it does not fit.
+///
+/// It is the last thing on the screen to be given rows and the first to give
+/// them up: the hourly chart is what the arrows move through, and a strip that
+/// squeezed it would cost more than it adds.
+fn week_days(hours: &[HourlyForecast], area: Rect) -> Option<usize> {
+    if area.width < precip_week::MIN_WIDTH + 2 {
+        return None;
+    }
+
+    // Measured against the chart's *comfortable* height, not its maximum. The
+    // chart may grow past this when nothing else wants the rows, but it does
+    // not get to crowd the strip out first.
+    let spare = area
+        .height
+        .saturating_sub(DETAIL_ROWS + precip_chart::COMFORT_ROWS);
+    let days = spare.saturating_sub(precip_week::box_rows(0)) as usize;
+
+    // Calendar dates, not `hours / 24`. A window opening at 6 PM is two and a
+    // half days long and touches four dates, and it is dates the strip draws
+    // rows for — counting days here reserved one row too few and dropped the
+    // tail of the forecast even with the height to show it.
+    let days = days.min(precip_week::day_count(hours));
+
+    (days >= precip_week::MIN_DAYS).then_some(days)
 }
 
 fn detail_pane_render(
@@ -90,7 +134,16 @@ fn detail_pane_render(
         block = block.title_top(Line::from(condition).fg(palette.text).right_aligned());
     }
     if let Some(upcoming) = upcoming {
-        block = block.title_bottom(Line::from(upcoming).fg(palette.muted).left_aligned());
+        // The question people open the app to ask, so it gets the loud colour
+        // and the weight rather than the one reserved for labels. It was muted
+        // to begin with and read as chrome — the eye went straight past the one
+        // line on the screen that answers "do I need a coat".
+        block = block.title_bottom(
+            Line::from(upcoming)
+                .bold()
+                .fg(palette.selection)
+                .left_aligned(),
+        );
     }
 
     let inner = block.inner(area);
@@ -389,6 +442,13 @@ mod tests {
             .collect()
     }
 
+    /// A window that starts in the evening, where an hour count and a count of
+    /// calendar dates come apart: 60 hours from 6 PM is two and a half days
+    /// long but touches four dates.
+    fn evening_hours(count: usize) -> Vec<HourlyForecast> {
+        dry_hours(count + 18).split_off(18)
+    }
+
     fn app_showing(hours: Vec<HourlyForecast>, selected: usize) -> App {
         let mut weather = Weather::fixture(22, 14);
         weather.hourly = hours;
@@ -403,6 +463,43 @@ mod tests {
         app.weather = Fetch::Ready(weather);
         app.selected_hour = selected;
         app
+    }
+
+    /// The rows the strip draws are calendar dates, so the rows the layout
+    /// reserves have to be counted the same way.
+    ///
+    /// They were not: the layout divided the hour count by 24, which is the
+    /// number of *days* a window spans and not the number of dates it touches.
+    /// A window opening at 6 PM touches one more date than that, so the last
+    /// one was dropped even with the height to draw it — and since the arrows
+    /// still reached those hours, selecting one left the strip with no marked
+    /// row at all.
+    #[test]
+    fn the_week_strip_keeps_a_last_partial_day_it_has_room_for() {
+        // 60 hours from 6 PM: six hours today, two whole days, six hours of a
+        // fourth date. Hour 57 is on that fourth date.
+        let app = app_showing(evening_hours(60), 57);
+        let text = rendered(100, 29, &app);
+
+        let rows: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.contains("this week"))
+            // The title border, then the hour axis.
+            .skip(2)
+            .take_while(|line| !line.contains('└'))
+            .collect();
+
+        assert_eq!(
+            rows.len(),
+            4,
+            "60 hours from 6 PM is four dates, not {}:\n{text}",
+            rows.len()
+        );
+        assert!(rows[0].contains("Today"), "{:?}", rows[0]);
+        assert!(
+            rows[3].contains('▸'),
+            "the selection is on the fourth date but no row is marked:\n{text}"
+        );
     }
 
     #[test]

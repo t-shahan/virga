@@ -111,11 +111,16 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Char('l') => Some(Action::OpenSearch),
             KeyCode::Left => Some(Action::PrevHour),
             KeyCode::Right => Some(Action::NextHour),
-            // Up advances and down goes back, pairing the vertical arrows with
-            // the horizontal ones by direction of travel rather than by the
-            // list convention where down means "next".
-            KeyCode::Up => Some(Action::NextHourDay),
-            KeyCode::Down => Some(Action::PrevHourDay),
+            // Down advances and up goes back, as the list convention has it.
+            //
+            // These used to be the other way round, pairing the vertical arrows
+            // with the horizontal ones by direction of travel. That was
+            // defensible while the screen had nothing vertical on it to move
+            // through, but the week strip draws the days as a literal column
+            // running forward from today, and pressing down to travel up it
+            // reads as backwards however the reasoning goes.
+            KeyCode::Up => Some(Action::PrevHourDay),
+            KeyCode::Down => Some(Action::NextHourDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
             _ => None,
         },
@@ -195,7 +200,7 @@ mod tests {
         );
         assert_eq!(
             repeat(KeyCode::Up, Screen::Precipitation),
-            Some(Action::NextHourDay)
+            Some(Action::PrevHourDay)
         );
         assert_eq!(
             repeat(KeyCode::Char('a'), Screen::Search),
@@ -293,17 +298,17 @@ mod tests {
         );
     }
 
-    /// Up advances through time and down goes back — the reverse of the list
-    /// convention, and deliberate.
+    /// Down advances through time and up goes back, matching the week strip,
+    /// which draws the days as a column running forward from today.
     #[test]
-    fn the_day_arrows_point_the_way_they_read() {
+    fn the_day_arrows_point_the_way_the_week_strip_reads() {
         assert_eq!(
             action_for(press(KeyCode::Up), Screen::Precipitation),
-            Some(Action::NextHourDay)
+            Some(Action::PrevHourDay)
         );
         assert_eq!(
             action_for(press(KeyCode::Down), Screen::Precipitation),
-            Some(Action::PrevHourDay)
+            Some(Action::NextHourDay)
         );
     }
 
