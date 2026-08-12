@@ -44,7 +44,6 @@ pub enum Theme {
     /// correctly without 24-bit colour.
     #[default]
     Terminal,
-    CatppuccinMocha,
     GruvboxDark,
     Nord,
     TokyoNight,
@@ -55,9 +54,8 @@ impl Theme {
     /// Every theme, in cycle order. Kept honest by
     /// `cycling_visits_every_theme_and_comes_back`: `next` is the definition,
     /// and this array has to agree with it.
-    pub const ALL: [Theme; 6] = [
+    pub const ALL: [Theme; 5] = [
         Theme::Terminal,
-        Theme::CatppuccinMocha,
         Theme::GruvboxDark,
         Theme::Nord,
         Theme::TokyoNight,
@@ -71,8 +69,7 @@ impl Theme {
     /// instead of quietly stranding it.
     pub fn next(self) -> Self {
         match self {
-            Theme::Terminal => Theme::CatppuccinMocha,
-            Theme::CatppuccinMocha => Theme::GruvboxDark,
+            Theme::Terminal => Theme::GruvboxDark,
             Theme::GruvboxDark => Theme::Nord,
             Theme::Nord => Theme::TokyoNight,
             Theme::TokyoNight => Theme::Dracula,
@@ -85,7 +82,6 @@ impl Theme {
     pub fn name(self) -> &'static str {
         match self {
             Theme::Terminal => "terminal",
-            Theme::CatppuccinMocha => "catppuccin mocha",
             Theme::GruvboxDark => "gruvbox dark",
             Theme::Nord => "nord",
             Theme::TokyoNight => "tokyo night",
@@ -120,50 +116,53 @@ impl Theme {
                 error: Color::Red,
                 border: Color::Reset,
             },
-            Theme::CatppuccinMocha => Palette {
-                accent: Color::Rgb(137, 180, 250),    // blue
-                text: Color::Rgb(205, 214, 244),      // text
-                muted: Color::Rgb(108, 112, 134),     // overlay0
-                selection: Color::Rgb(249, 226, 175), // yellow
-                now: Color::Rgb(148, 226, 213),       // teal
-                error: Color::Rgb(243, 139, 168),     // red
-                border: Color::Rgb(127, 132, 156),    // overlay1
-            },
+            // Warm, and committed to it: an orange series against a gold
+            // selection and a green today. Gruvbox is the one theme here whose
+            // identity is a temperature rather than a hue.
             Theme::GruvboxDark => Palette {
-                accent: Color::Rgb(131, 165, 152),   // aqua
+                accent: Color::Rgb(254, 128, 25),    // bright orange
                 text: Color::Rgb(235, 219, 178),     // fg1
                 muted: Color::Rgb(146, 131, 116),    // gray
                 selection: Color::Rgb(250, 189, 47), // bright yellow
                 now: Color::Rgb(184, 187, 38),       // bright green
                 error: Color::Rgb(251, 73, 52),      // bright red
-                border: Color::Rgb(124, 111, 100),   // bg4
+                border: Color::Rgb(102, 92, 84),     // bg3
             },
+            // Cool throughout. The selection is the aurora purple rather than
+            // the aurora yellow every other scheme reaches for, which is what
+            // stops Nord reading as a colder Gruvbox.
             Theme::Nord => Palette {
                 accent: Color::Rgb(136, 192, 208),    // nord8
                 text: Color::Rgb(236, 239, 244),      // nord6
                 muted: Color::Rgb(76, 86, 106),       // nord3
-                selection: Color::Rgb(235, 203, 139), // nord13
+                selection: Color::Rgb(180, 142, 173), // nord15
                 now: Color::Rgb(163, 190, 140),       // nord14
                 error: Color::Rgb(191, 97, 106),      // nord11
                 border: Color::Rgb(94, 129, 172),     // nord10
             },
+            // Blue and violet, with one warm note: the selection is the only
+            // warm thing on the screen, which is exactly the job a selection
+            // has.
             Theme::TokyoNight => Palette {
                 accent: Color::Rgb(122, 162, 247),    // blue
                 text: Color::Rgb(192, 202, 245),      // fg
                 muted: Color::Rgb(86, 95, 137),       // comment
-                selection: Color::Rgb(224, 175, 104), // yellow
-                now: Color::Rgb(158, 206, 106),       // green
+                selection: Color::Rgb(255, 158, 100), // orange
+                now: Color::Rgb(115, 218, 202),       // teal
                 error: Color::Rgb(247, 118, 142),     // red
                 border: Color::Rgb(157, 124, 216),    // purple
             },
+            // The loud one, and no longer apologetic about it: pink bars, lime
+            // selection, cyan today. Dracula's purple moved off `accent` because
+            // Tokyo Night's border already had that end of the spectrum.
             Theme::Dracula => Palette {
-                accent: Color::Rgb(189, 147, 249),    // purple
+                accent: Color::Rgb(255, 121, 198),    // pink
                 text: Color::Rgb(248, 248, 242),      // foreground
                 muted: Color::Rgb(98, 114, 164),      // comment
                 selection: Color::Rgb(241, 250, 140), // yellow
-                now: Color::Rgb(80, 250, 123),        // green
+                now: Color::Rgb(139, 233, 253),       // cyan
                 error: Color::Rgb(255, 85, 85),       // red
-                border: Color::Rgb(255, 121, 198),    // pink
+                border: Color::Rgb(255, 184, 108),    // orange
             },
         }
     }
@@ -300,6 +299,53 @@ mod tests {
                 "{}: selection, now and the ordinary bar are not three colours",
                 theme.name()
             );
+        }
+    }
+
+    /// Cycling `t` has to be worth doing.
+    ///
+    /// The complaint that produced these palettes: they all felt the same,
+    /// because they were. Every theme mapped `selection` to a yellow and `now`
+    /// to a green, so between one and the next only the accent really moved —
+    /// four variations on one scheme rather than four schemes. These are the
+    /// three roles that cover the most of the screen, and each of them has to
+    /// actually differ from theme to theme.
+    #[test]
+    fn no_two_themes_look_like_each_other() {
+        /// A floor, not the whole of the fix. What made the previous palettes
+        /// feel alike was structural — the same role playing the same hue in
+        /// every theme — and only one pairing of it was close enough in raw
+        /// distance to trip a threshold (Nord and Tokyo Night's `now`, at 38).
+        /// So this catches the worst case and no more; keeping the themes
+        /// genuinely distinct is a judgement the numbers cannot make. Loose
+        /// enough to let two blues both be blue: Nord's cyan against Tokyo
+        /// Night's blue is the closest pair now, at 51.
+        const MIN_SEPARATION: f64 = 40.0;
+
+        let named: Vec<Theme> = Theme::ALL
+            .into_iter()
+            .filter(|t| *t != Theme::Terminal)
+            .collect();
+
+        for (i, one) in named.iter().enumerate() {
+            for other in &named[i + 1..] {
+                let (a, b) = (one.palette(), other.palette());
+
+                for (role, x, y) in [
+                    ("the series", a.accent, b.accent),
+                    ("the selection", a.selection, b.selection),
+                    ("today", a.now, b.now),
+                ] {
+                    let separation = distance(x, y);
+                    assert!(
+                        separation >= MIN_SEPARATION,
+                        "{} and {} draw {role} in near-identical colours \
+                         ({separation:.0} apart, {MIN_SEPARATION:.0} required)",
+                        one.name(),
+                        other.name()
+                    );
+                }
+            }
         }
     }
 

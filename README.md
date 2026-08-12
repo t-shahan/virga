@@ -27,7 +27,7 @@ means "might drizzle"; tall above *and* below means take the umbrella.
 - **Browse any day** with the arrow keys; the top pane becomes an inspector for
   the selected day.
 - **City search** against Open-Meteo's geocoder, **metric or imperial** toggled
-  live, **six colour themes** cycled with `t`, and a **responsive** layout down
+  live, **five colour themes** cycled with `t`, and a **responsive** layout down
   to a 34×12 terminal.
 
 ## Install
@@ -72,18 +72,17 @@ opened from.
 
 ## Themes
 
-`t` steps through six palettes, from either weather screen. The key bar doubles
+`t` steps through five palettes, from either weather screen. The key bar doubles
 as the readout — it reads `[t] theme (nord)` for whichever theme is on — so
 there is no menu to open and nothing to remember.
 
 | Theme | Notes |
 |---|---|
 | `terminal` | The sixteen ANSI colours, so virga looks the way your terminal is already configured to look. The default |
-| `catppuccin mocha` | Catppuccin's darkest flavour |
-| `gruvbox dark` | Warm and low-contrast |
-| `nord` | Cool and muted |
-| `tokyo night` | Blue-leaning, high contrast |
-| `dracula` | The loudest of the six |
+| `gruvbox dark` | Warm throughout — orange bars, gold selection, green today |
+| `nord` | Cool throughout — icy bars, aurora-purple selection |
+| `tokyo night` | Blue and violet, with the selection the one warm thing on screen |
+| `dracula` | The loud one — pink bars, lime selection, cyan today |
 
 Every palette sets foregrounds only. None of them paints a background: your
 terminal's own is left alone, so a theme layers over whatever scheme you have
@@ -114,7 +113,7 @@ chosen with `l` apply for the session only — nothing is written to disk.
 ## Development
 
 ```bash
-cargo test                                  # 216 deterministic tests
+cargo test                                  # 221 deterministic tests
 cargo test -- --ignored                     # 2 live-API tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt
