@@ -62,6 +62,12 @@ fn accept_message(app: &mut App, message: Message, path: &Path) -> Option<String
         .map(|error| format!("virga: could not remember location: {error:#}"))
 }
 
+fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
+    if warning.is_none() {
+        *warning = candidate;
+    }
+}
+
 /// Hand a request to the worker without ever blocking the draw loop.
 ///
 /// `send` on a bounded channel parks the caller until a slot frees — and the
@@ -143,9 +149,7 @@ fn run(
                 let _ = app.on_message(message);
                 None
             };
-            if warning.is_none() {
-                *warning = save_warning;
-            }
+            retain_first_warning(warning, save_warning);
         }
 
         if event::poll(Duration::from_millis(100))? {
@@ -233,6 +237,31 @@ mod tests {
 
         assert_eq!(accept_message(&mut app, message, &path), None);
         assert_eq!(state::load_from(&path).unwrap(), Some(berlin()));
+    }
+
+    #[test]
+    fn an_accepted_load_reports_a_nonfatal_save_failure() {
+        let test = tempfile::tempdir().unwrap();
+        let parent = test.path().join("not-a-directory");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("state.json");
+        let mut app = App::with_location(berlin());
+        let message = loaded(app.initial_fetch());
+
+        let warning = accept_message(&mut app, message, &path).unwrap();
+
+        assert!(warning.contains("could not remember location"));
+        assert!(warning.contains("create"));
+    }
+
+    #[test]
+    fn warning_retention_keeps_the_first_save_warning() {
+        let mut warning = None;
+
+        retain_first_warning(&mut warning, Some("first save failure".to_string()));
+        retain_first_warning(&mut warning, Some("later save failure".to_string()));
+
+        assert_eq!(warning.as_deref(), Some("first save failure"));
     }
 
     #[test]

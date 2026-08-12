@@ -77,7 +77,7 @@ platform's per-user state/data directory.
 ## Development
 
 ```bash
-cargo test                                  # 196 deterministic tests
+cargo test
 cargo test -- --ignored                     # 2 live-API tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt
