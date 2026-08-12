@@ -3,17 +3,19 @@
 [![CI](https://github.com/t-shahan/virga/actions/workflows/ci.yml/badge.svg)](https://github.com/t-shahan/virga/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-A terminal weather app: current conditions, an eight-day forecast, three weeks
-of daily highs, and an hourly precipitation chart — no account, no API key.
+A simple and fast terminal weather app built in Rust: current conditions, an eight-day forecast, three weeks
+of daily highs, and an hourly precipitation chart. No account, or API key needed.
 
 *Virga* is precipitation that evaporates before it reaches the ground. It is
 also, most weeks, what the precipitation chart draws.
 
-<img width="800" height="534" alt="CleanShot 2026-08-11 at 19 15 09" src="https://github.com/user-attachments/assets/413771fb-d6d8-4438-842f-14625039f806" />
+<img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
 Press `p` for the hourly precipitation screen. Chance rises from the centre
 rule, forecast amount hangs below it — a tall spike with nothing beneath it
 means "might drizzle"; tall above *and* below means take the umbrella.
+
+<img width="2000" height="1285" alt="CleanShot2026-08-12at19 38 47-ezgif com-optimize" src="https://github.com/user-attachments/assets/9f61e32f-d342-4794-b64b-7d1e6efb0a97" />
 
 ## Features
 
@@ -46,7 +48,9 @@ The binary lands at `~/.cargo/bin/virga`. Re-run the install to update, and
 the binary name.
 
 From a local checkout, `cargo run --release` works too; plain `cargo run`
-builds unoptimised and is noticeably slower to render.
+builds unoptimized and is noticeably slower to render.
+
+More installation methods will be coming in the future!
 
 ## Keys
 
@@ -113,31 +117,6 @@ weather loaded successfully. That location is kept in the platform's per-user
 state/data directory. Unit and theme changes made in the app last for the
 session.
 
-## Development
-
-```bash
-cargo test
-cargo test -- --ignored                     # 2 live-API tests
-cargo clippy --all-targets -- -D warnings
-cargo fmt
-cargo +1.88.0 test --locked --all-targets   # the declared minimum
-```
-
-CI runs those on Linux, macOS and Windows, plus `cargo package` and a pinned
-`cargo audit`; every job proves one thing, so a red build names the contract
-that broke.
-
-Tests concentrate on what breaks quietly: layout at awkward terminal sizes,
-null and mismatched-length API responses, unit-conversion boundaries, day and
-hour navigation at the wrap points, and HTTP timeouts against a loopback server
-that never answers. Many render to a `TestBackend` and assert against the
-resulting buffer rather than against the arithmetic that produced it.
-
-Code is organised by responsibility: `src/ui/` does no networking and
-`src/weather/` does no rendering, and the wire types in `weather/dto.rs` stay
-separate from the domain model in `weather/model.rs`, so a change to
-Open-Meteo's JSON touches one conversion rather than the whole app.
-
 ## Limitations
 
 - There is no general configuration file, and weather is never cached. Every
@@ -168,12 +147,6 @@ its geocoder. Open-Meteo's free-service logs may retain IP addresses and
 coordinates for 90 days. See Open-Meteo's
 [terms](https://open-meteo.com/en/terms) and
 [licence](https://open-meteo.com/en/license).
-
-A missing or null reading degrades to a dash rather than failing the fetch. The
-AQI shown for today is the endpoint's current reading, labelled `AQI`; for any
-other date it is that day's maximum, labelled `AQI max` — a day's worst hour is
-not its prevailing air. Air-quality coverage runs out a couple of days short of
-the forecast horizon.
 
 ### Attribution
 
