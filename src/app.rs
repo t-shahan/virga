@@ -1,8 +1,10 @@
 use crate::events::{Message, Request, RequestId};
 use crate::input::Action;
+use crate::theme::Theme;
 use crate::units::Unit;
 use crate::weather::model::{Location, Weather};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 pub enum Fetch<T> {
     Idle,
@@ -59,6 +61,9 @@ pub struct App {
     pub results: Fetch<Vec<Location>>,
     pub weather: Fetch<Weather>,
     pub unit: Unit,
+    /// The palette in use. A name only — resolving it to colours is `ui`'s
+    /// business, which is what keeps this module free of Ratatui types.
+    pub theme: Theme,
     pub tick: usize,
     pub selected: usize,
     /// Index into `Weather::daily` of the day being inspected. Distinct from
@@ -85,7 +90,20 @@ pub struct App {
     /// to. Searching from the precipitation screen used to land you on the
     /// weather screen regardless.
     search_return: Screen,
+    /// When the palette's name stops being shown beside `t` on the key bar.
+    /// `None` once it has lapsed, and before `t` is ever pressed.
+    ///
+    /// The name answers "which one did I just land on", which is a question
+    /// only worth answering while you are cycling. Left up permanently it is
+    /// a status readout nobody is reading, holding columns the bar can put to
+    /// better use — and on a narrow terminal it costs a whole binding.
+    theme_readout_until: Option<Instant>,
 }
+
+/// How long the palette's name stays on the key bar after `t`. Long enough to
+/// read at a glance, short enough that it is gone before you would notice it
+/// sitting there.
+const THEME_READOUT: Duration = Duration::from_secs(3);
 
 impl App {
     #[cfg(test)]
@@ -100,6 +118,7 @@ impl App {
             results: Fetch::Idle,
             weather: Fetch::Loading,
             unit: Unit::Imperial,
+            theme: Theme::default(),
             tick: 0,
             selected: 0,
             selected_day: 0,
@@ -110,6 +129,7 @@ impl App {
             next_request: 0,
             should_quit: false,
             search_return: Screen::Weather,
+            theme_readout_until: None,
         }
     }
 
@@ -129,6 +149,10 @@ impl App {
             Action::Refresh => return self.refresh(),
             Action::Submit => return self.submit(),
             Action::ToggleUnits => self.unit = self.unit.toggle(),
+            Action::CycleTheme => {
+                self.theme = self.theme.next();
+                self.theme_readout_until = Some(Instant::now() + THEME_READOUT);
+            }
             Action::OpenSearch => self.open_search(),
             Action::OpenPrecipitation => {
                 self.screen = Screen::Precipitation;
@@ -207,6 +231,29 @@ impl App {
                 }
                 None
             }
+        }
+    }
+
+    /// Whether the key bar should still name the palette beside `t`.
+    pub fn theme_readout_visible(&self) -> bool {
+        self.theme_readout_until.is_some()
+    }
+
+    /// Drop the readout if its moment has passed, reporting whether it did.
+    ///
+    /// The caller owns the clock rather than this asking for the time itself,
+    /// which is what lets a test skip three seconds instead of sleeping them.
+    /// The answer matters because the draw loop only redraws when something
+    /// says it must: by the time this lapses the app is idle and drawing
+    /// nothing, so the frame that takes the name back off the bar happens only
+    /// if this returns `true`.
+    pub fn expire_theme_readout(&mut self, now: Instant) -> bool {
+        match self.theme_readout_until {
+            Some(deadline) if now >= deadline => {
+                self.theme_readout_until = None;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -484,6 +531,108 @@ mod tests {
         app.weather = Fetch::Ready(Weather::fixture(days, today));
         app.selected_day = today;
         app
+    }
+
+    /// Changing the palette is a local change to one field. It must not move
+    /// the selection, touch the units, leave the screen, or — above all — send
+    /// anything to the network.
+    #[test]
+    fn cycling_the_theme_changes_nothing_else() {
+        let mut app = app_with(22, 14);
+        app.screen = Screen::Precipitation;
+        app.selected_hour = 7;
+
+        let before = app.theme;
+        let request = app.on_action(Action::CycleTheme);
+
+        assert!(request.is_none(), "a theme change asked for a fetch");
+        assert_eq!(app.theme, before.next());
+        assert_eq!(app.screen, Screen::Precipitation);
+        assert_eq!(app.selected_day, 14);
+        assert_eq!(app.selected_hour, 7);
+        assert_eq!(app.unit, Unit::Imperial);
+    }
+
+    /// The name is feedback on a press, so it starts hidden — nothing has been
+    /// answered yet — appears when `t` answers it, and goes once the answer has
+    /// been read.
+    #[test]
+    fn the_theme_readout_shows_on_a_press_and_lapses_on_its_own() {
+        let mut app = app_with(22, 14);
+        assert!(
+            !app.theme_readout_visible(),
+            "the bar named a palette nobody had asked about"
+        );
+
+        app.on_action(Action::CycleTheme);
+        assert!(app.theme_readout_visible(), "pressing t said nothing");
+
+        assert!(
+            !app.expire_theme_readout(Instant::now()),
+            "the readout lapsed the instant it appeared"
+        );
+        assert!(app.theme_readout_visible());
+
+        assert!(
+            app.expire_theme_readout(Instant::now() + THEME_READOUT * 2),
+            "expiring should report that it changed something"
+        );
+        assert!(!app.theme_readout_visible());
+    }
+
+    /// The draw loop only redraws when something says it must, and it asks this
+    /// on every pass. Reporting a change when there was none would put the app
+    /// back to redrawing on a timer, which is the thing the idle path exists to
+    /// avoid.
+    #[test]
+    fn an_expired_readout_stops_asking_for_redraws() {
+        let mut app = app_with(22, 14);
+        let long_past = Instant::now() + THEME_READOUT * 2;
+
+        assert!(
+            !app.expire_theme_readout(long_past),
+            "a readout that was never shown reported a change"
+        );
+
+        app.on_action(Action::CycleTheme);
+        assert!(app.expire_theme_readout(long_past));
+
+        for _ in 0..3 {
+            assert!(
+                !app.expire_theme_readout(long_past),
+                "an already-lapsed readout kept asking to be redrawn"
+            );
+        }
+    }
+
+    /// Each press restarts the clock, so cycling through several palettes
+    /// leaves the name up for a few seconds after the *last* one rather than
+    /// the first.
+    #[test]
+    fn pressing_again_restarts_the_readout() {
+        let mut app = app_with(22, 14);
+
+        app.on_action(Action::CycleTheme);
+        let after_first = app.theme_readout_until.expect("the first press showed it");
+
+        app.on_action(Action::CycleTheme);
+        let after_second = app.theme_readout_until.expect("the second press showed it");
+
+        assert!(after_second >= after_first, "the second press cut it short");
+    }
+
+    /// Five presses is a lap, so a user who cycles past the one they wanted can
+    /// keep pressing rather than having to know a way back.
+    #[test]
+    fn cycling_all_the_way_round_returns_to_the_starting_theme() {
+        let mut app = app_with(22, 14);
+        let start = app.theme;
+
+        for _ in 0..Theme::ALL.len() {
+            app.on_action(Action::CycleTheme);
+        }
+
+        assert_eq!(app.theme, start);
     }
 
     #[test]

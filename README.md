@@ -27,7 +27,8 @@ means "might drizzle"; tall above *and* below means take the umbrella.
 - **Browse any day** with the arrow keys; the top pane becomes an inspector for
   the selected day.
 - **City search** against Open-Meteo's geocoder, **metric or imperial** toggled
-  live, and a **responsive** layout down to a 34×12 terminal.
+  live, **five colour themes** cycled with `t`, and a **responsive** layout down
+  to a 34×12 terminal.
 
 ## Install
 
@@ -58,6 +59,7 @@ builds unoptimised and is noticeably slower to render.
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
+| `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
 The precipitation chart's centre rule marks the current hour (`┬`), the
@@ -68,11 +70,48 @@ by height; the box title carries the scale.
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
 
+## Themes
+
+`t` steps through five palettes, from either weather screen. The key bar names
+the one you land on — `[t] theme (nord)` — and drops the name again a few
+seconds later, so cycling tells you where you are without the bar carrying a
+readout nobody is reading. No menu to open and nothing to remember.
+
+| Theme | Notes |
+|---|---|
+| `default` | The sixteen ANSI colours, so virga looks the way your terminal is already configured to look |
+| `gruvbox dark` | Warm throughout — orange bars, gold selection, green today |
+| `nord` | Cool throughout — icy bars, aurora-purple selection |
+| `tokyo night` | Blue and violet, with the selection the one warm thing on screen |
+| `dracula` | The loud one — pink bars, lime selection, cyan today |
+
+Every palette sets foregrounds only. None of them paints a background: your
+terminal's own is left alone, so a theme layers over whatever scheme you have
+already configured rather than stamping a rectangle of its own dark over it.
+
+The four non-default palettes are 24-bit colour. On a terminal without
+truecolor they are approximated or ignored, which is why `default` is the
+default: nothing about the out-of-the-box appearance depends on it.
+
+Set `VIRGA_THEME` to start somewhere other than the default. The name is the one
+in the table, and it is forgiving about case and separators, so `tokyo night`,
+`tokyo-night` and `Tokyo_Night` are the same theme:
+
+```bash
+VIRGA_THEME=gruvbox-dark virga
+```
+
+An unrecognised name prints the list of known themes and starts in `default`
+rather than refusing to run. The theme is not written to disk — like the unit
+toggle, the choice lasts for the session.
+
 ## Configuration
 
-On its first run, Virga starts in New York City. Thereafter, it starts at the
-last location whose weather loaded successfully. That location is kept in the
-platform's per-user state/data directory.
+`VIRGA_THEME` sets the startup palette as described above. On its first run,
+Virga starts in New York City. Thereafter, it starts at the last location whose
+weather loaded successfully. That location is kept in the platform's per-user
+state/data directory. Unit and theme changes made in the app last for the
+session.
 
 ## Development
 
@@ -102,7 +141,8 @@ Open-Meteo's JSON touches one conversion rather than the whole app.
 ## Limitations
 
 - There is no general configuration file, and weather is never cached. Every
-  launch fetches fresh weather.
+  launch fetches fresh weather; only the startup theme can be set through the
+  environment.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface.
 - "Today" is distinguished by colour alone in the daily chart. The selection is

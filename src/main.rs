@@ -1,5 +1,6 @@
 use crate::app::{ActiveLocation, App, Fetch, Screen};
 use crate::events::{Message, Request};
+use crate::theme::Theme;
 use anyhow::{Result, anyhow};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event;
@@ -7,17 +8,23 @@ use ratatui::crossterm::event::Event;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod app;
 mod events;
 mod input;
 mod state;
+mod theme;
 mod ui;
 mod units;
 mod weather;
 
 fn main() -> Result<()> {
+    // Read before the terminal is taken over: a complaint about the variable
+    // has to go to the ordinary screen, or it is written to the alternate
+    // screen and wiped the moment the app exits.
+    let theme = startup_theme(std::env::var("VIRGA_THEME").ok().as_deref());
+
     let (startup, state_path) = match state::path() {
         Ok(path) => {
             let (location, warning) = startup_location(&path);
@@ -34,7 +41,13 @@ fn main() -> Result<()> {
 
     let terminal = ratatui::init();
     let mut warning = None;
-    let result = run(terminal, startup, state_path.as_deref(), &mut warning);
+    let result = run(
+        terminal,
+        startup,
+        theme,
+        state_path.as_deref(),
+        &mut warning,
+    );
     ratatui::restore();
     if let Some(warning) = warning {
         eprintln!("{warning}");
@@ -68,6 +81,27 @@ fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>)
     }
 }
 
+/// The palette to start in, given whatever `VIRGA_THEME` was set to.
+///
+/// An unusable value is a warning and the default, not an exit: the variable
+/// is a convenience, and refusing to show the weather because of a typo in a
+/// shell profile is a poor trade.
+fn startup_theme(requested: Option<&str>) -> Theme {
+    let Some(name) = requested else {
+        return Theme::default();
+    };
+
+    Theme::from_name(name).unwrap_or_else(|| {
+        let known: Vec<&str> = Theme::ALL.into_iter().map(Theme::name).collect();
+        eprintln!(
+            "virga: VIRGA_THEME={name:?} is not a theme; using {}.\n       known themes: {}",
+            Theme::default().name(),
+            known.join(", "),
+        );
+        Theme::default()
+    })
+}
+
 /// Hand a request to the worker without ever blocking the draw loop.
 ///
 /// `send` on a bounded channel parks the caller until a slot frees — and the
@@ -97,6 +131,7 @@ fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result
 fn run(
     mut terminal: DefaultTerminal,
     startup: ActiveLocation,
+    theme: Theme,
     state_path: Option<&Path>,
     warning: &mut Option<String>,
 ) -> Result<()> {
@@ -109,6 +144,7 @@ fn run(
     events::spawn_worker(request_rx, message_tx);
 
     let mut app = App::with_location(startup);
+    app.theme = theme;
     let initial = app.initial_fetch();
     dispatch(&request_tx, &mut app, initial)?;
 
@@ -124,6 +160,14 @@ fn run(
         let size = terminal.size()?;
         if size != last_size {
             last_size = size;
+            dirty = true;
+        }
+
+        // The palette's name leaves the key bar a few seconds after `t`, and
+        // nothing else would mark that frame dirty: by then the app is idle
+        // and, per the rule below, an idle app draws nothing at all. So the
+        // one frame that takes it back off has to be asked for here.
+        if app.expire_theme_readout(Instant::now()) {
             dirty = true;
         }
 
@@ -289,5 +333,25 @@ mod tests {
             None
         );
         assert_eq!(state::load_from(&path).unwrap(), Some(berlin()));
+    }
+
+    #[test]
+    fn no_environment_variable_means_the_default_theme() {
+        assert_eq!(startup_theme(None), Theme::default());
+    }
+
+    #[test]
+    fn the_environment_variable_picks_the_starting_theme() {
+        for theme in Theme::ALL {
+            assert_eq!(startup_theme(Some(theme.name())), theme);
+        }
+    }
+
+    /// A typo in a shell profile must not stop the weather from appearing.
+    #[test]
+    fn an_unusable_value_falls_back_rather_than_failing() {
+        for value in ["", "  ", "solarized", "Catppuccin Latte"] {
+            assert_eq!(startup_theme(Some(value)), Theme::default(), "{value:?}");
+        }
     }
 }

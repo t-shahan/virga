@@ -16,6 +16,9 @@ pub enum Action {
     Back,
     Refresh,
     ToggleUnits,
+    /// Step to the next palette. Global, so it is bound wherever the weather
+    /// is on screen.
+    CycleTheme,
     OpenSearch,
     OpenPrecipitation,
     PrevDay,
@@ -89,6 +92,7 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
             KeyCode::Char('r') => Some(Action::Refresh),
             KeyCode::Char('u') => Some(Action::ToggleUnits),
+            KeyCode::Char('t') => Some(Action::CycleTheme),
             KeyCode::Char('l') => Some(Action::OpenSearch),
             KeyCode::Char('p') => Some(Action::OpenPrecipitation),
             KeyCode::Left => Some(Action::PrevDay),
@@ -103,6 +107,7 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Char('b' | 'p') | KeyCode::Enter | KeyCode::Esc => Some(Action::Back),
             KeyCode::Char('r') => Some(Action::Refresh),
             KeyCode::Char('u') => Some(Action::ToggleUnits),
+            KeyCode::Char('t') => Some(Action::CycleTheme),
             KeyCode::Char('l') => Some(Action::OpenSearch),
             KeyCode::Left => Some(Action::PrevHour),
             KeyCode::Right => Some(Action::NextHour),
@@ -205,6 +210,10 @@ mod tests {
             (KeyCode::Char('r'), Screen::Weather),
             (KeyCode::Char('l'), Screen::Weather),
             (KeyCode::Char('u'), Screen::Weather),
+            // Six palettes go past in well under a second on key repeat, and
+            // the one you wanted is not the one you land on.
+            (KeyCode::Char('t'), Screen::Weather),
+            (KeyCode::Char('t'), Screen::Precipitation),
             (KeyCode::Char('p'), Screen::Weather),
             (KeyCode::Char('q'), Screen::Weather),
             (KeyCode::Char('r'), Screen::Precipitation),
@@ -259,7 +268,7 @@ mod tests {
     /// city with a `q` or an `r` in it would set the app off.
     #[test]
     fn command_letters_are_text_on_the_search_screen() {
-        for c in ['q', 'r', 'u', 'l', 'p', 'b', 'n'] {
+        for c in ['q', 'r', 'u', 't', 'l', 'p', 'b', 'n'] {
             assert_eq!(
                 action_for(press(KeyCode::Char(c)), Screen::Search),
                 Some(Action::Insert(c)),
@@ -314,6 +323,19 @@ mod tests {
             action_for(press(KeyCode::Esc), Screen::Search),
             Some(Action::Back)
         );
+    }
+
+    /// The palette is global, so the key that changes it works from either
+    /// screen that shows the weather — the same way `r` and `u` already do.
+    #[test]
+    fn t_cycles_the_theme_from_both_weather_screens() {
+        for screen in [Screen::Weather, Screen::Precipitation] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('t')), screen),
+                Some(Action::CycleTheme),
+                "{screen:?}"
+            );
+        }
     }
 
     #[test]
