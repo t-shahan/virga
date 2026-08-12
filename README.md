@@ -89,9 +89,9 @@ Every palette sets foregrounds only. None of them paints a background: your
 terminal's own is left alone, so a theme layers over whatever scheme you have
 already configured rather than stamping a rectangle of its own dark over it.
 
-The five named palettes are 24-bit colour. On a terminal without truecolor they
-are approximated or ignored, which is why `default` is the default: nothing
-about the out-of-the-box appearance depends on it.
+The four non-default palettes are 24-bit colour. On a terminal without
+truecolor they are approximated or ignored, which is why `default` is the
+default: nothing about the out-of-the-box appearance depends on it.
 
 Set `VIRGA_THEME` to start somewhere other than the default. The name is the one
 in the table, and it is forgiving about case and separators, so `tokyo night`,
@@ -102,19 +102,21 @@ VIRGA_THEME=gruvbox-dark virga
 ```
 
 An unrecognised name prints the list of known themes and starts in `default`
-rather than refusing to run. Nothing is written to disk — like the unit toggle,
-the choice lasts for the session.
+rather than refusing to run. The theme is not written to disk — like the unit
+toggle, the choice lasts for the session.
 
 ## Configuration
 
-Beyond `VIRGA_THEME`, there is none yet. The startup location is a `Default`
-impl in `src/app.rs`; change it and reinstall to start somewhere else. Cities
-chosen with `l` apply for the session only — nothing is written to disk.
+`VIRGA_THEME` sets the startup palette as described above. On its first run,
+Virga starts in New York City. Thereafter, it starts at the last location whose
+weather loaded successfully. That location is kept in the platform's per-user
+state/data directory. Unit and theme changes made in the app last for the
+session.
 
 ## Development
 
 ```bash
-cargo test                                  # 227 deterministic tests
+cargo test
 cargo test -- --ignored                     # 2 live-API tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt
@@ -138,9 +140,9 @@ Open-Meteo's JSON touches one conversion rather than the whole app.
 
 ## Limitations
 
-- No configuration file and no cache: every launch fetches, and the default
-  location needs a rebuild to change. The theme can be set from the
-  environment; nothing else can.
+- There is no general configuration file, and weather is never cached. Every
+  launch fetches fresh weather; only the startup theme can be set through the
+  environment.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface.
 - "Today" is distinguished by colour alone in the daily chart. The selection is
@@ -158,10 +160,13 @@ Weather, air quality and geocoding all come from
 **for non-commercial use only** and is rate limited to 10,000 calls per day.
 Each weather load makes two requests, and each submitted search a third.
 
-Nothing is stored on disk — no account, no cache, no history — but the
-coordinates and city names you ask about are sent to Open-Meteo, whose
-free-service logs may retain IP addresses and coordinates for 90 days. See
-Open-Meteo's [terms](https://open-meteo.com/en/terms) and
+Virga stores only the last successfully loaded location label and coordinates
+locally, in its per-user state/data directory. It does not store weather
+responses, searches, or history. Weather and air-quality requests send the
+location coordinates to Open-Meteo; city searches submit their search text to
+its geocoder. Open-Meteo's free-service logs may retain IP addresses and
+coordinates for 90 days. See Open-Meteo's
+[terms](https://open-meteo.com/en/terms) and
 [licence](https://open-meteo.com/en/license).
 
 A missing or null reading degrades to a dash rather than failing the fetch. The

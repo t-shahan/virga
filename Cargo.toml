@@ -18,12 +18,10 @@ anyhow = "1.0.104"
 chrono = "0.4.45"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
-ureq = { version = "3.3.0", features = ["json"] }
-
-[dev-dependencies]
-# Only the DTO tests parse JSON by hand; at runtime ureq's `json` feature
-# supplies it, so the binary does not need it as a direct dependency.
 serde_json = "1.0.151"
+directories = "6.0.0"
+tempfile = "3.27.0"
+ureq = { version = "3.3.0", features = ["json"] }
 
 [[bin]]
 name = "virga"

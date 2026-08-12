@@ -3,6 +3,7 @@ use crate::input::Action;
 use crate::theme::Theme;
 use crate::units::Unit;
 use crate::weather::model::{Location, Weather};
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub enum Fetch<T> {
@@ -27,7 +28,7 @@ const HOURS_PER_DAY: usize = 24;
 /// They were separate before: selecting a search result stored the label and
 /// discarded the coordinates, so refresh silently fell back to the default city
 /// while the border kept showing the chosen one.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActiveLocation {
     pub label: String,
     pub lat: f64,
@@ -37,9 +38,9 @@ pub struct ActiveLocation {
 impl Default for ActiveLocation {
     fn default() -> Self {
         Self {
-            label: "Frederick, Maryland, United States".to_string(),
-            lat: 39.414_27,
-            lon: -77.410_54,
+            label: "New York City, New York, United States".to_string(),
+            lat: 40.7128,
+            lon: -74.0060,
         }
     }
 }
@@ -105,7 +106,12 @@ pub struct App {
 const THEME_READOUT: Duration = Duration::from_secs(3);
 
 impl App {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_location(ActiveLocation::default())
+    }
+
+    pub fn with_location(location: ActiveLocation) -> Self {
         Self {
             screen: Screen::Weather,
             query: String::new(),
@@ -117,7 +123,7 @@ impl App {
             selected: 0,
             selected_day: 0,
             selected_hour: 0,
-            location: ActiveLocation::default(),
+            location,
             pending: None,
             pending_search: None,
             next_request: 0,
@@ -180,11 +186,13 @@ impl App {
         None
     }
 
-    /// Apply a worker message, ignoring any that answers a request we are no
-    /// longer waiting on. The worker's ordering is not an identity guarantee:
-    /// a slow first response must not overwrite a fast second one, and a
-    /// search whose query has since changed must not repopulate the list.
-    pub fn on_message(&mut self, message: Message) {
+    /// Apply a worker message and return the location only when a weather load
+    /// is accepted. Ignored, failed, and search responses return `None`.
+    ///
+    /// The worker's ordering is not an identity guarantee: a slow first
+    /// response must not overwrite a fast second one, and a search whose query
+    /// has since changed must not repopulate the list.
+    pub fn on_message(&mut self, message: Message) -> Option<&ActiveLocation> {
         match message {
             Message::Loaded {
                 id,
@@ -192,13 +200,14 @@ impl App {
                 weather,
             } => {
                 if !self.awaiting_weather(id) {
-                    return;
+                    return None;
                 }
                 self.pending = None;
                 self.selected_day = weather.today_index;
                 self.selected_hour = 0;
                 self.location = location;
                 self.weather = Fetch::Ready(weather);
+                Some(&self.location)
             }
             // `pending` deliberately survives a failure, so retrying aims at
             // the place that failed rather than the one still on screen.
@@ -206,18 +215,21 @@ impl App {
                 if self.awaiting_weather(id) {
                     self.weather = Fetch::Failed(error);
                 }
+                None
             }
             Message::Located { id, locations } => {
                 if self.awaiting_search(id) {
                     self.pending_search = None;
                     self.results = Fetch::Ready(locations);
                 }
+                None
             }
             Message::SearchFailed { id, error } => {
                 if self.awaiting_search(id) {
                     self.pending_search = None;
                     self.results = Fetch::Failed(error);
                 }
+                None
             }
         }
     }
@@ -925,9 +937,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_builtin_location_is_new_york_city() {
+        assert_eq!(
+            ActiveLocation::default(),
+            ActiveLocation {
+                label: "New York City, New York, United States".to_string(),
+                lat: 40.7128,
+                lon: -74.0060,
+            }
+        );
+    }
+
+    #[test]
+    fn a_remembered_location_drives_the_initial_fetch() {
+        let remembered = berlin();
+        let mut app = App::with_location(remembered.clone());
+
+        let Request::Fetch { location, .. } = app.initial_fetch() else {
+            panic!("initial request was not a fetch")
+        };
+
+        assert_eq!(app.location, remembered);
+        assert_eq!(location, remembered);
+    }
+
     /// Answer a request the way the worker would, so tests exercise the same
     /// correlation the real messages go through.
-    fn deliver(app: &mut App, request: Request, weather: Weather) {
+    fn deliver(app: &mut App, request: Request, weather: Weather) -> Option<ActiveLocation> {
         let Request::Fetch { id, location } = request else {
             panic!("not a fetch")
         };
@@ -935,14 +972,15 @@ mod tests {
             id,
             location,
             weather,
-        });
+        })
+        .cloned()
     }
 
     fn fail(app: &mut App, request: Request) {
         let id = match request {
             Request::Fetch { id, .. } | Request::Search { id, .. } => id,
         };
-        app.on_message(Message::LoadFailed {
+        let _ = app.on_message(Message::LoadFailed {
             id,
             error: "no route to host".to_string(),
         });
@@ -1007,10 +1045,32 @@ mod tests {
         loaded(&mut app);
 
         let switch = app.fetch(berlin());
-        fail(&mut app, switch);
+        let id = match switch {
+            Request::Fetch { id, .. } | Request::Search { id, .. } => id,
+        };
+        assert!(
+            app.on_message(Message::LoadFailed {
+                id,
+                error: "no route to host".to_string(),
+            })
+            .is_none()
+        );
 
         assert_eq!(app.location, ActiveLocation::default());
         assert!(matches!(app.weather, Fetch::Failed(_)));
+    }
+
+    #[test]
+    fn only_an_accepted_load_reports_a_location_to_persist() {
+        let mut app = App::new();
+        let stale = app.fetch(ActiveLocation::default());
+        let current = app.fetch(berlin());
+
+        assert_eq!(deliver(&mut app, stale, Weather::fixture(5, 2)), None);
+        assert_eq!(
+            deliver(&mut app, current, Weather::fixture(5, 2)),
+            Some(berlin())
+        );
     }
 
     /// Audit 1.2. Two fetches can be outstanding — press `r`, then pick a
@@ -1071,7 +1131,7 @@ mod tests {
         // The query moves on while that search is still running.
         app.on_action(Action::Insert('x'));
 
-        app.on_message(Message::Located {
+        let _ = app.on_message(Message::Located {
             id,
             locations: vec![Location {
                 name: "Berlin".to_string(),
@@ -1104,7 +1164,7 @@ mod tests {
         };
 
         app.on_action(Action::Insert('b'));
-        app.on_message(Message::SearchFailed {
+        let _ = app.on_message(Message::SearchFailed {
             id,
             error: "timed out".to_string(),
         });
@@ -1370,7 +1430,7 @@ mod tests {
         let (id, location) = (*id, location.clone());
         app.on_dispatch_dropped(request);
 
-        app.on_message(Message::Loaded {
+        let _ = app.on_message(Message::Loaded {
             id,
             location,
             weather: Weather::fixture(5, 2),
