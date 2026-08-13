@@ -55,6 +55,77 @@ impl From<&Location> for ActiveLocation {
     }
 }
 
+/// Why the active location is the active location.
+///
+/// The location alone cannot answer that, and the answer decides two things:
+/// what is written to disk, and what a later launch is allowed to override. A
+/// file that records only coordinates cannot tell a city you went looking for
+/// from one the app guessed at, which is how the compiled-in default used to be
+/// saved as though you had asked for it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocationSource {
+    /// Picked in the search. Nothing outranks it — not a later detection, not
+    /// anything.
+    Chosen,
+    /// Resolved from the IP address at launch. Written so an offline launch has
+    /// a city to show, but never pinned: the next launch detects again.
+    Detected,
+    /// The compiled-in default, shown when there is nothing better. Deliberately
+    /// never written — saving it would let a first run masquerade as a choice
+    /// and shadow every detection after it.
+    Fallback,
+}
+
+/// How the app opens: the place to show if nothing better arrives, where that
+/// place came from, and whether to ask the network who we are first.
+pub struct Startup {
+    pub location: ActiveLocation,
+    pub source: LocationSource,
+    pub detect: bool,
+}
+
+/// A location worth keeping, and the provenance that decides whether a later
+/// launch may replace it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Remembered {
+    pub location: ActiveLocation,
+    pub source: LocationSource,
+}
+
+/// What a worker message asked the caller to do: what to write to disk, and
+/// what to send next.
+///
+/// Returning the request rather than issuing it keeps `App` free of the
+/// channel, exactly as `on_action` already is.
+#[derive(Default)]
+pub struct Outcome {
+    pub remember: Option<Remembered>,
+    pub request: Option<Request>,
+    /// Something worth saying that is not worth a screen. Printed once the
+    /// terminal has been given back, like the state-file warnings — a failed
+    /// detection is recoverable by definition, so it must not interrupt the
+    /// weather, but a user who wonders why they are in New York deserves the
+    /// reason on their way out.
+    pub warning: Option<String>,
+}
+
+impl Outcome {
+    fn nothing() -> Self {
+        Self::default()
+    }
+}
+
+/// The weather request in flight: which one it is, the place it is for, and
+/// where that place came from. Refresh and retry aim at the place, so a failed
+/// switch retries the city you asked for rather than the one still on screen —
+/// and it carries the source so an accepted response is saved as what it is.
+struct Pending {
+    id: RequestId,
+    location: ActiveLocation,
+    source: LocationSource,
+}
+
 pub struct App {
     pub screen: Screen,
     pub query: String,
@@ -75,10 +146,16 @@ pub struct App {
     /// The place the displayed weather actually describes. Only a successful
     /// load moves it, so the label can never get ahead of the measurements.
     pub location: ActiveLocation,
-    /// The weather request in flight: which one it is, and the place it is
-    /// for. Refresh and retry aim at the place, so a failed switch retries the
-    /// city you asked for rather than the one still on screen.
-    pending: Option<(RequestId, ActiveLocation)>,
+    /// Where `location` came from. Moves with it, and only with it.
+    location_source: LocationSource,
+    /// Whether the startup request should ask the network where we are before
+    /// fetching anything.
+    detect_at_startup: bool,
+    pending: Option<Pending>,
+    /// The detection in flight. Kept apart from `pending` so a detection and a
+    /// weather fetch can never be mistaken for one another, the same way the
+    /// search already is.
+    pending_detect: Option<RequestId>,
     /// The search request in flight. Editing the query abandons it, so a slow
     /// response cannot arrive and repopulate results for a query you have
     /// already moved on from.
@@ -111,7 +188,23 @@ impl App {
         Self::with_location(ActiveLocation::default())
     }
 
+    /// An app that starts at one known place and asks nothing of the network
+    /// beyond its weather.
+    #[cfg(test)]
     pub fn with_location(location: ActiveLocation) -> Self {
+        Self::with_startup(Startup {
+            location,
+            source: LocationSource::Chosen,
+            detect: false,
+        })
+    }
+
+    pub fn with_startup(startup: Startup) -> Self {
+        let Startup {
+            location,
+            source,
+            detect,
+        } = startup;
         Self {
             screen: Screen::Weather,
             query: String::new(),
@@ -124,7 +217,10 @@ impl App {
             selected_day: 0,
             selected_hour: 0,
             location,
+            location_source: source,
+            detect_at_startup: detect,
             pending: None,
+            pending_detect: None,
             pending_search: None,
             next_request: 0,
             should_quit: false,
@@ -133,10 +229,20 @@ impl App {
         }
     }
 
-    /// The fetch that fills the first frame.
-    pub fn initial_fetch(&mut self) -> Request {
+    /// The request that fills the first frame.
+    ///
+    /// A city the user chose is fetched at once — detection does not get a vote
+    /// on a decision already made. Anything else asks where we are first, and
+    /// chains the fetch onto the answer.
+    pub fn startup_request(&mut self) -> Request {
+        if self.detect_at_startup && self.location_source != LocationSource::Chosen {
+            let id = self.next_id();
+            self.pending_detect = Some(id);
+            return Request::Detect { id };
+        }
+
         let location = self.location.clone();
-        self.fetch(location)
+        self.fetch(location, self.location_source)
     }
 
     /// Apply an action, and hand back the request it wants making. Keeping the
@@ -186,13 +292,17 @@ impl App {
         None
     }
 
-    /// Apply a worker message and return the location only when a weather load
-    /// is accepted. Ignored, failed, and search responses return `None`.
+    /// Apply a worker message, reporting what to keep and what to send next.
+    ///
+    /// Only an accepted weather load is worth keeping. Ignored, failed and
+    /// search responses keep nothing; a detection sends a fetch without keeping
+    /// anything, because a place nobody has seen the weather for is not yet a
+    /// place worth remembering.
     ///
     /// The worker's ordering is not an identity guarantee: a slow first
     /// response must not overwrite a fast second one, and a search whose query
     /// has since changed must not repopulate the list.
-    pub fn on_message(&mut self, message: Message) -> Option<&ActiveLocation> {
+    pub fn on_message(&mut self, message: Message) -> Outcome {
         match message {
             Message::Loaded {
                 id,
@@ -200,14 +310,21 @@ impl App {
                 weather,
             } => {
                 if !self.awaiting_weather(id) {
-                    return None;
+                    return Outcome::nothing();
                 }
-                self.pending = None;
+                let source = self
+                    .pending
+                    .take()
+                    .map_or(self.location_source, |p| p.source);
                 self.selected_day = weather.today_index;
                 self.selected_hour = 0;
                 self.location = location;
+                self.location_source = source;
                 self.weather = Fetch::Ready(weather);
-                Some(&self.location)
+                Outcome {
+                    remember: self.remembered(),
+                    ..Outcome::nothing()
+                }
             }
             // `pending` deliberately survives a failure, so retrying aims at
             // the place that failed rather than the one still on screen.
@@ -215,22 +332,70 @@ impl App {
                 if self.awaiting_weather(id) {
                     self.weather = Fetch::Failed(error);
                 }
-                None
+                Outcome::nothing()
+            }
+            Message::Detected { id, location } => {
+                if !self.awaiting_detection(id) {
+                    return Outcome::nothing();
+                }
+                self.pending_detect = None;
+                Outcome {
+                    request: Some(self.fetch(location, LocationSource::Detected)),
+                    ..Outcome::nothing()
+                }
+            }
+            // Not an error screen. A detection that does not answer costs the
+            // user a better guess, not their forecast: the fallback the app
+            // opened with is fetched instead, and if that fails too it is the
+            // weather that says so.
+            Message::DetectFailed { id, error } => {
+                if !self.awaiting_detection(id) {
+                    return Outcome::nothing();
+                }
+                self.pending_detect = None;
+                let location = self.location.clone();
+                let warning = format!(
+                    "virga: could not work out where you are: {error}\n       starting in {} — press l to search",
+                    location.label
+                );
+                Outcome {
+                    request: Some(self.fetch(location, self.location_source)),
+                    warning: Some(warning),
+                    ..Outcome::nothing()
+                }
             }
             Message::Located { id, locations } => {
                 if self.awaiting_search(id) {
                     self.pending_search = None;
                     self.results = Fetch::Ready(locations);
                 }
-                None
+                Outcome::nothing()
             }
             Message::SearchFailed { id, error } => {
                 if self.awaiting_search(id) {
                     self.pending_search = None;
                     self.results = Fetch::Failed(error);
                 }
-                None
+                Outcome::nothing()
             }
+        }
+    }
+
+    /// Whether the app is still working out where the user is, rather than
+    /// fetching weather for somewhere it already knows.
+    pub fn is_locating(&self) -> bool {
+        self.pending_detect.is_some()
+    }
+
+    /// The active location, when it is one worth writing down. The compiled-in
+    /// fallback never is.
+    fn remembered(&self) -> Option<Remembered> {
+        match self.location_source {
+            LocationSource::Fallback => None,
+            source => Some(Remembered {
+                location: self.location.clone(),
+                source,
+            }),
         }
     }
 
@@ -265,13 +430,23 @@ impl App {
     /// telling anyone would leave both in place with no response ever coming —
     /// a spinner that never stops. Reporting it as a failure is what keeps the
     /// bound from turning a full queue into a hang.
-    pub fn on_dispatch_dropped(&mut self, request: Request) {
+    pub fn on_dispatch_dropped(&mut self, request: Request) -> Option<Request> {
         match request {
             // `pending` survives, exactly as it does for `LoadFailed`, so the
             // retry aims at the place that failed rather than the one on screen.
             Request::Fetch { id, .. } => {
                 if self.awaiting_weather(id) {
                     self.weather = Fetch::Failed("too many requests at once".to_string());
+                }
+            }
+            // A dropped detection is the detection failing, and it fails the
+            // same way: on to the fallback rather than into an error screen.
+            // Without this the app would sit on "locating..." forever.
+            Request::Detect { id } => {
+                if self.awaiting_detection(id) {
+                    self.pending_detect = None;
+                    let location = self.location.clone();
+                    return Some(self.fetch(location, self.location_source));
                 }
             }
             Request::Search { id, .. } => {
@@ -281,12 +456,15 @@ impl App {
                 }
             }
         }
+        None
     }
 
     fn awaiting_weather(&self, id: RequestId) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|(current, _)| *current == id)
+        self.pending.as_ref().is_some_and(|p| p.id == id)
+    }
+
+    fn awaiting_detection(&self, id: RequestId) -> bool {
+        self.pending_detect == Some(id)
     }
 
     fn awaiting_search(&self, id: RequestId) -> bool {
@@ -299,9 +477,13 @@ impl App {
     }
 
     /// Aim at a place. The label does not move yet — only a response does that.
-    fn fetch(&mut self, location: ActiveLocation) -> Request {
+    fn fetch(&mut self, location: ActiveLocation, source: LocationSource) -> Request {
         let id = self.next_id();
-        self.pending = Some((id, location.clone()));
+        self.pending = Some(Pending {
+            id,
+            location: location.clone(),
+            source,
+        });
         self.weather = Fetch::Loading;
         Request::Fetch { id, location }
     }
@@ -312,8 +494,8 @@ impl App {
         if matches!(self.weather, Fetch::Loading) {
             return None;
         }
-        let target = self.refresh_target();
-        Some(self.fetch(target))
+        let (target, source) = self.refresh_target();
+        Some(self.fetch(target, source))
     }
 
     /// Enter either opens the highlighted result or runs the query, depending
@@ -327,7 +509,9 @@ impl App {
         if let Some(picked) = picked {
             self.results = Fetch::Idle;
             self.close_search();
-            return Some(self.fetch(picked));
+            // The one place a location becomes a choice. Everything else the app
+            // fetches is a guess it made on the user's behalf.
+            return Some(self.fetch(picked, LocationSource::Chosen));
         }
 
         // A repeated Enter while the same query is already running would queue
@@ -356,11 +540,13 @@ impl App {
     }
 
     /// What `r` should fetch: whatever we are already chasing, else what is on
-    /// screen. Never the compiled-in default — that was the bug.
-    fn refresh_target(&self) -> ActiveLocation {
-        self.pending
-            .as_ref()
-            .map_or_else(|| self.location.clone(), |(_, location)| location.clone())
+    /// screen. Never the compiled-in default — that was the bug. The source
+    /// rides along, so a refresh cannot quietly relabel where a place came from.
+    fn refresh_target(&self) -> (ActiveLocation, LocationSource) {
+        self.pending.as_ref().map_or_else(
+            || (self.location.clone(), self.location_source),
+            |p| (p.location.clone(), p.source),
+        )
     }
 
     /// Both directions wrap, so the window is a loop rather than a corridor.
@@ -1079,12 +1265,202 @@ mod tests {
         );
     }
 
+    fn reykjavik() -> ActiveLocation {
+        ActiveLocation {
+            label: "Reykjavík, Capital Region, Iceland".to_string(),
+            lat: 64.146_59,
+            lon: -21.942_23,
+        }
+    }
+
+    fn detecting_app(fallback: ActiveLocation, source: LocationSource) -> App {
+        App::with_startup(Startup {
+            location: fallback,
+            source,
+            detect: true,
+        })
+    }
+
+    fn first_run() -> App {
+        detecting_app(ActiveLocation::default(), LocationSource::Fallback)
+    }
+
+    /// The promise: a city you picked is not a question the network gets asked
+    /// again.
+    #[test]
+    fn a_chosen_location_skips_detection() {
+        let mut app = App::with_location(berlin());
+
+        let Request::Fetch { location, .. } = app.startup_request() else {
+            panic!("a chosen city must be fetched, not re-detected")
+        };
+
+        assert_eq!(location, berlin());
+        assert!(!app.is_locating());
+    }
+
+    #[test]
+    fn nothing_chosen_detects_first() {
+        let mut app = first_run();
+
+        assert!(matches!(app.startup_request(), Request::Detect { .. }));
+        assert!(app.is_locating(), "the screen should say what it is doing");
+        assert!(matches!(app.weather, Fetch::Loading));
+    }
+
+    /// Even with a detection on disk, the point of re-detecting is that it is
+    /// yesterday's answer to a question asked again today.
+    #[test]
+    fn a_previous_detection_is_detected_over() {
+        let mut app = detecting_app(berlin(), LocationSource::Detected);
+
+        assert!(matches!(app.startup_request(), Request::Detect { .. }));
+    }
+
+    #[test]
+    fn an_accepted_detection_fetches_the_detected_place() {
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+
+        let outcome = app.on_message(Message::Detected {
+            id,
+            location: reykjavik(),
+        });
+
+        assert!(
+            outcome.remember.is_none(),
+            "a place nobody has seen the weather for is not worth keeping"
+        );
+        let Some(request) = outcome.request else {
+            panic!("a detection must chain a fetch")
+        };
+        let Request::Fetch { ref location, .. } = request else {
+            panic!("not a fetch")
+        };
+        assert_eq!(*location, reykjavik());
+        assert!(!app.is_locating());
+
+        // And the load that answers it is kept as the guess it is.
+        assert_eq!(
+            deliver(&mut app, request, Weather::fixture(5, 2)),
+            Some(Remembered {
+                location: reykjavik(),
+                source: LocationSource::Detected,
+            })
+        );
+    }
+
+    /// A detection that does not answer costs the user a better guess, not
+    /// their forecast.
+    #[test]
+    fn a_failed_detection_falls_back_without_an_error_screen() {
+        let mut app = detecting_app(berlin(), LocationSource::Detected);
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+
+        let outcome = app.on_message(Message::DetectFailed {
+            id,
+            error: "no route to host".to_string(),
+        });
+
+        let Some(Request::Fetch { location, .. }) = outcome.request else {
+            panic!("a failed detection must still fetch something")
+        };
+        assert_eq!(
+            location,
+            berlin(),
+            "the remembered detection is the fallback"
+        );
+        assert!(
+            matches!(app.weather, Fetch::Loading),
+            "what the user waits on is the fetch, not an error popup"
+        );
+        assert!(!app.is_locating());
+        assert!(
+            outcome.warning.unwrap().contains("Berlin"),
+            "the reason should name where it landed instead"
+        );
+    }
+
+    /// The queue is bounded, so a detection can be refused before it is sent.
+    /// Left unhandled that is "locating..." forever — worse than the unbounded
+    /// growth the bound exists to prevent.
+    #[test]
+    fn a_refused_detection_falls_back_instead_of_locating_forever() {
+        let mut app = first_run();
+        let request = app.startup_request();
+
+        let replacement = app.on_dispatch_dropped(request);
+
+        let Some(Request::Fetch { location, .. }) = replacement else {
+            panic!("a refused detection must fall back to a fetch")
+        };
+        assert_eq!(location, ActiveLocation::default());
+        assert!(!app.is_locating());
+    }
+
+    #[test]
+    fn a_stale_detection_is_ignored() {
+        let mut app = first_run();
+        let _ = app.startup_request();
+
+        let outcome = app.on_message(Message::Detected {
+            id: 999,
+            location: reykjavik(),
+        });
+
+        assert!(
+            outcome.request.is_none(),
+            "an unasked-for detection chained a fetch"
+        );
+        assert!(app.is_locating(), "the real detection is still running");
+    }
+
+    /// The whole point, end to end: detect, then choose, and the choice is what
+    /// survives.
+    #[test]
+    fn choosing_a_city_after_a_detection_replaces_it_permanently() {
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+        let chained = app
+            .on_message(Message::Detected {
+                id,
+                location: reykjavik(),
+            })
+            .request
+            .expect("a chained fetch");
+        deliver(&mut app, chained, Weather::fixture(5, 2));
+
+        app.on_action(Action::OpenSearch);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52437,
+            lon: 13.41053,
+        }]);
+        let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
+
+        assert_eq!(
+            deliver(&mut app, picked, Weather::fixture(5, 2)),
+            Some(Remembered {
+                location: berlin(),
+                source: LocationSource::Chosen,
+            })
+        );
+    }
+
     #[test]
     fn a_remembered_location_drives_the_initial_fetch() {
         let remembered = berlin();
         let mut app = App::with_location(remembered.clone());
 
-        let Request::Fetch { location, .. } = app.initial_fetch() else {
+        let Request::Fetch { location, .. } = app.startup_request() else {
             panic!("initial request was not a fetch")
         };
 
@@ -1094,7 +1470,7 @@ mod tests {
 
     /// Answer a request the way the worker would, so tests exercise the same
     /// correlation the real messages go through.
-    fn deliver(app: &mut App, request: Request, weather: Weather) -> Option<ActiveLocation> {
+    fn deliver(app: &mut App, request: Request, weather: Weather) -> Option<Remembered> {
         let Request::Fetch { id, location } = request else {
             panic!("not a fetch")
         };
@@ -1103,15 +1479,18 @@ mod tests {
             location,
             weather,
         })
-        .cloned()
+        .remember
+    }
+
+    fn id_of(request: &Request) -> RequestId {
+        match request {
+            Request::Fetch { id, .. } | Request::Search { id, .. } | Request::Detect { id } => *id,
+        }
     }
 
     fn fail(app: &mut App, request: Request) {
-        let id = match request {
-            Request::Fetch { id, .. } | Request::Search { id, .. } => id,
-        };
         let _ = app.on_message(Message::LoadFailed {
-            id,
+            id: id_of(&request),
             error: "no route to host".to_string(),
         });
     }
@@ -1120,7 +1499,7 @@ mod tests {
     /// fetch issued and answered. `App::new` begins in `Fetch::Loading`, so a
     /// refresh before that lands is correctly refused.
     fn loaded(app: &mut App) {
-        let request = app.initial_fetch();
+        let request = app.startup_request();
         deliver(app, request, Weather::fixture(5, 2));
     }
 
@@ -1130,7 +1509,7 @@ mod tests {
     #[test]
     fn refresh_follows_the_location_that_loaded() {
         let mut app = App::new();
-        let request = app.initial_fetch();
+        let request = app.startup_request();
         deliver(&mut app, request, Weather::fixture(5, 2));
 
         let request = app.on_action(Action::Refresh).expect("a refresh request");
@@ -1141,7 +1520,7 @@ mod tests {
         deliver(&mut app, request, Weather::fixture(5, 2));
 
         // Now switch cities and refresh again.
-        let switch = app.fetch(berlin());
+        let switch = app.fetch(berlin(), LocationSource::Chosen);
         deliver(&mut app, switch, Weather::fixture(5, 2));
         assert_eq!(app.location, berlin(), "the label followed the fetch");
 
@@ -1158,7 +1537,7 @@ mod tests {
         let mut app = App::new();
         loaded(&mut app);
 
-        let switch = app.fetch(berlin());
+        let switch = app.fetch(berlin(), LocationSource::Chosen);
         fail(&mut app, switch);
 
         let Some(Request::Fetch { location, .. }) = app.on_action(Action::Refresh) else {
@@ -1174,15 +1553,13 @@ mod tests {
         let mut app = App::new();
         loaded(&mut app);
 
-        let switch = app.fetch(berlin());
-        let id = match switch {
-            Request::Fetch { id, .. } | Request::Search { id, .. } => id,
-        };
+        let switch = app.fetch(berlin(), LocationSource::Chosen);
         assert!(
             app.on_message(Message::LoadFailed {
-                id,
+                id: id_of(&switch),
                 error: "no route to host".to_string(),
             })
+            .remember
             .is_none()
         );
 
@@ -1193,13 +1570,16 @@ mod tests {
     #[test]
     fn only_an_accepted_load_reports_a_location_to_persist() {
         let mut app = App::new();
-        let stale = app.fetch(ActiveLocation::default());
-        let current = app.fetch(berlin());
+        let stale = app.fetch(ActiveLocation::default(), LocationSource::Chosen);
+        let current = app.fetch(berlin(), LocationSource::Chosen);
 
         assert_eq!(deliver(&mut app, stale, Weather::fixture(5, 2)), None);
         assert_eq!(
             deliver(&mut app, current, Weather::fixture(5, 2)),
-            Some(berlin())
+            Some(Remembered {
+                location: berlin(),
+                source: LocationSource::Chosen,
+            })
         );
     }
 
@@ -1212,8 +1592,8 @@ mod tests {
         let mut app = App::new();
         loaded(&mut app);
 
-        let first = app.fetch(ActiveLocation::default());
-        let second = app.fetch(berlin());
+        let first = app.fetch(ActiveLocation::default(), LocationSource::Chosen);
+        let second = app.fetch(berlin(), LocationSource::Chosen);
 
         deliver(&mut app, first, Weather::fixture(9, 4));
         assert!(
@@ -1230,8 +1610,8 @@ mod tests {
     #[test]
     fn a_stale_failure_never_replaces_a_newer_request() {
         let mut app = App::new();
-        let first = app.fetch(ActiveLocation::default());
-        let second = app.fetch(berlin());
+        let first = app.fetch(ActiveLocation::default(), LocationSource::Chosen);
+        let second = app.fetch(berlin(), LocationSource::Chosen);
 
         fail(&mut app, first);
         assert!(
@@ -1314,8 +1694,8 @@ mod tests {
         app.selected_day = 4;
         app.selected_hour = 7;
 
-        let stale = app.fetch(berlin());
-        let current = app.fetch(ActiveLocation::default());
+        let stale = app.fetch(berlin(), LocationSource::Chosen);
+        let current = app.fetch(ActiveLocation::default(), LocationSource::Chosen);
         deliver(&mut app, stale, Weather::fixture(9, 1));
 
         assert!(matches!(app.weather, Fetch::Loading));
@@ -1332,16 +1712,12 @@ mod tests {
         let mut ids = Vec::new();
 
         for _ in 0..5 {
-            ids.push(match app.initial_fetch() {
-                Request::Fetch { id, .. } | Request::Search { id, .. } => id,
-            });
+            ids.push(id_of(&app.startup_request()));
 
             app.on_action(Action::OpenSearch);
             app.on_action(Action::Insert('a'));
             if let Some(request) = app.on_action(Action::Submit) {
-                ids.push(match request {
-                    Request::Fetch { id, .. } | Request::Search { id, .. } => id,
-                });
+                ids.push(id_of(&request));
             }
             app.on_action(Action::Back);
         }
@@ -1393,7 +1769,7 @@ mod tests {
     #[test]
     fn refresh_works_again_once_a_fetch_has_finished() {
         let mut app = App::new();
-        let request = app.initial_fetch();
+        let request = app.startup_request();
         fail(&mut app, request);
 
         assert!(
@@ -1502,7 +1878,7 @@ mod tests {
     #[test]
     fn a_refused_fetch_reports_failure_instead_of_spinning_forever() {
         let mut app = App::new();
-        let request = app.initial_fetch();
+        let request = app.startup_request();
         assert!(matches!(app.weather, Fetch::Loading));
 
         app.on_dispatch_dropped(request);
@@ -1523,7 +1899,7 @@ mod tests {
             lat: 64.146_59,
             lon: -21.942_23,
         };
-        let request = app.fetch(target.clone());
+        let request = app.fetch(target.clone(), LocationSource::Chosen);
         app.on_dispatch_dropped(request);
 
         let Some(Request::Fetch { location, .. }) = app.refresh() else {
@@ -1553,7 +1929,7 @@ mod tests {
     #[test]
     fn a_refused_request_ignores_a_late_reply_to_it() {
         let mut app = App::new();
-        let request = app.initial_fetch();
+        let request = app.startup_request();
         let Request::Fetch { id, location, .. } = &request else {
             panic!("initial_fetch is a weather fetch");
         };
@@ -1577,8 +1953,11 @@ mod tests {
     /// plus a weather fetch the user superseded by picking a new city.
     #[test]
     fn the_queue_is_deeper_than_the_app_can_fill() {
-        let mut app = App::new();
-        let mut outstanding = vec![app.initial_fetch()];
+        // From a first run, so the startup request is the detection — the
+        // deepest the queue has to go, since the fetch it chains does not exist
+        // until the detection has been answered and left the queue.
+        let mut app = first_run();
+        let mut outstanding = vec![app.startup_request()];
 
         app.query = "reykjavik".to_string();
         outstanding.push(app.submit().expect("a search runs alongside a fetch"));

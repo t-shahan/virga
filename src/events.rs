@@ -1,4 +1,5 @@
 use crate::app::ActiveLocation;
+use crate::weather::client::detect_location;
 use crate::weather::client::fetch_forecast;
 use crate::weather::client::search_locations;
 use crate::weather::model::Location;
@@ -30,6 +31,12 @@ pub enum Request {
         id: RequestId,
         location: ActiveLocation,
     },
+    /// Ask the network where the caller is. Startup only, and at most once a
+    /// launch — it carries no coordinates because working them out is the
+    /// entire job.
+    Detect {
+        id: RequestId,
+    },
     Search {
         id: RequestId,
         query: String,
@@ -46,6 +53,16 @@ pub enum Message {
         weather: Weather,
     },
     LoadFailed {
+        id: RequestId,
+        error: String,
+    },
+    /// Where the caller turned out to be. Not a forecast and not yet on screen:
+    /// the app answers it with a fetch.
+    Detected {
+        id: RequestId,
+        location: ActiveLocation,
+    },
+    DetectFailed {
         id: RequestId,
         error: String,
     },
@@ -76,6 +93,16 @@ pub fn spawn_worker(requests: Receiver<Request>, messages: Sender<Message>) {
                         },
                     }
                 }
+                Request::Detect { id } => match detect_location() {
+                    Ok(found) => Message::Detected {
+                        id,
+                        location: ActiveLocation::from(&found),
+                    },
+                    Err(e) => Message::DetectFailed {
+                        id,
+                        error: e.to_string(),
+                    },
+                },
                 Request::Search { id, query } => match search_locations(&query) {
                     Ok(locations) => Message::Located { id, locations },
                     Err(e) => Message::SearchFailed {

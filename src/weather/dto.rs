@@ -35,6 +35,65 @@ impl GeocodeResultDto {
     }
 }
 
+/// What an IP geolocation service says about the caller.
+///
+/// Every field is optional and the conversion does the rejecting, the same way
+/// `GeocodeResultDto` does: a body that parses is not the same thing as a body
+/// that names a place.
+#[derive(Debug, Deserialize)]
+pub struct GeoIpDto {
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub country_name: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// The provider's in-band failure: rate limiting and reserved addresses
+    /// come back as a *200* carrying this rather than as an error status. A
+    /// body with it set is not a place, whatever else it carries.
+    #[serde(default)]
+    pub error: bool,
+}
+
+impl GeoIpDto {
+    pub fn into_location(self) -> Option<Location> {
+        if self.error {
+            return None;
+        }
+
+        let (lat, lon) = (self.latitude?, self.longitude?);
+        if !lat.is_finite() || !lon.is_finite() {
+            return None;
+        }
+        if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+            return None;
+        }
+        // Null Island is the shape "unknown" takes when a provider answers
+        // anyway. Nobody launches the app in the Gulf of Guinea.
+        if lat == 0.0 && lon == 0.0 {
+            return None;
+        }
+
+        // The border shows this label, so an empty one would be a blank heading
+        // over a real forecast. City, region and country are each optional; all
+        // three absent is a reading, not a location.
+        let (name, admin1, country) = match (self.city, self.region) {
+            (Some(city), region) => (city, region, self.country_name),
+            (None, Some(region)) => (region, None, self.country_name),
+            // The country is the whole name here, so repeating it as the
+            // country would label the city "Iceland, Iceland".
+            (None, None) => (self.country_name?, None, None),
+        };
+
+        Some(Location {
+            name,
+            admin1,
+            country,
+            lat,
+            lon,
+        })
+    }
+}
+
 /// Same reasoning as `DailyDto`: any individual measurement can come back null,
 /// and one missing value must not cost us the entire response.
 #[derive(Debug, Deserialize)]

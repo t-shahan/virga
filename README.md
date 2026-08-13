@@ -28,6 +28,8 @@ means "might drizzle"; tall above *and* below means take the umbrella.
   a next-rain countdown, a 24-hour running total, snow reported separately.
 - **Browse any day** with the arrow keys; the top pane becomes an inspector for
   the selected day.
+- **Starts where you are** — the opening forecast is for the city your IP
+  resolves to, and a city you pick yourself replaces it for good.
 - **City search** against Open-Meteo's geocoder, **metric or imperial** toggled
   live, **five colour themes** cycled with `t`, and a **responsive** layout down
   to a 34×12 terminal.
@@ -109,19 +111,44 @@ An unrecognised name prints the list of known themes and starts in `default`
 rather than refusing to run. The theme is not written to disk — like the unit
 toggle, the choice lasts for the session.
 
+## Where it starts
+
+Virga starts where your IP address says you are, so the first thing on screen is
+your own weather rather than a city chosen for you.
+
+Press `l` and pick somewhere, and that becomes the answer for good: a location
+you chose is remembered in the platform's per-user state/data directory, and
+every later launch starts there without asking the network anything. Detection
+only runs while you have not chosen.
+
+When the lookup does not answer — no network, or the service having a bad day —
+Virga falls back to the last place it detected, and to New York City if it has
+never detected one. The reason is printed on exit rather than shown as an error,
+because a worse guess is not a reason to withhold the forecast.
+
+Set `VIRGA_GEOIP=off` to skip the lookup entirely:
+
+```bash
+VIRGA_GEOIP=off virga
+```
+
+Startup is then the last location Virga knew, or New York City. An unrecognised
+value prints a warning and leaves detection on rather than refusing to run.
+
 ## Configuration
 
-`VIRGA_THEME` sets the startup palette as described above. On its first run,
-Virga starts in New York City. Thereafter, it starts at the last location whose
-weather loaded successfully. That location is kept in the platform's per-user
-state/data directory. Unit and theme changes made in the app last for the
-session.
+`VIRGA_THEME` sets the startup palette and `VIRGA_GEOIP` turns location
+detection off, both as described above. Unit and theme changes made in the app
+last for the session.
 
 ## Limitations
 
 - There is no general configuration file, and weather is never cached. Every
-  launch fetches fresh weather; only the startup theme can be set through the
-  environment.
+  launch fetches fresh weather; only the startup theme and location detection
+  can be set through the environment.
+- Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
+  NAT it lands near your provider rather than near you — `l` fixes that
+  permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface.
 - "Today" is distinguished by colour alone in the daily chart. The selection is
@@ -139,13 +166,26 @@ Weather, air quality and geocoding all come from
 **for non-commercial use only** and is rate limited to 10,000 calls per day.
 Each weather load makes two requests, and each submitted search a third.
 
+Location detection is the one thing that does not go to Open-Meteo. On a launch
+where you have not chosen a city, Virga makes a single request to
+[ipapi.co](https://ipapi.co), which resolves the connection's own source address
+to a city. Nothing else is sent — no query string, no identifier, no
+coordinates, because working the coordinates out is the point of the request.
+Their free tier needs no API key and allows 1,000 requests a day; Virga makes at
+most one per launch. See ipapi.co's [privacy
+policy](https://ipapi.co/privacy/) for what they retain.
+
+That request is not made at all once you have chosen a city, or with
+`VIRGA_GEOIP=off` set.
+
 Virga stores only the last successfully loaded location label and coordinates
-locally, in its per-user state/data directory. It does not store weather
-responses, searches, or history. Weather and air-quality requests send the
-location coordinates to Open-Meteo; city searches submit their search text to
-its geocoder. Open-Meteo's free-service logs may retain IP addresses and
-coordinates for 90 days. See Open-Meteo's
-[terms](https://open-meteo.com/en/terms) and
+locally, in its per-user state/data directory, alongside a note of whether you
+chose it or it was detected. Your IP address is never written to disk — the
+resolved city is. It does not store weather responses, searches, or history.
+Weather and air-quality requests send the location coordinates to Open-Meteo;
+city searches submit their search text to its geocoder. Open-Meteo's
+free-service logs may retain IP addresses and coordinates for 90 days. See
+Open-Meteo's [terms](https://open-meteo.com/en/terms) and
 [licence](https://open-meteo.com/en/license).
 
 ### Attribution
