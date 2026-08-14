@@ -96,8 +96,10 @@ cargo package --locked
   licensing from fetched-data licensing.
 - Preserve the non-commercial-use and rate-limit warning for Open-Meteo's free
   service.
-- Do not claim that terminal rendering has been manually validated on Linux or
-  Windows.
+- State that manual terminal testing has been limited to Ghostty and Apple's
+  Terminal app on macOS. Linux and Windows coverage comes from automated CI,
+  and the README must not imply manual validation on other operating systems
+  or terminal emulators.
 - Use the current GitHub README at commit `980d9a4` as the content baseline.
 - Do not change application code, behavior, dependencies, or release state.
 
@@ -113,4 +115,3 @@ The finished README will be checked for:
 - Clean Markdown whitespace and a README-only implementation diff, apart from
   the committed design and implementation-plan documents required by the
   workflow.
-
