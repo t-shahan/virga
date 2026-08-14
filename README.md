@@ -16,7 +16,7 @@ also, most weeks, what the precipitation chart draws.
 
 <img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
-### Hourly precipitation
+## Hourly precipitation
 
 Press `p` for the hourly precipitation view. Probability rises above the
 centre rule while forecast amount hangs below it — a tall spike with nothing
@@ -76,8 +76,9 @@ an unoptimized build that is noticeably slower to render.
 
 The precipitation chart's centre rule marks the current hour (`┬`), the
 selected one (`═`), and midnight (`┼`), so the three stay apart without relying
-on colour. Its two halves are percentages against inches and are not comparable
-by height; the box title carries the scale.
+on colour. Its two halves show probability and precipitation amount on
+different scales, so their heights are not comparable; the box title carries
+the amount scale.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
