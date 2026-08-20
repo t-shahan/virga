@@ -1,4 +1,4 @@
-use crate::app::{ActiveLocation, App, Fetch, Screen};
+use crate::app::{ActiveLocation, App, Fetch, LocationSource, Remembered, Screen, Startup};
 use crate::events::{Message, Request};
 use crate::theme::Theme;
 use anyhow::{Result, anyhow};
@@ -24,18 +24,32 @@ fn main() -> Result<()> {
     // has to go to the ordinary screen, or it is written to the alternate
     // screen and wiped the moment the app exits.
     let theme = startup_theme(std::env::var("VIRGA_THEME").ok().as_deref());
+    let (detect, warning) = detection_enabled(std::env::var("VIRGA_GEOIP").ok().as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
 
     let (startup, state_path) = match state::path() {
         Ok(path) => {
-            let (location, warning) = startup_location(&path);
+            let (startup, warning) = startup_location(&path, detect);
             if let Some(warning) = warning {
                 eprintln!("{warning}");
             }
-            (location, Some(path))
+            (startup, Some(path))
         }
+        // Nowhere to remember a location is not a reason to stop working out
+        // where the user is: the two are unrelated, and a user with no writable
+        // state directory still deserves their own city.
         Err(error) => {
             eprintln!("virga: could not determine where to remember location: {error:#}");
-            (ActiveLocation::default(), None)
+            (
+                Startup {
+                    location: ActiveLocation::default(),
+                    source: LocationSource::Fallback,
+                    detect,
+                },
+                None,
+            )
         }
     };
 
@@ -55,24 +69,89 @@ fn main() -> Result<()> {
     result
 }
 
-fn startup_location(path: &Path) -> (ActiveLocation, Option<String>) {
-    match state::load_from(path) {
-        Ok(Some(location)) => (location, None),
-        Ok(None) => (ActiveLocation::default(), None),
+/// How the app should open, given what is on disk and whether detection is
+/// allowed to run.
+///
+/// The precedence is the whole feature: a city the user chose wins outright, a
+/// city that was detected before is kept only as the answer for a launch where
+/// detection fails, and with neither there is New York and a lookup.
+fn startup_location(path: &Path, detect: bool) -> (Startup, Option<String>) {
+    let (remembered, warning) = match state::load_from(path) {
+        Ok(remembered) => (remembered, None),
         Err(error) => (
-            ActiveLocation::default(),
+            None,
             Some(format!(
                 "virga: could not load remembered location: {error:#}"
+            )),
+        ),
+    };
+
+    let startup = match remembered {
+        // A choice is a choice. Detection does not get a vote.
+        Some(Remembered {
+            location,
+            source: LocationSource::Chosen,
+        }) => Startup {
+            location,
+            source: LocationSource::Chosen,
+            detect: false,
+        },
+        // Yesterday's detection is this launch's answer only if today's fails.
+        Some(Remembered { location, source }) => Startup {
+            location,
+            source,
+            detect,
+        },
+        None => Startup {
+            location: ActiveLocation::default(),
+            source: LocationSource::Fallback,
+            detect,
+        },
+    };
+
+    (startup, warning)
+}
+
+/// Whether to ask the network where the user is, given whatever `VIRGA_GEOIP`
+/// was set to.
+///
+/// The `VIRGA_THEME` precedent: an unusable value is a warning and the default,
+/// not an exit. Leaving detection *on* is the right default for a typo, because
+/// off is the surprising state — a user who has gone to the trouble of setting
+/// the variable will see the warning and fix it.
+fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
+    let Some(value) = requested else {
+        return (true, None);
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" | "no" => (false, None),
+        "on" | "1" | "true" | "yes" => (true, None),
+        _ => (
+            true,
+            Some(format!(
+                "virga: VIRGA_GEOIP={value:?} is not on or off; leaving location detection on."
             )),
         ),
     }
 }
 
-fn accept_message(app: &mut App, message: Message, path: &Path) -> Option<String> {
-    let location = app.on_message(message)?;
-    state::save_to(path, location)
-        .err()
-        .map(|error| format!("virga: could not remember location: {error:#}"))
+/// Apply a message, persist what it asked to keep, and hand back the request it
+/// chained. A detection chains the fetch that answers it.
+fn accept_message(
+    app: &mut App,
+    message: Message,
+    path: &Path,
+) -> (Option<Request>, Option<String>) {
+    let outcome = app.on_message(message);
+    let save_warning = outcome.remember.and_then(|remembered| {
+        state::save_to(path, &remembered)
+            .err()
+            .map(|error| format!("virga: could not remember location: {error:#}"))
+    });
+    // A message either keeps something or complains about something; it cannot
+    // do both, so there is no ordering to get wrong here.
+    (outcome.request, outcome.warning.or(save_warning))
 }
 
 fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
@@ -117,7 +196,11 @@ fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result
         // dropped, the screen says something instead of waiting forever on a
         // request that was never sent.
         Err(TrySendError::Full(request)) => {
-            app.on_dispatch_dropped(request);
+            // A dropped detection still has to reach its fallback, so the
+            // replacement it asks for is dispatched rather than discarded.
+            if let Some(replacement) = app.on_dispatch_dropped(request) {
+                return dispatch(tx, app, replacement);
+            }
             Ok(())
         }
         Err(TrySendError::Disconnected(_)) => Err(anyhow!("the worker thread has stopped")),
@@ -130,7 +213,7 @@ fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result
 /// genuinely needs a terminal and a channel.
 fn run(
     mut terminal: DefaultTerminal,
-    startup: ActiveLocation,
+    startup: Startup,
     theme: Theme,
     state_path: Option<&Path>,
     warning: &mut Option<String>,
@@ -143,9 +226,9 @@ fn run(
     let (message_tx, message_rx) = mpsc::channel();
     events::spawn_worker(request_rx, message_tx);
 
-    let mut app = App::with_location(startup);
+    let mut app = App::with_startup(startup);
     app.theme = theme;
-    let initial = app.initial_fetch();
+    let initial = app.startup_request();
     dispatch(&request_tx, &mut app, initial)?;
 
     let mut dirty = true;
@@ -187,13 +270,18 @@ fn run(
 
         while let Ok(message) = message_rx.try_recv() {
             dirty = true;
-            let save_warning = if let Some(path) = state_path {
-                accept_message(&mut app, message, path)
-            } else {
-                let _ = app.on_message(message);
-                None
+            let (chained, message_warning) = match state_path {
+                Some(path) => accept_message(&mut app, message, path),
+                None => {
+                    let outcome = app.on_message(message);
+                    (outcome.request, outcome.warning)
+                }
             };
-            retain_first_warning(warning, save_warning);
+            retain_first_warning(warning, message_warning);
+            // A detection answers with the fetch it asked for.
+            if let Some(request) = chained {
+                dispatch(&request_tx, &mut app, request)?;
+            }
         }
 
         if event::poll(Duration::from_millis(100))? {
@@ -248,13 +336,92 @@ mod tests {
         }
     }
 
+    fn chosen(location: ActiveLocation) -> Remembered {
+        Remembered {
+            location,
+            source: LocationSource::Chosen,
+        }
+    }
+
+    fn detected(location: ActiveLocation) -> Remembered {
+        Remembered {
+            location,
+            source: LocationSource::Detected,
+        }
+    }
+
+    fn reykjavik() -> ActiveLocation {
+        ActiveLocation {
+            label: "Reykjavík, Capital Region, Iceland".to_string(),
+            lat: 64.146_59,
+            lon: -21.942_23,
+        }
+    }
+
+    /// The promise the whole feature rests on: pick a city and it is still your
+    /// city next launch, wherever the network thinks you are.
     #[test]
-    fn remembered_location_wins_over_the_builtin_default() {
+    fn a_chosen_location_is_carried_into_startup_without_detection() {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
-        state::save_to(&path, &berlin()).unwrap();
+        state::save_to(&path, &chosen(berlin())).unwrap();
 
-        assert_eq!(startup_location(&path), (berlin(), None));
+        let (startup, warning) = startup_location(&path, true);
+
+        assert_eq!(startup.location, berlin());
+        assert_eq!(startup.source, LocationSource::Chosen);
+        assert!(!startup.detect, "a chosen city must not be re-detected");
+        assert_eq!(warning, None);
+    }
+
+    /// Yesterday's guess is worth keeping only as the answer for a launch where
+    /// today's lookup does not come back.
+    #[test]
+    fn a_detected_location_is_kept_only_as_the_fallback() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        state::save_to(&path, &detected(berlin())).unwrap();
+
+        let (startup, _) = startup_location(&path, true);
+
+        assert_eq!(
+            startup.location,
+            berlin(),
+            "an offline launch still has a city"
+        );
+        assert_eq!(startup.source, LocationSource::Detected);
+        assert!(startup.detect, "but a fresh detection outranks it");
+    }
+
+    #[test]
+    fn no_state_detects_from_the_builtin_fallback() {
+        let test = tempfile::tempdir().unwrap();
+
+        let (startup, warning) = startup_location(&test.path().join("state.json"), true);
+
+        assert_eq!(startup.location, ActiveLocation::default());
+        assert_eq!(startup.source, LocationSource::Fallback);
+        assert!(startup.detect);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn opting_out_never_detects() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        state::save_to(&path, &detected(berlin())).unwrap();
+
+        let (startup, _) = startup_location(&path, false);
+        assert!(!startup.detect);
+        assert_eq!(
+            startup.location,
+            berlin(),
+            "the last guess is still the best one"
+        );
+
+        let (startup, _) = startup_location(&test.path().join("nothing.json"), false);
+        assert!(!startup.detect);
+        assert_eq!(startup.location, ActiveLocation::default());
     }
 
     #[test]
@@ -263,8 +430,14 @@ mod tests {
         let path = test.path().join("state.json");
         std::fs::write(&path, "{").unwrap();
 
-        let (location, warning) = startup_location(&path);
-        assert_eq!(location, ActiveLocation::default());
+        let (startup, warning) = startup_location(&path, true);
+
+        assert_eq!(startup.location, ActiveLocation::default());
+        assert_eq!(startup.source, LocationSource::Fallback);
+        assert!(
+            startup.detect,
+            "an unreadable file is a reason to detect, not a reason to give up"
+        );
         assert!(
             warning
                 .unwrap()
@@ -273,14 +446,95 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_variable_turns_detection_off() {
+        for value in ["off", "Off", " OFF ", "0", "false", "no"] {
+            assert!(!detection_enabled(Some(value)).0, "{value:?}");
+        }
+        for value in ["on", "1", "true", "yes"] {
+            assert!(detection_enabled(Some(value)).0, "{value:?}");
+        }
+        assert!(detection_enabled(None).0);
+        assert_eq!(detection_enabled(Some("off")).1, None);
+    }
+
+    /// The `VIRGA_THEME` precedent: a typo in a shell profile is a warning and
+    /// the default, never a refusal to run.
+    #[test]
+    fn an_unusable_geoip_value_warns_and_leaves_detection_on() {
+        for value in ["", "  ", "maybe", "disabled"] {
+            let (enabled, warning) = detection_enabled(Some(value));
+
+            assert!(enabled, "{value:?}");
+            assert!(warning.unwrap().contains("VIRGA_GEOIP"), "{value:?}");
+        }
+    }
+
+    #[test]
     fn an_accepted_load_is_persisted() {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
         let mut app = App::with_location(berlin());
-        let message = loaded(app.initial_fetch());
+        let message = loaded(app.startup_request());
 
-        assert_eq!(accept_message(&mut app, message, &path), None);
-        assert_eq!(state::load_from(&path).unwrap(), Some(berlin()));
+        assert_eq!(accept_message(&mut app, message, &path).1, None);
+        assert_eq!(state::load_from(&path).unwrap(), Some(chosen(berlin())));
+    }
+
+    /// The end-to-end shape of a first run: detect, fetch what came back, and
+    /// only then write it down — as a guess, so tomorrow detects again.
+    #[test]
+    fn a_detected_load_is_persisted_as_a_detection() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let mut app = App::with_startup(Startup {
+            location: ActiveLocation::default(),
+            source: LocationSource::Fallback,
+            detect: true,
+        });
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("a first run must detect")
+        };
+
+        let (chained, warning) = accept_message(
+            &mut app,
+            Message::Detected {
+                id,
+                location: reykjavik(),
+            },
+            &path,
+        );
+        assert_eq!(warning, None);
+        assert_eq!(
+            state::load_from(&path).unwrap(),
+            None,
+            "a detection nobody has seen the weather for is not worth keeping"
+        );
+
+        let (_, warning) = accept_message(&mut app, loaded(chained.unwrap()), &path);
+
+        assert_eq!(warning, None);
+        assert_eq!(
+            state::load_from(&path).unwrap(),
+            Some(detected(reykjavik()))
+        );
+    }
+
+    /// The wart the source field exists to fix: a first run in New York used to
+    /// write New York as though the user had asked for it, which would shadow
+    /// every detection after it.
+    #[test]
+    fn the_builtin_fallback_is_never_written_to_disk() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let mut app = App::with_startup(Startup {
+            location: ActiveLocation::default(),
+            source: LocationSource::Fallback,
+            detect: false,
+        });
+        let message = loaded(app.startup_request());
+
+        assert_eq!(accept_message(&mut app, message, &path).1, None);
+        assert_eq!(state::load_from(&path).unwrap(), None);
     }
 
     #[test]
@@ -290,9 +544,9 @@ mod tests {
         std::fs::write(&parent, "not a directory").unwrap();
         let path = parent.join("state.json");
         let mut app = App::with_location(berlin());
-        let message = loaded(app.initial_fetch());
+        let message = loaded(app.startup_request());
 
-        let warning = accept_message(&mut app, message, &path).unwrap();
+        let warning = accept_message(&mut app, message, &path).1.unwrap();
 
         assert!(warning.contains("could not remember location"));
         assert!(warning.contains("create"));
@@ -312,12 +566,12 @@ mod tests {
     fn stale_and_failed_loads_do_not_replace_state() {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
-        state::save_to(&path, &berlin()).unwrap();
+        state::save_to(&path, &chosen(berlin())).unwrap();
         let mut app = App::new();
-        let stale = app.initial_fetch();
-        let current = app.initial_fetch();
+        let stale = app.startup_request();
+        let current = app.startup_request();
 
-        assert_eq!(accept_message(&mut app, loaded(stale), &path), None);
+        assert_eq!(accept_message(&mut app, loaded(stale), &path).1, None);
         let Request::Fetch { id, .. } = current else {
             panic!("not a fetch")
         };
@@ -329,10 +583,11 @@ mod tests {
                     error: "offline".to_string(),
                 },
                 &path,
-            ),
+            )
+            .1,
             None
         );
-        assert_eq!(state::load_from(&path).unwrap(), Some(berlin()));
+        assert_eq!(state::load_from(&path).unwrap(), Some(chosen(berlin())));
     }
 
     #[test]

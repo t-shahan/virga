@@ -1,11 +1,12 @@
 use crate::weather::dto::AqiDto;
 use crate::weather::dto::ForecastDto;
+use crate::weather::dto::GeoIpDto;
 use crate::weather::dto::GeocodeDto;
 use crate::weather::dto::GeocodeResultDto;
 use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -21,6 +22,12 @@ const TIMEOUT_GLOBAL: Duration = Duration::from_secs(15);
 /// saying so.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
 
+/// Detection sits in front of the first frame of weather, so its budget is
+/// tighter than the forecast's. A provider having a bad day should cost a
+/// moment and a fallback, not fifteen seconds of "locating...".
+const TIMEOUT_GEOIP_GLOBAL: Duration = Duration::from_secs(5);
+const TIMEOUT_GEOIP_CONNECT: Duration = Duration::from_secs(3);
+
 /// One shared agent for the whole process. `ureq::get()` builds a fresh Agent
 /// per call, and a fresh Agent means a fresh connection pool — so every request
 /// re-paid a full TCP + TLS handshake. Measured against Open-Meteo that was
@@ -29,6 +36,14 @@ const TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
 fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| bounded_agent(TIMEOUT_GLOBAL, TIMEOUT_CONNECT))
+}
+
+/// Its own agent rather than the shared one: this is a different host with a
+/// different budget, and pooling a connection to it would gain nothing — the
+/// app talks to it once, at launch, and never again.
+fn geoip_agent() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
+    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GEOIP_GLOBAL, TIMEOUT_GEOIP_CONNECT))
 }
 
 fn bounded_agent(global: Duration, connect: Duration) -> Agent {
@@ -52,6 +67,10 @@ pub struct Endpoints {
     pub forecast: String,
     pub geocode: String,
     pub air_quality: String,
+    /// The one host here that is not Open-Meteo. HTTPS and no API key, because
+    /// the request's only identifying content is the connection's own source
+    /// address and it should not cross the network in the clear.
+    pub geoip: String,
 }
 
 impl Default for Endpoints {
@@ -60,8 +79,22 @@ impl Default for Endpoints {
             forecast: "https://api.open-meteo.com/v1/forecast".to_string(),
             geocode: "https://geocoding-api.open-meteo.com/v1/search".to_string(),
             air_quality: "https://air-quality-api.open-meteo.com/v1/air-quality".to_string(),
+            geoip: "https://ipapi.co/json/".to_string(),
         }
     }
+}
+
+/// Where the caller is, as far as their IP address gives them away.
+pub fn detect_location() -> Result<Location> {
+    detect_location_with(geoip_agent(), &Endpoints::default())
+}
+
+fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location> {
+    let mut response = agent.get(&endpoints.geoip).call()?;
+    let dto: GeoIpDto = response.body_mut().read_json()?;
+
+    dto.into_location()
+        .context("the location service did not name a place")
 }
 
 pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
@@ -220,7 +253,8 @@ mod tests {
         Endpoints {
             forecast: base.clone(),
             geocode: base.clone(),
-            air_quality: base,
+            air_quality: base.clone(),
+            geoip: base,
         }
     }
 
@@ -298,6 +332,115 @@ mod tests {
             weather.daily.iter().all(|d| d.aqi.is_none()),
             "and no day should carry one either"
         );
+    }
+
+    const DETECTED: &str = r#"{"city":"Reykjavík","region":"Capital Region",
+        "country_name":"Iceland","latitude":64.14659,"longitude":-21.94223}"#;
+
+    #[test]
+    fn a_detection_becomes_a_labelled_location() {
+        let endpoints = serving("200 OK", "application/json", DETECTED);
+        let found = detect_location_with(&test_agent(), &endpoints).expect("a detection");
+
+        assert_eq!(found.label(), "Reykjavík, Capital Region, Iceland");
+        assert_eq!(found.lat, 64.14659);
+        assert_eq!(found.lon, -21.94223);
+    }
+
+    /// The provider reports rate limiting and reserved addresses as a *200*
+    /// carrying an error object. Read loosely that body has no coordinates, and
+    /// "no coordinates" read loosely is `0, 0` — so what this guards against is
+    /// launching in the Gulf of Guinea rather than launching with an error.
+    #[test]
+    fn an_error_object_with_a_200_is_not_a_location() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            r#"{"error":true,"reason":"RateLimited","latitude":0,"longitude":0}"#,
+        );
+
+        assert!(detect_location_with(&test_agent(), &endpoints).is_err());
+    }
+
+    #[test]
+    fn unusable_detections_are_failures_rather_than_places() {
+        for (name, status, content_type, body) in [
+            (
+                "rate-limited",
+                "429 Too Many Requests",
+                "text/plain",
+                "slow down",
+            ),
+            ("captive-portal", "200 OK", "text/html", CAPTIVE_PORTAL),
+            (
+                "no-coordinates",
+                "200 OK",
+                "application/json",
+                r#"{"city":"Nowhere"}"#,
+            ),
+            (
+                "null-island",
+                "200 OK",
+                "application/json",
+                r#"{"city":"Nowhere","latitude":0,"longitude":0}"#,
+            ),
+            (
+                "nameless",
+                "200 OK",
+                "application/json",
+                r#"{"latitude":64.14659,"longitude":-21.94223}"#,
+            ),
+            (
+                "out-of-range",
+                "200 OK",
+                "application/json",
+                r#"{"city":"Nowhere","latitude":91.0,"longitude":0.0}"#,
+            ),
+        ] {
+            let endpoints = serving(status, content_type, body);
+            assert!(
+                detect_location_with(&test_agent(), &endpoints).is_err(),
+                "{name} was accepted as a location"
+            );
+        }
+    }
+
+    /// Partial answers are the common case — a mobile network resolves to a
+    /// country and no city more often than it resolves to nothing — and a place
+    /// with a coarse name still beats New York.
+    #[test]
+    fn a_partial_detection_still_names_somewhere() {
+        for (body, expected) in [
+            (
+                r#"{"region":"Capital Region","country_name":"Iceland","latitude":64.1,"longitude":-21.9}"#,
+                "Capital Region, Iceland",
+            ),
+            (
+                r#"{"country_name":"Iceland","latitude":64.1,"longitude":-21.9}"#,
+                "Iceland",
+            ),
+            (
+                r#"{"city":"Reykjavík","latitude":64.1,"longitude":-21.9}"#,
+                "Reykjavík",
+            ),
+        ] {
+            let endpoints = serving("200 OK", "application/json", body);
+            let found = detect_location_with(&test_agent(), &endpoints).expect("a detection");
+
+            assert_eq!(found.label(), expected);
+        }
+    }
+
+    /// The lookup runs before the first frame of weather, so its budget has to
+    /// be the tighter of the two — not merely declared nearby.
+    #[test]
+    fn the_detection_agent_is_bounded_more_tightly_than_the_weather_agent() {
+        let timeouts = geoip_agent().config().timeouts();
+
+        assert_eq!(timeouts.global, Some(TIMEOUT_GEOIP_GLOBAL));
+        assert_eq!(timeouts.connect, Some(TIMEOUT_GEOIP_CONNECT));
+        assert!(TIMEOUT_GEOIP_GLOBAL < TIMEOUT_GLOBAL);
+        assert!(TIMEOUT_GEOIP_CONNECT < TIMEOUT_GEOIP_GLOBAL);
     }
 
     #[test]
@@ -406,6 +549,31 @@ mod live {
         assert!(
             covered > 15,
             "expected most of the window covered, got {covered}"
+        );
+    }
+
+    /// The detection provider is not Open-Meteo and is not covered by anything
+    /// in CI, so a field rename at their end would show up as everyone quietly
+    /// launching in New York. An operational smoke test, not a contract — it
+    /// prints what it resolved so a human can see whether it is plausible.
+    #[test]
+    #[ignore]
+    fn real_detection_names_somewhere_plausible() {
+        let found = detect_location().expect("detect");
+
+        println!(
+            "detected: {} at {}, {}",
+            found.label(),
+            found.lat,
+            found.lon
+        );
+
+        assert!(!found.label().trim().is_empty());
+        assert!((-90.0..=90.0).contains(&found.lat));
+        assert!((-180.0..=180.0).contains(&found.lon));
+        assert!(
+            found.lat != 0.0 || found.lon != 0.0,
+            "Null Island is not a plausible answer"
         );
     }
 

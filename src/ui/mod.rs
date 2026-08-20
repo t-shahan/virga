@@ -146,8 +146,8 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
                 frame,
                 area,
                 palette,
-                "Loading",
-                &format!("{} fetching...", spinner(app.tick)),
+                loading_title(app),
+                &format!("{} {}", spinner(app.tick), loading_verb(app)),
             ),
             Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
@@ -158,8 +158,8 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
                 frame,
                 area,
                 palette,
-                "Loading",
-                &format!("{} fetching...", spinner(app.tick)),
+                loading_title(app),
+                &format!("{} {}", spinner(app.tick), loading_verb(app)),
             ),
             Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
@@ -167,6 +167,25 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         Screen::Search => search_render(frame, app, palette, area),
     }
     keybind_legend_render(frame, app, palette, legend_area);
+}
+
+/// The first launch of the day can spend a round trip working out where the
+/// user is before it has any weather to ask for. Saying so is the difference
+/// between a step and a forecast that is taking suspiciously long.
+fn loading_title(app: &App) -> &'static str {
+    if app.is_locating() {
+        "Locating"
+    } else {
+        "Loading"
+    }
+}
+
+fn loading_verb(app: &App) -> &'static str {
+    if app.is_locating() {
+        "locating..."
+    } else {
+        "fetching..."
+    }
 }
 
 fn too_small_render(frame: &mut Frame, area: Rect, palette: Palette) {
@@ -256,6 +275,18 @@ mod tests {
         app
     }
 
+    /// A first run, one moment in: the detection issued and nothing back yet.
+    fn locating(screen: Screen) -> App {
+        let mut app = App::with_startup(crate::app::Startup {
+            location: crate::app::ActiveLocation::default(),
+            source: crate::app::LocationSource::Fallback,
+            detect: true,
+        });
+        let _ = app.startup_request();
+        app.screen = screen;
+        app
+    }
+
     fn found() -> Vec<Location> {
         vec![
             Location {
@@ -295,6 +326,7 @@ mod tests {
                 };
                 states.push((format!("{screen:?}/{name}"), app));
             }
+            states.push((format!("{screen:?}/locating"), locating(screen)));
         }
 
         // The search box floats over a loaded screen, so the weather stays
@@ -318,6 +350,25 @@ mod tests {
         }
 
         states
+    }
+
+    /// A first launch can spend a round trip working out where the user is
+    /// before it has anywhere to fetch weather for. Both steps are a spinner
+    /// over an empty screen, so if they said the same thing the first would
+    /// look like a forecast taking suspiciously long.
+    #[test]
+    fn the_first_step_says_it_is_locating_rather_than_fetching() {
+        for screen in [Screen::Weather, Screen::Precipitation] {
+            let locating = drawn(&locating(screen), probe(), 60, 24);
+            let text = symbols(&locating, 60, 24).join("");
+            assert!(text.contains("locating"), "{screen:?}: {text}");
+
+            let mut fetching = ready(screen);
+            fetching.weather = Fetch::Loading;
+            let fetching = drawn(&fetching, probe(), 60, 24);
+            let text = symbols(&fetching, 60, 24).join("");
+            assert!(text.contains("fetching"), "{screen:?}: {text}");
+        }
     }
 
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
