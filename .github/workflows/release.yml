@@ -243,24 +243,47 @@ jobs:
     if: needs.verify.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     env:
+      # An SSH deploy key rather than a personal access token: a deploy key
+      # grants write to exactly one repository, cannot reach anything else in
+      # the account, and does not expire and quietly stop working.
+      #
       # Secrets cannot be read from a job-level `if`, so the gate is a step
-      # condition on this. Missing token means skip, not fail: the release
-      # itself succeeded and the tap can be filled in later.
-      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+      # condition on this. A missing key means skip, not fail: the release
+      # itself succeeded, and the tap can be filled in later.
+      TAP_KEY: ${{ secrets.TAP_KEY }}
     steps:
-      - name: no tap token
-        if: env.TAP_TOKEN == ''
-        run: echo "::warning::TAP_TOKEN is not set, so the Homebrew tap was left alone."
+      - name: no tap key
+        if: env.TAP_KEY == ''
+        run: echo "::warning::TAP_KEY is not set, so the Homebrew tap was left alone."
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: env.TAP_TOKEN != ''
-        with:
-          repository: ${{ github.repository_owner }}/homebrew-tap
-          token: ${{ secrets.TAP_TOKEN }}
-          path: tap
+      - name: authenticate to the tap
+        if: env.TAP_KEY != ''
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$TAP_KEY" > ~/.ssh/tap
+          chmod 600 ~/.ssh/tap
+
+          # GitHub's published host key, pinned rather than collected with
+          # ssh-keyscan: accepting whatever answers on first contact is not a
+          # check. Compare against https://api.github.com/meta if it changes.
+          cat > ~/.ssh/known_hosts <<'HOSTKEY'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          HOSTKEY
+
+          # IdentitiesOnly stops ssh from offering any other key the runner may
+          # happen to have loaded.
+          echo "GIT_SSH_COMMAND=ssh -i ~/.ssh/tap -o IdentitiesOnly=yes" >> "$GITHUB_ENV"
+
+      - name: clone the tap
+        if: env.TAP_KEY != ''
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: git clone --depth 1 "git@github.com:${OWNER}/homebrew-tap.git" tap
 
       - name: write the formula
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify.outputs.tag }}
@@ -343,7 +366,7 @@ jobs:
           FORMULA
 
       - name: push the formula
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         working-directory: tap
         env:
           VERSION: ${{ needs.verify.outputs.version }}

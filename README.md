@@ -312,10 +312,12 @@ It checks the working tree, bumps the manifest, runs the four gates above, then
 commits, tags, and pushes. From there
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds all five
 platforms, publishes the release with checksums and build provenance, and
-updates the Homebrew tap. The one-time setup it depends on is a `TAP_TOKEN`
-secret holding a fine-grained token with `contents: write` on the tap
-repository; without it the release still publishes and the tap update is skipped
-with a warning.
+updates the Homebrew tap. The tap push authenticates with a `TAP_KEY` secret
+holding an SSH private key whose public half is a write-enabled deploy key on
+[the tap repository](https://github.com/t-shahan/homebrew-tap). A deploy key
+rather than a personal access token, because it grants write to that one
+repository and nothing else, and does not expire. Without the secret the release
+still publishes and only the tap update is skipped, with a warning.
 
 ## Limitations
 
