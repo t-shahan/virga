@@ -291,6 +291,16 @@ jobs:
           linux_arm=$(digest aarch64-unknown-linux-musl)
           linux_intel=$(digest x86_64-unknown-linux-musl)
 
+          # `exit 1` inside $( ) leaves the subshell, not this script, so the
+          # aborts above only work because of `set -e`. Checked again here so
+          # that an empty sha256 cannot reach the tap if that ever changes.
+          if [ -z "$macos_arm" ] || [ -z "$macos_intel" ] \
+            || [ -z "$linux_arm" ] || [ -z "$linux_intel" ]; then
+            echo "::error::SHA256SUMS for $TAG is missing a tarball checksum." >&2
+            cat sums >&2
+            exit 1
+          fi
+
           base="https://github.com/${REPOSITORY}/releases/download/${TAG}"
           mkdir -p tap/Formula
           cat > tap/Formula/virga.rb <<FORMULA
