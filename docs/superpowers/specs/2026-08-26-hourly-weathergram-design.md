@@ -149,7 +149,10 @@ logic used by Ratatui. They group WMO weather codes as follows:
 | Rain / freezing rain / showers | 61, 63, 65, 66, 67, 80, 81, 82 | `│` |
 | Snow / snow grains / snow showers | 71, 73, 75, 77, 85, 86 | `*` |
 | Thunderstorm | 95, 96, 99 | `ϟ` |
-| Missing or unknown | any other value | `?` |
+| Unknown reported code | any other numeric value | `?` |
+
+A missing code renders a blank cell. Missing means the provider made no claim;
+`?` means it reported a numeric code Virga does not recognize.
 
 The selected-hour inspector always spells out the condition, so the compact
 symbols support pattern recognition without becoming the only explanation.
