@@ -20,7 +20,7 @@ pub enum Action {
     /// is on screen.
     CycleTheme,
     OpenSearch,
-    OpenPrecipitation,
+    OpenHourly,
     PrevDay,
     NextDay,
     Today,
@@ -94,13 +94,13 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Char('u') => Some(Action::ToggleUnits),
             KeyCode::Char('t') => Some(Action::CycleTheme),
             KeyCode::Char('l') => Some(Action::OpenSearch),
-            KeyCode::Char('p') => Some(Action::OpenPrecipitation),
+            KeyCode::Char('p') => Some(Action::OpenHourly),
             KeyCode::Left => Some(Action::PrevDay),
             KeyCode::Right => Some(Action::NextDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Today),
             _ => None,
         },
-        Screen::Precipitation => match key.code {
+        Screen::Hourly => match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
             // `p` closes the screen as well as opening it, so the key that got
             // you here is always a way back out.
@@ -152,7 +152,7 @@ mod tests {
         key
     }
 
-    const SCREENS: [Screen; 3] = [Screen::Weather, Screen::Precipitation, Screen::Search];
+    const SCREENS: [Screen; 3] = [Screen::Weather, Screen::Hourly, Screen::Search];
 
     /// The Windows backend reports a release for every press. Acting on both
     /// types every character twice and fires every action twice.
@@ -199,7 +199,7 @@ mod tests {
             Some(Action::PrevDay)
         );
         assert_eq!(
-            repeat(KeyCode::Up, Screen::Precipitation),
+            repeat(KeyCode::Up, Screen::Hourly),
             Some(Action::PrevHourDay)
         );
         assert_eq!(
@@ -218,10 +218,10 @@ mod tests {
             // Six palettes go past in well under a second on key repeat, and
             // the one you wanted is not the one you land on.
             (KeyCode::Char('t'), Screen::Weather),
-            (KeyCode::Char('t'), Screen::Precipitation),
+            (KeyCode::Char('t'), Screen::Hourly),
             (KeyCode::Char('p'), Screen::Weather),
             (KeyCode::Char('q'), Screen::Weather),
-            (KeyCode::Char('r'), Screen::Precipitation),
+            (KeyCode::Char('r'), Screen::Hourly),
             (KeyCode::Enter, Screen::Search),
             (KeyCode::Esc, Screen::Search),
         ] {
@@ -289,7 +289,7 @@ mod tests {
             Some(Action::PrevDay)
         );
         assert_eq!(
-            action_for(press(KeyCode::Left), Screen::Precipitation),
+            action_for(press(KeyCode::Left), Screen::Hourly),
             Some(Action::PrevHour)
         );
         assert_eq!(
@@ -303,11 +303,11 @@ mod tests {
     #[test]
     fn the_day_arrows_point_the_way_the_week_strip_reads() {
         assert_eq!(
-            action_for(press(KeyCode::Up), Screen::Precipitation),
+            action_for(press(KeyCode::Up), Screen::Hourly),
             Some(Action::PrevHourDay)
         );
         assert_eq!(
-            action_for(press(KeyCode::Down), Screen::Precipitation),
+            action_for(press(KeyCode::Down), Screen::Hourly),
             Some(Action::NextHourDay)
         );
     }
@@ -321,7 +321,7 @@ mod tests {
             Some(Action::Quit)
         );
         assert_eq!(
-            action_for(press(KeyCode::Esc), Screen::Precipitation),
+            action_for(press(KeyCode::Esc), Screen::Hourly),
             Some(Action::Back)
         );
         assert_eq!(
@@ -334,7 +334,7 @@ mod tests {
     /// screen that shows the weather — the same way `r` and `u` already do.
     #[test]
     fn t_cycles_the_theme_from_both_weather_screens() {
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             assert_eq!(
                 action_for(press(KeyCode::Char('t')), screen),
                 Some(Action::CycleTheme),
@@ -344,20 +344,20 @@ mod tests {
     }
 
     #[test]
-    fn p_both_opens_and_closes_the_precipitation_screen() {
+    fn p_both_opens_and_closes_the_hourly_screen() {
         assert_eq!(
             action_for(press(KeyCode::Char('p')), Screen::Weather),
-            Some(Action::OpenPrecipitation)
+            Some(Action::OpenHourly)
         );
         assert_eq!(
-            action_for(press(KeyCode::Char('p')), Screen::Precipitation),
+            action_for(press(KeyCode::Char('p')), Screen::Hourly),
             Some(Action::Back)
         );
     }
 
     #[test]
     fn unbound_keys_are_ignored_rather_than_guessed_at() {
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             assert_eq!(action_for(press(KeyCode::Tab), screen), None);
             assert_eq!(action_for(press(KeyCode::F(5)), screen), None);
         }

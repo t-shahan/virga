@@ -17,7 +17,7 @@ pub enum Fetch<T> {
 pub enum Screen {
     Weather,
     Search,
-    Precipitation,
+    Hourly,
 }
 
 /// How far the vertical arrows jump. Eight days is a long way at one press
@@ -164,7 +164,7 @@ pub struct App {
     /// Set by `Action::Quit`; the event loop reads it and stops.
     pub should_quit: bool,
     /// The screen the search was opened from, and the one leaving it returns
-    /// to. Searching from the precipitation screen used to land you on the
+    /// to. Searching from the hourly screen used to land you on the
     /// weather screen regardless.
     search_return: Screen,
     /// When the palette's name stops being shown beside `t` on the key bar.
@@ -260,8 +260,8 @@ impl App {
                 self.theme_readout_until = Some(Instant::now() + THEME_READOUT);
             }
             Action::OpenSearch => self.open_search(),
-            Action::OpenPrecipitation => {
-                self.screen = Screen::Precipitation;
+            Action::OpenHourly => {
+                self.screen = Screen::Hourly;
                 self.select_now();
             }
             Action::PrevDay => self.select_prev_day(),
@@ -761,7 +761,7 @@ mod tests {
     #[test]
     fn cycling_the_theme_changes_nothing_else() {
         let mut app = app_with(22, 14);
-        app.screen = Screen::Precipitation;
+        app.screen = Screen::Hourly;
         app.selected_hour = 7;
 
         let before = app.theme;
@@ -769,7 +769,7 @@ mod tests {
 
         assert!(request.is_none(), "a theme change asked for a fetch");
         assert_eq!(app.theme, before.next());
-        assert_eq!(app.screen, Screen::Precipitation);
+        assert_eq!(app.screen, Screen::Hourly);
         assert_eq!(app.selected_day, 14);
         assert_eq!(app.selected_hour, 7);
         assert_eq!(app.unit, Unit::Imperial);
@@ -1800,10 +1800,10 @@ mod tests {
     }
 
     /// Searching is a detour. Whichever screen you left, that is where
-    /// choosing a city puts you back — the precipitation screen included.
+    /// choosing a city puts you back — the hourly screen included.
     #[test]
     fn choosing_a_city_returns_to_the_screen_the_search_began_on() {
-        for origin in [Screen::Weather, Screen::Precipitation] {
+        for origin in [Screen::Weather, Screen::Hourly] {
             let mut app = app_with(22, 14);
             app.screen = origin;
 
@@ -1820,13 +1820,13 @@ mod tests {
     #[test]
     fn abandoning_the_search_returns_there_too() {
         let mut app = app_with(22, 14);
-        app.screen = Screen::Precipitation;
+        app.screen = Screen::Hourly;
 
         app.open_search();
         app.query.push('b');
         app.close_search();
 
-        assert_eq!(app.screen, Screen::Precipitation);
+        assert_eq!(app.screen, Screen::Hourly);
     }
 
     /// Opening the search twice must not leave the second visit pointing at
@@ -1839,10 +1839,10 @@ mod tests {
         app.open_search();
         app.close_search();
 
-        app.screen = Screen::Precipitation;
+        app.screen = Screen::Hourly;
         app.open_search();
         app.close_search();
-        assert_eq!(app.screen, Screen::Precipitation);
+        assert_eq!(app.screen, Screen::Hourly);
     }
 
     /// A fresh search starts empty. Leaving results from the last one in place

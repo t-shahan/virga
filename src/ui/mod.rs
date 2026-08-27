@@ -152,7 +152,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
         },
-        Screen::Precipitation => match &app.weather {
+        Screen::Hourly => match &app.weather {
             Fetch::Ready(_) => precip_render(frame, app, palette, content),
             Fetch::Loading => popup_render(
                 frame,
@@ -315,7 +315,7 @@ mod tests {
     fn states() -> Vec<(String, App)> {
         let mut states = Vec::new();
 
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             for name in ["ready", "loading", "failed", "idle"] {
                 let mut app = ready(screen);
                 app.weather = match name {
@@ -358,7 +358,7 @@ mod tests {
     /// look like a forecast taking suspiciously long.
     #[test]
     fn the_first_step_says_it_is_locating_rather_than_fetching() {
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             let locating = drawn(&locating(screen), probe(), 60, 24);
             let text = symbols(&locating, 60, 24).join("");
             assert!(text.contains("locating"), "{screen:?}: {text}");
@@ -598,7 +598,7 @@ mod tests {
         let probe = probe();
         let allowed = [probe.accent, probe.selection, probe.now];
 
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             let app = ready(screen);
             let buffer = drawn(&app, probe, 120, 40);
             let mut saw_accent = false;

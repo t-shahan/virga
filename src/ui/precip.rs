@@ -460,7 +460,7 @@ mod tests {
         weather.now_hour = 0;
 
         let mut app = App::new();
-        app.screen = Screen::Precipitation;
+        app.screen = Screen::Hourly;
         app.location = ActiveLocation {
             label: CITY.to_string(),
             ..Default::default()
