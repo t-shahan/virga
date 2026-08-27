@@ -82,16 +82,16 @@ jobs:
           fi
 
           if [ "$breaking" = true ] && [ "$major" -gt 0 ]; then
-            bump=major
+            bump="major"
           elif [ "$breaking" = true ] \
             || printf '%s\n' "$subjects" | grep -qE '^feat(\([^)]*\))?!?:'; then
             # While the major version is 0 a breaking change is a minor bump,
             # which is the policy CHANGELOG.md already states.
-            bump=minor
+            bump="minor"
           elif printf '%s\n' "$subjects" | grep -qE '^(fix|perf)(\([^)]*\))?!?:'; then
-            bump=patch
+            bump="patch"
           else
-            bump=none
+            bump="none"
           fi
 
           case "$bump" in
