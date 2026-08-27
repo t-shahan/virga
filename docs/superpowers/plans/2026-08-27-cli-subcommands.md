@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `virga theme [name]` (list themes / persist a startup default) and `virga update` (check the latest release, answer with an install-method-matched instruction), per `docs/superpowers/specs/2026-08-27-cli-subcommands-design.md`.
+**Goal:** Add `virga theme [name]` (list themes / persist a startup default), `virga update` (check the latest release, answer with an install-method-matched instruction), and a startup notice — the TUI probes for a newer release in the background and shows one dismissible muted line when it finds one — per `docs/superpowers/specs/2026-08-27-cli-subcommands-design.md`.
 
-**Architecture:** A new `cli` module owns the grammar, moved out of `main.rs`. A new `update` module owns the release probe, with everything but one HTTP call a pure function. `state` grows an optional `theme` field with merge-preserving saves. `theme.rs` is reused, not changed. `main` dispatches subcommands before the terminal, the network, or the state file are touched.
+**Architecture:** A new `cli` module owns the grammar, moved out of `main.rs`. A new `update` module owns the release probe, with everything but one HTTP call a pure function; the subcommand and the startup notice are the same probe called from two places. `state` grows an optional `theme` field with merge-preserving saves. `theme.rs` is reused, not changed. `main` dispatches subcommands before the terminal, the network, or the state file are touched. The startup probe runs on a one-shot thread feeding the existing message channel — never the serial request queue.
 
 **Tech Stack:** Rust 2024, the existing dependency set (ureq, serde/serde_json, directories, tempfile, anyhow). No new dependencies.
 
-**Delivery:** Two pull requests. PR 1 is Tasks 1–5 (`virga theme`); PR 2 is Tasks 6–8 (`virga update`). Each stands alone and keeps CI green.
+**Delivery:** Three pull requests. PR 1 is Tasks 1–5 (`virga theme`); PR 2 is Tasks 6–8 (`virga update`); PR 3 is Tasks 9–11 (the startup notice). Each stands alone and keeps CI green.
 
 ## Global Constraints
 
@@ -19,15 +19,20 @@
 - State documents are written at the lowest version that can carry them: version 2 whenever a location is present (with `theme` as an optional field old binaries ignore), version 3 only for a theme with no location. Reads accept versions 1–3; saves are read-merge-write and atomic; a failed write leaves the previous document intact.
 - An unknown persisted theme name warns and is ignored; it must not take the remembered location down with it.
 - Exit codes: 0 answered, 1 operational failure (network, unwritable state), 2 usage error. A typo never falls through into the full-screen application.
-- `virga update` sends nothing but the request itself, and bounds it with the same timeout the weather client uses.
+- `virga update` sends nothing but the request itself, and bounds it with the same timeout the weather client uses. The startup probe is the same request under the same bound.
+- The startup probe never delays first paint, never rides the serial request queue, and fails silently — no network is the notice not appearing, not a warning.
+- The notice renders in the `muted` role, is cleared by the next action without consuming it, and is skipped below the minimum terminal size. `VIRGA_UPDATE=off` skips the probe, with `VIRGA_GEOIP`'s grammar and forgiveness.
 - Keep filesystem access out of `App`, networking out of `state`, and both out of `cli`.
 
 ## File structure
 
 - Create `src/cli.rs`: `Invocation`, `parse_args`, `usage`, and their tests, moved from `main.rs` and extended.
-- Create `src/update.rs`: tag-from-redirect resolution, version comparison, install-method classification, instruction text.
+- Create `src/update.rs`: tag-from-redirect resolution, version comparison, install-method classification, instruction text, notice composition.
 - Modify `src/state.rs`: optional-field document, `Persisted`, `save_location`, `save_theme`, version-3 read/write.
-- Modify `src/main.rs`: module wiring, subcommand dispatch, persisted-theme precedence in `startup_theme`.
+- Modify `src/events.rs`: `Message::UpdateAvailable`, `spawn_update_check`.
+- Modify `src/app.rs`: hold and clear the notice.
+- Modify `src/ui/`: render the notice above the key bar.
+- Modify `src/main.rs`: module wiring, subcommand dispatch, persisted-theme precedence in `startup_theme`, `VIRGA_UPDATE`, probe spawn, exit re-print.
 - Modify `README.md` and `CHANGELOG.md` per task.
 
 ---
@@ -397,6 +402,124 @@ git commit -m "docs: explain the update check"
 
 ---
 
+### Task 9: The background probe
+
+**Files:**
+- Modify: `src/update.rs`, `src/events.rs`, `src/main.rs`
+
+**Interfaces:**
+- Produces: `update::notice(current: &Release, latest: &Release, method: InstallMethod) -> Option<String>` — `None` when current is already newest, else the finished one-line notice text. Pure; shares its instruction wording with Task 7's `report`.
+- Produces: `events::Message::UpdateAvailable { notice: String }`.
+- Produces: `events::spawn_update_check(messages: Sender<Message>, probe: impl FnOnce() -> Option<String> + Send + 'static)` — a one-shot thread that sends at most one message and ends. The probe closure is injected so tests never open a socket.
+- Produces: `checks_enabled(requested: Option<&str>) -> (bool, Option<String>)` in `main.rs` — `VIRGA_UPDATE`, sharing its parsing with `detection_enabled` (extract the common switch-parsing helper rather than copying it a third time).
+
+- [ ] **Step 1: Write failing tests**
+
+```rust
+#[test]
+fn no_newer_release_means_no_notice() {}
+
+#[test]
+fn the_notice_names_both_versions_and_points_at_the_subcommand() {
+    // "update: virga 0.3.0 is available — run `virga update` for how"-shaped,
+    // and short enough for a 34-column terminal to truncate gracefully.
+}
+
+#[test]
+fn the_check_thread_sends_at_most_one_message_and_ends() {
+    // A probe returning Some sends UpdateAvailable; one returning None sends
+    // nothing; either way joining the thread terminates.
+}
+
+#[test]
+fn virga_update_off_skips_the_probe() {
+    // The same table detection_enabled's tests use, against VIRGA_UPDATE.
+}
+```
+
+- [ ] **Step 2: RED**, then **Step 3: Implement**
+
+`spawn_update_check` is a `thread::spawn` around `if let Some(notice) = probe() { let _ = messages.send(...); }` — a send after the app has quit is a dropped receiver, and ignoring that error is the whole shutdown story. In `main`, read `VIRGA_UPDATE` beside `VIRGA_GEOIP` (warning to the ordinary screen, before terminal takeover) and, inside `run`, spawn the check after the worker with a probe that calls `latest_tag` and `notice`. Failure inside the probe is `None`.
+
+- [ ] **Step 4: GREEN**, full gate.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/update.rs src/events.rs src/main.rs
+git commit -m "feat: probe for a newer release in the background"
+```
+
+---
+
+### Task 10: The notice on screen, and off it
+
+**Files:**
+- Modify: `src/app.rs`, `src/ui/` (the key-bar/legend site), `src/cli.rs` (usage text), `src/main.rs`
+
+**Interfaces:**
+- Produces: `App.update_notice: Option<String>`, set by `on_message(UpdateAvailable)`, cleared by the next `on_action` — which still performs the action.
+- Produces: rendering of the notice in the `muted` role on the line above the key bar, only when the terminal is at or above the minimum size.
+- Produces: exit re-print — a notice that was never cleared is printed after `ratatui::restore`, through the same channel warnings already use, so quitting immediately still delivers the news.
+
+- [ ] **Step 1: Write failing tests**
+
+App-level:
+
+```rust
+#[test]
+fn an_update_message_raises_the_notice_and_marks_the_frame_dirty() {}
+
+#[test]
+fn the_next_action_clears_the_notice_and_still_acts() {
+    // A right-arrow while the notice is up both advances the selection and
+    // drops the notice: dismissal must never eat an input.
+}
+
+#[test]
+fn quitting_with_the_notice_unseen_hands_it_back_for_the_ordinary_screen() {}
+```
+
+UI-level, with `TestBackend` like every other rendering test: the notice appears muted above the key bar at a comfortable size; a 34×12 terminal renders without panic and without the notice overwriting the forecast.
+
+- [ ] **Step 2: RED**, then **Step 3: Implement**
+
+One `Option<String>` on `App`, one clear at the top of `on_action`, one conditional line in the layout, one line in `usage()`'s Environment section for `VIRGA_UPDATE`, and the post-restore print in `main` beside the existing warning print.
+
+- [ ] **Step 4: GREEN**, full gate. Manually: run against the real network on an older tag (`VIRGA_VERSION`-style trickery is not available here, so temporarily lower `version` in `Cargo.toml`, run, observe the notice, press a key, quit — then revert).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/app.rs src/ui src/cli.rs src/main.rs
+git commit -m "feat: show a dismissible notice when a newer release exists"
+```
+
+---
+
+### Task 11: Documentation for the startup notice (closes PR 3)
+
+**Files:**
+- Modify: `README.md`, `CHANGELOG.md`
+
+- [ ] **Step 1: README**
+
+- "Updating and removing": the notice is how you find out; `virga update` is how you ask; the table is what you run.
+- Configuration: `VIRGA_UPDATE` joins `VIRGA_THEME` and `VIRGA_GEOIP`.
+- Data and Privacy: on each launch (unless `VIRGA_UPDATE=off`) Virga makes one request to GitHub's release-redirect endpoint, carrying nothing but the request itself; GitHub sees what any HTTPS request shows it. This joins ipapi.co in the list of non-Open-Meteo requests.
+- Limitations: note that the notice is informational — Virga never updates itself.
+
+- [ ] **Step 2: CHANGELOG** under `Unreleased`.
+
+- [ ] **Step 3: Full gate**, then commit:
+
+```bash
+git add README.md CHANGELOG.md
+git commit -m "docs: explain the startup update notice"
+```
+
+---
+
 ## Verification (each PR)
 
 ```bash
@@ -413,3 +536,5 @@ Plus, once per PR, the by-hand pass CI cannot do: run the new subcommands in a r
 1. **Should `t` persist the theme it lands on?** Default: no — `t` is a preview, `virga theme` is the commitment. Reversing later is one `save_theme` call at the `on_action` boundary.
 2. **Exit code for "update available"?** Default: 0 — the command answered. A distinct code (à la `brew outdated`) can be added without breaking exit-0 consumers.
 3. **`virga update --install` for script installs?** Deferred; the design spec records the dependency and risk cost. Nothing in PR 2's shape blocks it.
+4. **Notice as a banner rather than a pop-up box?** Default: banner — a modal would arrive asynchronously under the user's fingers and would rank news above the forecast, and its dismissal keystroke would have to be eaten. If it proves too quiet, a bordered overlay is a `ui` change only; the plumbing is identical.
+5. **Remember dismissals across launches?** Default: no — the notice returns each launch until updated. A `dismissed: "0.3.0"` state field is the follow-up if it nags.
