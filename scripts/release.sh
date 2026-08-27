@@ -85,7 +85,11 @@ awk -v want="## [$release]" -v date="$today" '
 step "cargo fmt --check";                                   cargo fmt --check
 step "cargo clippy";  cargo clippy --all-targets --locked -- -D warnings
 step "cargo test";                     cargo test --locked --all-targets
-step "cargo package";                             cargo package --locked
+# --allow-dirty because the only uncommitted change at this point is the
+# version bump made a few lines above, which is committed immediately after
+# these gates pass. Without it `cargo package` refuses and the script can never
+# reach its own commit.
+step "cargo package";               cargo package --locked --allow-dirty
 
 # --- ship -------------------------------------------------------------------
 
