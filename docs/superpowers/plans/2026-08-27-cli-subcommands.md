@@ -10,6 +10,8 @@
 
 **Delivery:** Three pull requests. PR 1 is Tasks 1–5 (`virga theme`); PR 2 is Tasks 6–8 (`virga update`); PR 3 is Tasks 9–11 (the startup notice). Each stands alone and keeps CI green.
 
+**Status:** PR 1 is implemented on this branch, with two deviations from Task 2 as written: the `update` grammar and the `Invocation::Usage` variant move to PR 2 with the subcommand they serve, so PR 1 ships no words it cannot answer; and `help`/`version` keep the flags' first-argument-wins leniency rather than erroring on trailing arguments — the strictness is only worth its surprise on `update`, where extra arguments could mean an intention the command will not carry out.
+
 ## Global Constraints
 
 - Preserve the Rust 1.88 minimum and the locked dependency graph; add no crates.
