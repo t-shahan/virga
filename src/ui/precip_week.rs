@@ -377,6 +377,11 @@ mod tests {
                     chance: Some(10),
                     code: Some(0),
                     temp_c: Some(20.0),
+                    feels_like_c: Some(19.0),
+                    humidity_pct: Some(55),
+                    wind_kph: Some(10.0),
+                    gust_kph: Some(18.0),
+                    wind_dir_deg: Some(225.0),
                 }
             })
             .collect()

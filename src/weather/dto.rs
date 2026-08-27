@@ -167,6 +167,16 @@ pub struct HourlyDto {
     pub weather_code: Vec<Option<u8>>,
     #[serde(default)]
     pub temperature_2m: Vec<Option<f64>>,
+    #[serde(default)]
+    pub apparent_temperature: Vec<Option<f64>>,
+    #[serde(default)]
+    pub relative_humidity_2m: Vec<Option<u8>>,
+    #[serde(default)]
+    pub wind_speed_10m: Vec<Option<f64>>,
+    #[serde(default)]
+    pub wind_gusts_10m: Vec<Option<f64>>,
+    #[serde(default)]
+    pub wind_direction_10m: Vec<Option<f64>>,
 }
 
 /// `values[i]`, collapsing "index out of range" and "value was null" into the
@@ -234,7 +244,7 @@ impl From<ForecastDto> for Weather {
             .position(|day| day.date == today)
             .unwrap_or_else(|| daily.iter().filter(|day| day.date < today).count());
 
-        // Same index-by-position shape as `daily`, for the same reason: six
+        // Same index-by-position shape as `daily`, for the same reason: many
         // parallel arrays make a zip chain unreadable.
         let hourly: Vec<HourlyForecast> = dto.hourly.map_or_else(Vec::new, |hour| {
             (0..hour.time.len())
@@ -246,6 +256,11 @@ impl From<ForecastDto> for Weather {
                         chance: at(&hour.precipitation_probability, i),
                         code: at(&hour.weather_code, i),
                         temp_c: at(&hour.temperature_2m, i),
+                        feels_like_c: at(&hour.apparent_temperature, i),
+                        humidity_pct: at(&hour.relative_humidity_2m, i),
+                        wind_kph: at(&hour.wind_speed_10m, i),
+                        gust_kph: at(&hour.wind_gusts_10m, i),
+                        wind_dir_deg: at(&hour.wind_direction_10m, i),
                     })
                 })
                 .collect()
@@ -550,8 +565,26 @@ mod tests {
         "precipitation_probability": [5, 40, null, 90],
         "snowfall": [0.0, 0.0, 0.0, 0.7],
         "weather_code": [0, 61, null, 71],
-        "temperature_2m": [18.0, 17.5, null, 16.0]
+        "temperature_2m": [18.0, 17.5, null, 16.0],
+        "apparent_temperature": [17.0, 16.5, null, 15.0],
+        "relative_humidity_2m": [55, 60, null, 70],
+        "wind_speed_10m": [5.0, 10.0, null, 20.0],
+        "wind_gusts_10m": [8.0, 15.0, null, 30.0],
+        "wind_direction_10m": [0.0, 90.0, null, 225.0]
     }"#;
+
+    #[test]
+    fn hourly_conditions_are_mapped_by_timestamp_index() {
+        let weather = with_hourly(FOUR_HOURS);
+        let hour = &weather.hourly[1];
+
+        assert_eq!(hour.time, "2026-08-09T01:00");
+        assert_eq!(hour.feels_like_c, Some(16.5));
+        assert_eq!(hour.humidity_pct, Some(60));
+        assert_eq!(hour.wind_kph, Some(10.0));
+        assert_eq!(hour.gust_kph, Some(15.0));
+        assert_eq!(hour.wind_dir_deg, Some(90.0));
+    }
 
     /// A null reading blanks that one cell. Unlike a daily row there is no
     /// required measurement, so no hour is ever dropped — which is what keeps
@@ -598,6 +631,16 @@ mod tests {
         assert_eq!(weather.now_hour, 0);
         assert!(weather.forecast_hours().is_empty(), "and slices safely");
         assert_eq!(weather.daily.len(), 1, "the daily forecast still arrives");
+
+        let old_fixture = with_hourly(
+            r#"{
+                "time": ["2026-08-09T00:00"],
+                "temperature_2m": [18.0]
+            }"#,
+        );
+        assert_eq!(old_fixture.hourly.len(), 1);
+        assert!(old_fixture.hourly[0].humidity_pct.is_none());
+        assert!(old_fixture.hourly[0].wind_kph.is_none());
     }
 
     /// Arrays shorter than `time` blank the tail rather than truncating the
@@ -618,6 +661,16 @@ mod tests {
         assert_eq!(weather.hourly[1].chance, Some(40));
         assert!(weather.hourly[2].chance.is_none());
         assert!(weather.hourly[2].snow_cm.is_none(), "absent array too");
+
+        let weather = with_hourly(
+            r#"{
+                "time": ["2026-08-09T00:00", "2026-08-09T01:00"],
+                "relative_humidity_2m": [55]
+            }"#,
+        );
+        assert_eq!(weather.hourly.len(), 2);
+        assert_eq!(weather.hourly[0].humidity_pct, Some(55));
+        assert_eq!(weather.hourly[1].humidity_pct, None);
     }
 
     /// The series runs two weeks into the past, so an off-by-one here points
