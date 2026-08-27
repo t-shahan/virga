@@ -12,7 +12,7 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.3.0]
+## [0.3.0] - 2026-08-27
 
 Catppuccin comes back in two flavours, one of them the first palette Virga has
 shipped for a light terminal, and the precipitation screen stops rebuilding its
