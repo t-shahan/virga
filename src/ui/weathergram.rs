@@ -233,6 +233,7 @@ mod tests {
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::style::Color;
 
     #[test]
@@ -311,6 +312,46 @@ mod tests {
             assert!(
                 text.contains('┬'),
                 "current-hour axis mark lost without colour:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_keeps_the_selected_and_current_markers_in_place() {
+        let weather = Weather::fixture(22, 14);
+        let baseline = rendered_buffer_in(
+            &weather,
+            80,
+            FULL_ROWS,
+            3,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+        let selected = marker_coordinates(&baseline, 80, FULL_ROWS, "▲");
+        let current = marker_coordinates(&baseline, 80, FULL_ROWS, "┬");
+
+        for theme in Theme::ALL {
+            let buffer = rendered_buffer_in(
+                &weather,
+                80,
+                FULL_ROWS,
+                3,
+                false,
+                theme.palette(),
+                Unit::Metric,
+            );
+            assert_eq!(
+                marker_coordinates(&buffer, 80, FULL_ROWS, "▲"),
+                selected,
+                "{} moved the selected marker",
+                theme.name()
+            );
+            assert_eq!(
+                marker_coordinates(&buffer, 80, FULL_ROWS, "┬"),
+                current,
+                "{} moved the current-hour marker",
+                theme.name()
             );
         }
     }
@@ -447,6 +488,26 @@ mod tests {
         palette: Palette,
         unit: Unit,
     ) -> String {
+        let buffer = rendered_buffer_in(weather, width, height, selected, compact, palette, unit);
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn rendered_buffer_in(
+        weather: &Weather,
+        width: u16,
+        height: u16,
+        selected: usize,
+        compact: bool,
+        palette: Palette,
+        unit: Unit,
+    ) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
@@ -462,14 +523,21 @@ mod tests {
             })
             .unwrap();
 
-        let buffer = terminal.backend().buffer().clone();
+        terminal.backend().buffer().clone()
+    }
+
+    fn marker_coordinates(
+        buffer: &Buffer,
+        width: u16,
+        height: u16,
+        marker: &str,
+    ) -> Vec<(u16, u16)> {
         (0..height)
-            .map(|y| {
+            .flat_map(|y| {
                 (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
+                    .filter(move |x| buffer[(*x, y)].symbol() == marker)
+                    .map(move |x| (x, y))
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 }

@@ -1003,14 +1003,18 @@ mod tests {
 
     fn rendered(width: u16, height: u16, app: &App) -> String {
         let buffer = rendered_buffer(width, height, app);
+        buffer_text(&buffer, width, height)
+    }
+
+    fn buffer_text(buffer: &Buffer, width: u16, height: u16) -> String {
         (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
+            .map(|y| row_text(buffer, width, y))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn row_text(buffer: &Buffer, width: u16, y: u16) -> String {
+        (0..width).map(|x| buffer[(x, y)].symbol()).collect()
     }
 
     fn rendered_buffer(width: u16, height: u16, app: &App) -> Buffer {
@@ -1019,6 +1023,56 @@ mod tests {
             .draw(|f| hourly_render(f, app, palette(), f.area()))
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn marker_coordinates(
+        buffer: &Buffer,
+        width: u16,
+        height: u16,
+        marker: &str,
+    ) -> Vec<(u16, u16)> {
+        (0..height)
+            .flat_map(|y| {
+                (0..width)
+                    .filter(move |x| buffer[(*x, y)].symbol() == marker)
+                    .map(move |x| (x, y))
+            })
+            .collect()
+    }
+
+    fn track_row(buffer: &Buffer, width: u16, height: u16, label: &str) -> u16 {
+        (0..height)
+            .find(|y| {
+                let line = row_text(buffer, width, *y);
+                let leading = line
+                    .chars()
+                    .take_while(|ch| matches!(ch, ' ' | '│'))
+                    .count();
+                leading <= 3 && line.trim_start_matches([' ', '│']).starts_with(label)
+            })
+            .unwrap_or_else(|| panic!("{label} track missing"))
+    }
+
+    fn track_text(buffer: &Buffer, width: u16, height: u16, label: &str) -> String {
+        let y = track_row(buffer, width, height, label);
+        row_text(buffer, width, y)
+    }
+
+    fn track_glyph_coordinates(
+        buffer: &Buffer,
+        width: u16,
+        height: u16,
+        label: &str,
+        glyphs: &[&str],
+    ) -> Vec<(u16, String)> {
+        let y = track_row(buffer, width, height, label);
+
+        (1..width.saturating_sub(1))
+            .filter_map(|x| {
+                let symbol = buffer[(x, y)].symbol();
+                glyphs.contains(&symbol).then(|| (x, symbol.to_string()))
+            })
+            .collect()
     }
 
     /// Unit conversion may change a number or its suffix, but never the chart
@@ -1146,19 +1200,17 @@ mod tests {
         let mut boundary_values = dry_hours(192);
         for hour in &mut boundary_values {
             hour.temp_c = Some(-5.0);
+            hour.chance = None;
+            hour.wind_dir_deg = None;
         }
-        for (hour, (direction, chance)) in boundary_values.iter_mut().zip([
-            (-45.0, 9),
-            (0.0, 10),
-            (337.5, 29),
-            (360.0, 30),
-            (0.0, 49),
-            (0.0, 50),
-            (0.0, 69),
-            (0.0, 70),
-        ]) {
-            hour.wind_dir_deg = Some(direction);
+        for (hour, chance) in boundary_values
+            .iter_mut()
+            .zip([9, 10, 29, 30, 49, 50, 69, 70])
+        {
             hour.chance = Some(chance);
+        }
+        for (hour, direction) in boundary_values.iter_mut().zip([-45.0, 0.0, 337.5, 360.0]) {
+            hour.wind_dir_deg = Some(direction);
         }
 
         let cases = [
@@ -1176,14 +1228,145 @@ mod tests {
         ];
 
         for (case, hours, selected) in cases {
-            let app = app_showing(hours, selected);
+            let mut app = app_showing(hours, selected);
+            if case == "flat below-zero temperatures and threshold readings" {
+                app.unit = Unit::Metric;
+            }
             for (width, height) in [(34, 12), (80, 24), (100, 24), (120, 30), (200, 50)] {
-                let text = rendered(width, height, &app);
+                let buffer = rendered_buffer(width, height, &app);
+                let text = buffer_text(&buffer, width, height);
                 for label in ["sky", "temp", "rain", "wind"] {
                     assert!(
                         text.contains(label),
                         "{case} at {width}x{height} lost {label}:\n{text}"
                     );
+                }
+
+                if (width, height) != (80, 24) {
+                    continue;
+                }
+
+                match case {
+                    "empty" => {
+                        assert_eq!(marker_coordinates(&buffer, width, height, "▲"), []);
+                        assert_eq!(
+                            marker_coordinates(&buffer, width, height, "┬"),
+                            [(7, 8)],
+                            "the empty chart lost its current-hour axis anchor:\n{text}"
+                        );
+                    }
+                    "one hour" => assert_eq!(
+                        marker_coordinates(&buffer, width, height, "▲"),
+                        [(8, 13)],
+                        "the single hour is not centered in its visible cell:\n{text}"
+                    ),
+                    "first hour" => assert_eq!(
+                        marker_coordinates(&buffer, width, height, "▲"),
+                        [(7, 13)],
+                        "{case} selection is not on the first visible hour:\n{text}"
+                    ),
+                    "page edge" => assert_eq!(
+                        marker_coordinates(&buffer, width, height, "▲"),
+                        [(7, 13)],
+                        "the next page did not begin at its selected hour:\n{text}"
+                    ),
+                    "last hour" => assert_eq!(
+                        marker_coordinates(&buffer, width, height, "▲"),
+                        [(53, 13)],
+                        "the final page did not keep the last hour selected:\n{text}"
+                    ),
+                    "all optional readings missing" => {
+                        for label in ["temp", "rain", "wind"] {
+                            assert!(
+                                track_text(&buffer, width, height, label).contains('—'),
+                                "{label} treated missing readings as data:\n{text}"
+                            );
+                        }
+                        assert!(
+                            track_glyph_coordinates(
+                                &buffer,
+                                width,
+                                height,
+                                "sky",
+                                &["○", "◐", "●", "≡", "┆", "│", "*", "ϟ", "?"]
+                            )
+                            .is_empty(),
+                            "missing conditions drew a weather symbol:\n{text}"
+                        );
+                    }
+                    "flat below-zero temperatures and threshold readings" => {
+                        assert!(
+                            track_text(&buffer, width, height, "temp").contains("-5–-5°C"),
+                            "flat below-zero range changed meaning:\n{text}"
+                        );
+                        assert_eq!(
+                            track_glyph_coordinates(&buffer, width, height, "temp", &["▄"]),
+                            vec![
+                                (7, "▄".to_string()),
+                                (9, "▄".to_string()),
+                                (11, "▄".to_string()),
+                                (13, "▄".to_string()),
+                                (15, "▄".to_string()),
+                                (17, "▄".to_string()),
+                                (19, "▄".to_string()),
+                                (21, "▄".to_string()),
+                                (23, "▄".to_string()),
+                                (25, "▄".to_string()),
+                                (27, "▄".to_string()),
+                                (29, "▄".to_string()),
+                                (31, "▄".to_string()),
+                                (33, "▄".to_string()),
+                                (35, "▄".to_string()),
+                                (37, "▄".to_string()),
+                                (39, "▄".to_string()),
+                                (41, "▄".to_string()),
+                                (43, "▄".to_string()),
+                                (45, "▄".to_string()),
+                                (47, "▄".to_string()),
+                                (49, "▄".to_string()),
+                                (51, "▄".to_string()),
+                                (53, "▄".to_string()),
+                            ],
+                            "flat temperatures did not keep their middle glyphs in every cell:\n{text}"
+                        );
+                        assert_eq!(
+                            track_glyph_coordinates(
+                                &buffer,
+                                width,
+                                height,
+                                "rain",
+                                &["·", "▂", "▄", "▆", "█"]
+                            ),
+                            vec![
+                                (7, "·".to_string()),
+                                (9, "▂".to_string()),
+                                (11, "▂".to_string()),
+                                (13, "▄".to_string()),
+                                (15, "▄".to_string()),
+                                (17, "▆".to_string()),
+                                (19, "▆".to_string()),
+                                (21, "█".to_string()),
+                            ],
+                            "rain thresholds no longer render their visible ramp:\n{text}"
+                        );
+                        assert_eq!(
+                            track_glyph_coordinates(
+                                &buffer,
+                                width,
+                                height,
+                                "wind",
+                                &["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
+                            ),
+                            vec![
+                                (7, "↖".to_string()),
+                                (9, "↑".to_string()),
+                                (11, "↑".to_string()),
+                                (13, "↑".to_string()),
+                            ],
+                            "wind sectors no longer render at their forecast hours:\n{text}"
+                        );
+                    }
+                    _ => unreachable!("unknown boundary case: {case}"),
                 }
             }
         }
