@@ -145,6 +145,9 @@ case ":$PATH:" in
     *)
         printf '\n'
         say "$INSTALL_DIR is not on your PATH. Add it with:"
+        # $PATH must reach the user's rc file literally; expanding it here
+        # would freeze today's PATH into it.
+        # shellcheck disable=SC2016
         printf '\n    echo '"'"'export PATH="%s:$PATH"'"'"' >> ~/.%src\n\n' \
             "$INSTALL_DIR" "$(basename "${SHELL:-sh}")"
         ;;

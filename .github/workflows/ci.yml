@@ -10,10 +10,24 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # A weekly run on an otherwise quiet repository. Advisories are published
+  # against dependencies that have not changed, and stable Rust ships new
+  # clippy lints every six weeks; both should surface here, not on the next
+  # contributor's unrelated pull request.
+  schedule:
+    - cron: '17 6 * * 1'
 
 # CI only ever reads the repository.
 permissions:
   contents: read
+
+# A force-push supersedes the runs on the old head; finishing them proves
+# nothing. Scoped to the ref so pushes to different branches never queue
+# behind each other, and never cancelled on main, where every commit's
+# status is worth keeping.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,6 +88,65 @@ jobs:
           list=$(cargo package --locked --list)
           grep -qx LICENSE-MIT <<<"$list"
           grep -qx LICENSE-APACHE <<<"$list"
+
+  release-target:
+    name: release target (x86_64 musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The test matrix covers the host triples, but what release.yml ships on
+      # Linux is musl, which no pull request otherwise compiles. Building it
+      # here means a dependency that cannot cross-compile — or an LTO failure
+      # only the release profile would hit — is caught in review rather than
+      # discovered by a broken tag.
+      #
+      # One target, not all five: musl is the only triple whose toolchain
+      # differs from a host CI already builds on, so it carries nearly all of
+      # the risk. The setup mirrors release.yml's musl toolchain step; if that
+      # changes, change this to match.
+      - name: musl toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+          {
+            echo "CC_x86_64_unknown_linux_musl=musl-gcc"
+            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc"
+          } >> "$GITHUB_ENV"
+      - run: rustup target add x86_64-unknown-linux-musl
+      # --release on purpose: the release profile enables LTO and a single
+      # codegen unit, which a debug build would leave unexercised.
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # install.sh is piped straight from the repository into strangers'
+      # shells, which makes it the least appropriate file here to leave
+      # unlinted. shellcheck ships preinstalled on the runner image.
+      - run: shellcheck install.sh scripts/release.sh
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # These workflows are mostly inline shell with untrusted-adjacent inputs;
+      # actionlint type-checks the expressions and runs shellcheck over every
+      # run block. Fetched as a release tarball pinned by checksum, for the
+      # same reason every action here is pinned by SHA. Dependabot does not
+      # watch this pin — bump the version and checksum together by hand.
+      - name: fetch actionlint
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          echo "${sha256}  actionlint_${version}_linux_amd64.tar.gz" | sha256sum -c
+          tar xzf "actionlint_${version}_linux_amd64.tar.gz" actionlint
+      - run: ./actionlint -color
 
   audit:
     name: advisories
