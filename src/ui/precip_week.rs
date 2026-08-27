@@ -252,7 +252,7 @@ fn hour_axis_render(frame: &mut Frame, y: u16, grid_x: u16, cell: u16, palette: 
 /// up with every row beneath it.
 ///
 /// The hours are borrowed rather than cloned. The grouping runs on every frame
-/// of the precipitation screen, and cloning put nearly two hundred heap
+/// of the hourly screen, and cloning put nearly two hundred heap
 /// allocations into each one for series the caller already holds.
 pub(super) struct Day<'a> {
     name: String,

@@ -595,7 +595,7 @@ mod live {
     }
 
     /// The hourly block rides the forecast request, so a schema change or a
-    /// dropped parameter would silently empty the precipitation screen rather
+    /// dropped parameter would silently empty the hourly screen rather
     /// than fail anything. An operational smoke test, not a contract.
     #[test]
     #[ignore]

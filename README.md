@@ -5,25 +5,29 @@
 
 Virga is a responsive Rust terminal weather application for current conditions,
 multi-day forecasts, historical context, and hourly precipitation
-visualization. It is powered by Open-Meteo and requires no account or API key.
+conditions visualization. It is powered by Open-Meteo and requires no account
+or API key.
 
 > **Project status: actively developed.** Virga works and is worth installing
 > today. Features and fixes still land, so expect the occasional release.
 > Contributions are welcome.
 
 *Virga* is precipitation that evaporates before it reaches the ground. It is
-also, most weeks, what the precipitation chart draws.
+also, most weeks, what the weathergram charts.
 
 <img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
-## Hourly precipitation
+## Hourly weathergram
 
-Press `p` for the hourly precipitation view. Probability rises above the
-centre rule while forecast amount hangs below it — a tall spike with nothing
-beneath it means “might drizzle”; tall above *and* below means take the
-umbrella.
+Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
+share one clock, so a change in the forecast reads down a column instead of
+across four separate tables. The selected-hour pane gives the exact feels-like
+temperature, humidity, rain or snow amount, wind and gusts, and the following
+24-hour precipitation total.
 
-<img width="2000" height="1285" alt="CleanShot2026-08-12at19 38 47-ezgif com-optimize" src="https://github.com/user-attachments/assets/9f61e32f-d342-4794-b64b-7d1e6efb0a97" />
+The visible horizon adapts from 12 hours on a narrow terminal to as many as 48
+on a wide one. Arrow keys still browse the full eight-day hourly forecast, and
+tall terminals retain the week-long precipitation strip below the weathergram.
 
 ## Highlights
 
@@ -33,8 +37,8 @@ umbrella.
   sunset.
 - **Three weeks of context** — fourteen days of historical highs followed by
   the current forecast, so today does not sit alone.
-- **Hourly precipitation** — mirrored chance and amount, a next-rain countdown,
-  a 24-hour running total, and separate snowfall reporting.
+- **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
+  an adaptive horizon, and an optional weekly precipitation strip.
 - **Fast navigation** — browse days or hours with the arrow keys, jump back to
   now, and inspect the selected period in detail.
 - **Starts where you are** — the opening forecast is for the city your IP
@@ -141,21 +145,19 @@ last location you chose. It lives in the platform's per-user state directory:
 
 | Key | Action |
 |---|---|
-| `←` `→` | Previous / next day — or hour, on the precipitation screen; wraps |
-| `↑` `↓` | Precipitation screen: back / forward a day, keeping the time of day |
+| `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
+| `↑` `↓` | Hourly screen: back / forward a day, keeping the time of day |
 | `n` / `Home` | Jump back to now |
-| `p` | Hourly precipitation — `b`, `Enter` or `Esc` to go back |
+| `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
-The precipitation chart's centre rule marks the current hour (`┬`), the
-selected one (`═`), and midnight (`┼`), so the three stay apart without relying
-on colour. Its two halves show probability and precipitation amount on
-different scales, so their heights are not comparable; the box title carries
-the amount scale.
+The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
+hour, compact condition symbols keep columns readable, and a fixed
+rain-probability ramp makes chance comparable across the visible horizon.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
@@ -194,8 +196,7 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **301 deterministic tests**; three
-provider-dependent live Open-Meteo tests are ignored during normal runs.
+Virga's locked deterministic test suite passes on Linux, macOS, and Windows.
 Coverage includes:
 
 - deterministic rendering checks built with Ratatui's `TestBackend`, including
@@ -335,8 +336,7 @@ still publishes and only the tap update is skipped, with a warning.
 - Terminals below 34×12 show a size warning instead of the interface.
 - “Today” is distinguished by colour alone in the daily chart. The selection
   is not: every screen marks it by shape as well — a `>` in the forecast
-  table's gutter, a `^` under the selected bar, and the precipitation chart's
-  centre rule.
+  table's gutter and a `▲` in the hourly weathergram.
 - Ghostty and Apple's Terminal app have been tested manually on macOS.
 - Automated tests run on Linux, macOS, and Windows. They do not validate
   real-terminal rendering, font fallback, or held-key behavior.

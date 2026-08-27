@@ -107,7 +107,7 @@ pub struct Weather {
 
 impl Weather {
     /// The hourly forecast from this hour onward. The request carries two weeks
-    /// of history for the daily chart's benefit; the precipitation screen looks
+    /// of history for the daily chart's benefit; the hourly screen looks
     /// only forward, so it slices here rather than every caller doing its own
     /// arithmetic on `now_hour`.
     pub fn forecast_hours(&self) -> &[HourlyForecast] {
