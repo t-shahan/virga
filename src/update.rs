@@ -228,13 +228,25 @@ fn instruction(method: &InstallMethod) -> String {
             // `curl` would never reach the script it feeds.
             let run = match install_dir {
                 Some(directory) => {
-                    format!("{script} | VIRGA_INSTALL_DIR={} sh", directory.display())
+                    format!(
+                        "{script} | VIRGA_INSTALL_DIR={} sh",
+                        shell_quoted(directory)
+                    )
                 }
                 None => format!("{script} | sh"),
             };
             format!("Update with the install script, which overwrites in place:\n\n    {run}")
         }
     }
+}
+
+/// POSIX-quote a path for the one command line the answer asks someone to
+/// paste: a space must not split the assignment, and a metacharacter — a
+/// `$(...)` in a directory name — must not execute when it is run. Single
+/// quotes disarm everything but themselves, and an embedded quote becomes
+/// the standard `'\''`.
+fn shell_quoted(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
@@ -518,7 +530,43 @@ mod tests {
 
         let report = report(&current, &latest, &method);
 
-        assert!(report.contains("| VIRGA_INSTALL_DIR=/usr/local/bin sh"));
+        assert!(report.contains("| VIRGA_INSTALL_DIR='/usr/local/bin' sh"));
+    }
+
+    /// The path rides a command people paste into a shell, so it is quoted
+    /// against the shell: a space must not split the assignment, and a
+    /// metacharacter in a directory name must not execute.
+    #[test]
+    fn install_directories_are_quoted_against_the_shell() {
+        let current = Release::parse("0.2.0").unwrap();
+        let latest = Release::parse("0.3.0").unwrap();
+
+        for (directory, expected) in [
+            (
+                "/Users/some one/bin",
+                "VIRGA_INSTALL_DIR='/Users/some one/bin' sh",
+            ),
+            (
+                "/tmp/$(reboot)/bin",
+                "VIRGA_INSTALL_DIR='/tmp/$(reboot)/bin' sh",
+            ),
+            (
+                "/tmp/`reboot`/bin",
+                "VIRGA_INSTALL_DIR='/tmp/`reboot`/bin' sh",
+            ),
+            (
+                "/tmp/it's here/bin",
+                r"VIRGA_INSTALL_DIR='/tmp/it'\''s here/bin' sh",
+            ),
+        ] {
+            let method = InstallMethod::Script {
+                install_dir: Some(PathBuf::from(directory)),
+            };
+
+            let report = report(&current, &latest, &method);
+
+            assert!(report.contains(expected), "{directory}: {report}");
+        }
     }
 }
 

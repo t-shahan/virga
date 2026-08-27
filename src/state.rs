@@ -126,12 +126,37 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     })
 }
 
-/// What the document on disk still has to say, for a save that replaces only
-/// half of it. Errors read as an empty document on purpose: an unreadable
-/// file must not block saving over it — that is how corruption would become
-/// permanent.
-fn surviving(path: &Path) -> Persisted {
-    load_from(path).unwrap_or_default()
+/// The document on disk, if there is one this binary may replace.
+///
+/// A missing or unparseable file reads as `None`: saving over corruption is
+/// the least bad option, since what could not be read is already lost. A
+/// document from a *newer* Virga is neither missing nor broken — this binary
+/// just cannot read it — and writing over it would destroy state the newer
+/// binary still wants, so that save is refused instead.
+///
+/// The document is kept raw rather than parsed into [`Persisted`] so a save
+/// carries forward what it does not understand — above all a theme name from
+/// a newer Virga, which parsing would silently reduce to nothing.
+///
+/// Known gap, accepted for now: two processes saving at once — the TUI
+/// remembering a location while `virga theme` runs — each read, merge, and
+/// replace without a lock, so the later replace can drop the earlier half.
+/// The window is milliseconds, both writers belong to the same user, and the
+/// loss is one re-settable preference. Closing it wants `File::lock`, stable
+/// in Rust 1.89, above the current 1.88 minimum.
+fn surviving_document(path: &Path) -> Result<Option<StateDocument>> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(None);
+    };
+    let Ok(document) = serde_json::from_slice::<StateDocument>(&bytes) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        document.version <= LOCATIONLESS_VERSION,
+        "the state file is version {}, written by a newer virga; refusing to overwrite it",
+        document.version
+    );
+    Ok(Some(document))
 }
 
 pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> {
@@ -144,16 +169,26 @@ pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> 
         "the built-in fallback is not a remembered location"
     );
     validate(location)?;
-    let theme = surviving(path).theme;
+    // The raw name, not the parsed theme: one this binary does not know
+    // still belongs to somebody — a newer Virga, most likely — and
+    // remembering a city must not erase it.
+    let theme = surviving_document(path)?.and_then(|document| document.theme);
     save_document(path, Some(remembered), theme)
 }
 
 pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
-    let remembered = surviving(path).remembered;
-    save_document(path, remembered.as_ref(), Some(theme))
+    // A location that no longer parses was unusable anyway; dropping it is
+    // the one lossy merge here, and it loses nothing that worked.
+    let remembered =
+        surviving_document(path)?.and_then(|document| remembered_of(&document).ok().flatten());
+    save_document(path, remembered.as_ref(), Some(theme.name().to_string()))
 }
 
-fn save_document(path: &Path, remembered: Option<&Remembered>, theme: Option<Theme>) -> Result<()> {
+fn save_document(
+    path: &Path,
+    remembered: Option<&Remembered>,
+    theme: Option<String>,
+) -> Result<()> {
     let version = match remembered {
         Some(_) => VERSION,
         None => LOCATIONLESS_VERSION,
@@ -168,7 +203,7 @@ fn save_document(path: &Path, remembered: Option<&Remembered>, theme: Option<The
             version,
             location: remembered.map(|remembered| remembered.location.clone()),
             source: remembered.map(|remembered| remembered.source),
-            theme: theme.map(|theme| theme.name().to_string()),
+            theme,
         },
     )?;
     use std::io::Write as _;
@@ -517,6 +552,49 @@ mod tests {
         assert!(save_location(&path, &invalid).is_err());
 
         assert_eq!(load_from(&path).unwrap().remembered, Some(previous));
+    }
+
+    /// A theme this binary does not know still belongs to somebody — a newer
+    /// Virga, most likely. Remembering a city must not erase it.
+    #[test]
+    fn an_unknown_theme_survives_a_location_save() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        write_raw(
+            &path,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","theme":"catppuccin frappe"}"#,
+        );
+        let reykjavik = chosen("Reykjavík, Iceland", 64.14659, -21.94223);
+
+        save_location(&path, &reykjavik).unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            body["theme"], "catppuccin frappe",
+            "the unknown theme was erased by an unrelated save"
+        );
+        assert_eq!(load_from(&path).unwrap().remembered, Some(reykjavik));
+    }
+
+    /// A state file from a newer Virga is not this binary's to overwrite:
+    /// both halves refuse rather than replace what they cannot read.
+    #[test]
+    fn a_newer_state_file_refuses_to_be_overwritten() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let body = r#"{"version":4,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","theme":"nocturne"}"#;
+        write_raw(&path, body);
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        assert!(save_theme(&path, Theme::Nord).is_err());
+        assert!(save_location(&path, &berlin).is_err());
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            body.as_bytes(),
+            "the newer document was modified"
+        );
     }
 
     /// A corrupt file must not block saving over it — that is how corruption

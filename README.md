@@ -118,9 +118,9 @@ slower to render.
 
 Virga checks for a newer release once per launch, in the background, and
 shows one muted line above the key bar when it finds one — the next keypress
-clears it, and quitting straight away prints it on the way out instead. Set
-`VIRGA_UPDATE=off` to skip the check; a launch that cannot reach GitHub
-simply shows no notice.
+clears it, and news that arrived before you quit is printed on the way out
+instead. Set `VIRGA_UPDATE=off` to skip the check; a launch that cannot
+reach GitHub — or that quits before GitHub answers — simply shows no notice.
 
 `virga update` asks the same question on demand and, judging from where the
 running binary lives, says which row of this table applies to you. Neither

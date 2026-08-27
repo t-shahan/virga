@@ -254,12 +254,12 @@ impl App {
     /// I/O out here — the caller owns the channel — is what lets every
     /// transition below be tested without a terminal or a network.
     pub fn on_action(&mut self, action: Action) -> Option<Request> {
-        // The notice is dismissed by living: the next key clears it while
-        // still doing whatever it normally does, so it never eats an input.
-        // Quit is the exception — the news is kept, so the event loop can
-        // hand it back for the ordinary screen a straight-to-quit launch
-        // never gave it a frame on.
-        if !matches!(action, Action::Quit) {
+        // The notice is dismissed by living — but only by a key that could
+        // have seen it. The search screen never renders the notice, so keys
+        // pressed there must not silently delete news nobody was shown; and
+        // quit keeps it, so the event loop can hand it back for the ordinary
+        // screen a straight-to-quit launch never gave it a frame on.
+        if !matches!(action, Action::Quit) && self.screen != Screen::Search {
             self.update_notice = None;
         }
         match action {
@@ -2022,6 +2022,28 @@ mod tests {
 
         assert_eq!(app.update_notice, None);
         assert_eq!(app.unit, Unit::Metric, "the keypress still did its work");
+    }
+
+    /// The search screen never renders the notice, so keys pressed there —
+    /// every letter of a city name — must not silently delete news nobody
+    /// was shown. It stands until a screen that shows it has had a key.
+    #[test]
+    fn search_keys_do_not_dismiss_a_notice_nobody_saw() {
+        let mut app = App::new();
+        app.on_action(Action::OpenSearch);
+        app.on_message(news());
+
+        app.on_action(Action::Insert('a'));
+        assert!(app.update_notice.is_some(), "typing deleted hidden news");
+
+        app.on_action(Action::Back);
+        assert!(
+            app.update_notice.is_some(),
+            "leaving search is the first chance to see it"
+        );
+
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(app.update_notice, None, "a key that saw it clears it");
     }
 
     /// A straight-to-quit launch may never give the notice a frame, so quit
