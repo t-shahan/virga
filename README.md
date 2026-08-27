@@ -25,9 +25,10 @@ across four separate tables. The selected-hour pane gives the exact feels-like
 temperature, humidity, rain or snow amount, wind and gusts, and the following
 24-hour precipitation total.
 
-The visible horizon adapts from 12 hours on a narrow terminal to as many as 48
-on a wide one. Arrow keys still browse the full eight-day hourly forecast, and
-tall terminals retain the week-long precipitation strip below the weathergram.
+The visible horizon adapts through 12-, 24-, 36-, and 48-hour tiers as the
+terminal widens. Arrow keys still browse the full eight-day hourly forecast,
+and tall terminals retain the week-long precipitation strip below the
+weathergram.
 
 ## Highlights
 
