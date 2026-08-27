@@ -19,6 +19,13 @@ pub(crate) enum Invocation {
     /// default. The name is everything after `theme` joined with spaces, so
     /// multi-word names need no quoting.
     Theme(Option<String>),
+    /// Check whether a newer release exists and say how to get it.
+    Update,
+    /// A recognized command given arguments it does not take. Strict where
+    /// `--help --version` is lenient, because here the extra words could
+    /// carry an intention — `update --install` asks for something this
+    /// command will not do, and silently checking instead would be a lie.
+    Usage(String),
     /// An argument that means nothing to us. Carried rather than reported here
     /// so the caller owns the exit code and the stream it is written to.
     Unknown(String),
@@ -53,6 +60,13 @@ where
                 .join(" ");
             Invocation::Theme((!name.is_empty()).then_some(name))
         }
+        "update" => match arguments.next() {
+            None => Invocation::Update,
+            Some(extra) => Invocation::Usage(format!(
+                "update takes no arguments, and {:?} is one",
+                extra.as_ref()
+            )),
+        },
         other => Invocation::Unknown(other.to_string()),
     }
 }
@@ -68,6 +82,7 @@ Usage: virga [COMMAND]
 
 Commands:
   theme [NAME]   List the themes, or set the startup default
+  update         Check whether a newer release exists
   help, version  What -h and -V print
 
 Options:
@@ -161,6 +176,17 @@ mod tests {
     }
 
     #[test]
+    fn update_takes_no_arguments() {
+        assert_eq!(parse_args(["update"]), Invocation::Update);
+        // The extra word could carry an intention — an install this command
+        // will not perform — so it is an error, not something to skip past.
+        let Invocation::Usage(complaint) = parse_args(["update", "--install"]) else {
+            panic!("extra arguments after update were not a usage error");
+        };
+        assert!(complaint.contains("--install"));
+    }
+
+    #[test]
     fn a_subcommand_typo_is_still_unknown() {
         assert_eq!(
             parse_args(["them"]),
@@ -178,6 +204,7 @@ mod tests {
         assert!(text.starts_with("virga "));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
         assert!(text.contains("theme"));
+        assert!(text.contains("update"));
         assert!(text.contains("VIRGA_THEME"));
         assert!(text.contains("VIRGA_GEOIP"));
     }

@@ -2,7 +2,7 @@ use crate::app::{ActiveLocation, App, Fetch, LocationSource, Remembered, Screen,
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
 use crate::theme::Theme;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
@@ -19,6 +19,7 @@ mod state;
 mod theme;
 mod ui;
 mod units;
+mod update;
 mod weather;
 
 fn main() -> Result<()> {
@@ -71,6 +72,21 @@ fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Invocation::Update => {
+            match check_for_update() {
+                Ok(answer) => println!("{answer}"),
+                Err(error) => {
+                    eprintln!("virga: could not check the latest release: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Invocation::Usage(complaint) => {
+            eprintln!("virga: {complaint}\n");
+            eprintln!("{}", cli::usage());
+            std::process::exit(2);
         }
         Invocation::Unknown(argument) => {
             eprintln!("virga: unrecognized argument {argument:?}\n");
@@ -281,6 +297,18 @@ fn theme_blurb(theme: Theme) -> &'static str {
         Theme::TokyoNight => "blue and violet, one warm selection",
         Theme::Dracula => "loud — pink bars, lime selection, cyan today",
     }
+}
+
+/// The whole of `virga update`: one probe, one comparison, one answer whose
+/// instruction matches how this copy was installed.
+fn check_for_update() -> Result<String> {
+    let current = update::Release::parse(env!("CARGO_PKG_VERSION"))
+        .context("parse this binary's own version")?;
+    let latest = update::Release::parse(&update::latest_tag(update::RELEASES_URL)?)?;
+    let exe = std::env::current_exe().ok();
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    let method = update::install_method(exe.as_deref(), home.as_deref(), cfg!(windows));
+    Ok(update::report(&current, &latest, &method))
 }
 
 fn theme_set_message(theme: Theme) -> String {
