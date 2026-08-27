@@ -233,6 +233,7 @@ mod tests {
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     #[test]
     fn horizons_are_quantized_from_measured_plot_width() {
@@ -264,8 +265,11 @@ mod tests {
             (Some(0), "·"),
             (Some(9), "·"),
             (Some(10), "▂"),
+            (Some(29), "▂"),
             (Some(30), "▄"),
+            (Some(49), "▄"),
             (Some(50), "▆"),
+            (Some(69), "▆"),
             (Some(70), "█"),
             (Some(100), "█"),
         ] {
@@ -281,7 +285,34 @@ mod tests {
         assert_eq!(wind_symbol(Some(10.0), Some(90.0)), "→");
         assert_eq!(wind_symbol(Some(10.0), Some(225.0)), "↙");
         assert_eq!(wind_symbol(Some(10.0), Some(-45.0)), "↖");
+        assert_eq!(wind_symbol(Some(10.0), Some(337.5)), "↑");
+        assert_eq!(wind_symbol(Some(10.0), Some(360.0)), "↑");
         assert_eq!(wind_symbol(Some(10.0), None), " ");
+    }
+
+    /// The selected hour and the current hour communicate with shapes as well
+    /// as colours, so neither state disappears for a monochrome terminal.
+    #[test]
+    fn selected_and_current_hour_markers_survive_a_monochrome_palette() {
+        let weather = Weather::fixture(22, 14);
+        let monochrome = Palette {
+            accent: Color::Gray,
+            text: Color::Gray,
+            muted: Color::Gray,
+            selection: Color::Gray,
+            now: Color::Gray,
+            error: Color::Gray,
+            border: Color::Gray,
+        };
+
+        for palette in [Theme::default().palette(), monochrome] {
+            let text = rendered_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
+            assert!(text.contains('▲'), "selection lost without colour:\n{text}");
+            assert!(
+                text.contains('┬'),
+                "current-hour axis mark lost without colour:\n{text}"
+            );
+        }
     }
 
     #[test]
@@ -396,15 +427,35 @@ mod tests {
         selected: usize,
         compact: bool,
     ) -> String {
+        rendered_in(
+            weather,
+            width,
+            height,
+            selected,
+            compact,
+            Theme::default().palette(),
+            Unit::Metric,
+        )
+    }
+
+    fn rendered_in(
+        weather: &Weather,
+        width: u16,
+        height: u16,
+        selected: usize,
+        compact: bool,
+        palette: Palette,
+        unit: Unit,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 weathergram_render(
                     frame,
                     weather.forecast_hours(),
-                    Theme::default().palette(),
+                    palette,
                     frame.area(),
-                    Unit::Metric,
+                    unit,
                     selected,
                     compact,
                 )

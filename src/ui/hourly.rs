@@ -589,6 +589,7 @@ mod tests {
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
 
     fn palette() -> Palette {
         Theme::default().palette()
@@ -1001,12 +1002,7 @@ mod tests {
     }
 
     fn rendered(width: u16, height: u16, app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|f| hourly_render(f, app, palette(), f.area()))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer().clone();
+        let buffer = rendered_buffer(width, height, app);
         (0..height)
             .map(|y| {
                 (0..width)
@@ -1015,6 +1011,48 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn rendered_buffer(width: u16, height: u16, app: &App) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| hourly_render(f, app, palette(), f.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Unit conversion may change a number or its suffix, but never the chart
+    /// cell it belongs to. These are the six widths either side of every
+    /// measured horizon boundary (24, 36, and 48 hours).
+    #[test]
+    fn units_never_move_hourly_weathergram_symbols() {
+        for width in [68, 69, 92, 93, 116, 117] {
+            let mut metric = app_showing(dry_hours(192), 24);
+            metric.unit = Unit::Metric;
+            let mut imperial = app_showing(dry_hours(192), 24);
+            imperial.unit = Unit::Imperial;
+
+            let metric = weathergram_symbol_positions(&rendered_buffer(width, 24, &metric), width);
+            let imperial =
+                weathergram_symbol_positions(&rendered_buffer(width, 24, &imperial), width);
+            assert_eq!(
+                metric, imperial,
+                "unit conversion moved a weathergram symbol at {width} columns"
+            );
+        }
+    }
+
+    fn weathergram_symbol_positions(buffer: &Buffer, width: u16) -> Vec<(u16, u16, String)> {
+        (FULL_INSPECTOR_ROWS..FULL_PAIR_ROWS)
+            .flat_map(|y| {
+                (0..width).filter_map(move |x| {
+                    let symbol = buffer[(x, y)].symbol();
+                    ((!symbol.is_ascii() && !matches!(symbol, "°" | "–"))
+                        || matches!(symbol, "*" | "?"))
+                    .then(|| (x, y, symbol.to_string()))
+                })
+            })
+            .collect()
     }
 
     #[test]
@@ -1083,6 +1121,71 @@ mod tests {
         assert_eq!(text.lines().count(), 10);
         for label in ["sky", "temp", "rain", "wind"] {
             assert!(text.contains(label), "lost {label}:\n{text}");
+        }
+    }
+
+    /// Rendering the full state matrix proves the selected-hour inspector and
+    /// weathergram degrade together: an empty forecast, missing readings, and
+    /// every navigation edge still leave the four tracks available.
+    #[test]
+    fn hourly_layout_keeps_tracks_through_boundary_forecasts() {
+        let mut unavailable = dry_hours(192);
+        for hour in &mut unavailable {
+            hour.precip_mm = None;
+            hour.snow_cm = None;
+            hour.chance = None;
+            hour.code = None;
+            hour.temp_c = None;
+            hour.feels_like_c = None;
+            hour.humidity_pct = None;
+            hour.wind_kph = None;
+            hour.gust_kph = None;
+            hour.wind_dir_deg = None;
+        }
+
+        let mut boundary_values = dry_hours(192);
+        for hour in &mut boundary_values {
+            hour.temp_c = Some(-5.0);
+        }
+        for (hour, (direction, chance)) in boundary_values.iter_mut().zip([
+            (-45.0, 9),
+            (0.0, 10),
+            (337.5, 29),
+            (360.0, 30),
+            (0.0, 49),
+            (0.0, 50),
+            (0.0, 69),
+            (0.0, 70),
+        ]) {
+            hour.wind_dir_deg = Some(direction);
+            hour.chance = Some(chance);
+        }
+
+        let cases = [
+            ("empty", dry_hours(0), 0),
+            ("one hour", dry_hours(1), 0),
+            ("first hour", dry_hours(192), 0),
+            ("page edge", dry_hours(192), 24),
+            ("last hour", dry_hours(192), 191),
+            ("all optional readings missing", unavailable, 0),
+            (
+                "flat below-zero temperatures and threshold readings",
+                boundary_values,
+                0,
+            ),
+        ];
+
+        for (case, hours, selected) in cases {
+            let app = app_showing(hours, selected);
+            for (width, height) in [(34, 12), (80, 24), (100, 24), (120, 30), (200, 50)] {
+                let text = rendered(width, height, &app);
+                for label in ["sky", "temp", "rain", "wind"] {
+                    assert!(
+                        text.contains(label),
+                        "{case} at {width}x{height} lost {label}:\n{text}"
+                    );
+                }
+            }
         }
     }
 

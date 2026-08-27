@@ -582,6 +582,34 @@ mod tests {
             .collect();
         assert!(text.contains("feels like"), "the minimum should be usable");
     }
+
+    #[test]
+    fn hourly_screen_is_usable_at_the_declared_minimum() {
+        let app = ready(Screen::Hourly);
+        let buffer = drawn(&app, Theme::default().palette(), MIN_WIDTH, MIN_HEIGHT);
+        let text = symbols(&buffer, MIN_WIDTH, MIN_HEIGHT).join("\n");
+
+        for label in ["sky", "temp", "rain", "wind"] {
+            assert!(text.contains(label), "minimum lost {label}:\n{text}");
+        }
+        assert!(!text.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn hourly_height_tiers_drop_week_before_core_tracks() {
+        let app = ready(Screen::Hourly);
+        let short = symbols(&drawn(&app, Theme::default().palette(), 80, 12), 80, 12).join("\n");
+        let tall = symbols(&drawn(&app, Theme::default().palette(), 100, 30), 100, 30).join("\n");
+
+        assert!(!short.contains("this week"));
+        assert!(tall.contains("this week"));
+        for text in [&short, &tall] {
+            for label in ["sky", "temp", "rain", "wind"] {
+                assert!(text.contains(label), "lost {label}:\n{text}");
+            }
+        }
+    }
+
     /// The complaint this replaced a role for: the bars in both charts were a
     /// colour of their own, so the hero digits and the columns below them read
     /// as two unrelated things rather than one reading at two sizes. They share

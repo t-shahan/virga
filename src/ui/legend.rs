@@ -366,6 +366,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hourly_legend_keeps_exit_keys_within_the_minimum_height_budget() {
+        let app = app_on(Screen::Hourly);
+        assert_eq!(legend_rows(&app, 34), MAX_ROWS);
+
+        let legend = legend_at(34, Screen::Hourly).join(" ");
+        for key in ["[q]", "[b]"] {
+            assert!(
+                legend.contains(key),
+                "minimum-width legend lost {key}: {legend:?}"
+            );
+        }
+    }
+
     /// Two rows is the ceiling however little room there is, or the legend
     /// would start taking rows the chart needs more.
     #[test]
