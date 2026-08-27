@@ -14,6 +14,10 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **`virga update`**: check whether a newer release exists and print how to
+  get it, matched to how this copy was installed — Homebrew, Cargo, the
+  install script, or a download on Windows. One request to GitHub's release
+  redirect answers it; the binary is never replaced in place.
 - **`virga theme`**: list the colour themes and mark the startup default, or
   persist one — `virga theme tokyo night` — so every later launch starts in
   it. The choice is stored in `state.json` beside the remembered location;

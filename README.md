@@ -116,6 +116,10 @@ slower to render.
 
 ### Updating and removing
 
+`virga update` says whether a newer release exists and, judging from where
+the running binary lives, which row of this table applies to you. It never
+replaces the binary itself:
+
 | Installed with | Update | Remove |
 |---|---|---|
 | Homebrew | `brew upgrade virga` | `brew uninstall virga` |
@@ -291,8 +295,9 @@ Unit and theme changes made in the app last for the session.
 
 No option changes how the application runs, since the terminal is the whole
 interface. What the command line answers, it answers without starting up:
-`virga theme` lists or persists the startup palette, and `virga --version` and
-`virga --help` answer what they always have.
+`virga theme` lists or persists the startup palette, `virga update` checks for
+a newer release, and `virga --version` and `virga --help` answer what they
+always have.
 
 ## Contributing
 
@@ -368,6 +373,11 @@ policy](https://ipapi.co/privacy/) for what they retain.
 
 That request is not made at all once you have chosen a city, or with
 `VIRGA_GEOIP=off` set.
+
+Running `virga update` — and nothing else — makes one request to GitHub's
+release-redirect endpoint at github.com, carrying nothing but the request
+itself: no version string, no identifier. The answer is read from a response
+header, and no release page or file is downloaded.
 
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
