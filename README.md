@@ -41,8 +41,8 @@ umbrella.
   address resolves to, and a city you pick yourself replaces it permanently.
 - **City search and live units** — search Open-Meteo's geocoder and switch
   between metric and imperial measurements without restarting.
-- **Terminal-native presentation** — five foreground-only themes and responsive
-  behavior down to a 34×12 terminal.
+- **Terminal-native presentation** — seven foreground-only themes, including
+  one for light backgrounds, and responsive behavior down to a 34×12 terminal.
 
 ## Install
 
@@ -219,7 +219,7 @@ supported version, package-content completeness, and pinned dependency audits.
 
 ## Themes
 
-`t` steps through five palettes from either weather screen. The key bar names
+`t` steps through seven palettes from either weather screen. The key bar names
 the one you land on — `[t] theme (nord)` — and drops the name again a few
 seconds later, so cycling tells you where you are without leaving a permanent
 readout.
@@ -231,12 +231,16 @@ readout.
 | `nord` | Cool throughout — icy bars, aurora-purple selection |
 | `tokyo night` | Blue and violet, with the selection the one warm thing on screen |
 | `dracula` | The loud one — pink bars, lime selection, cyan today |
+| `catppuccin mocha` | Pastel — mauve bars, sky selection, yellow today |
+| `catppuccin latte` | The same scheme in dark ink, for terminals with a light background |
 
 Every palette sets foregrounds only. None paints a background: your terminal's
 own background remains visible, so a theme layers over your existing scheme
-instead of stamping a separate dark rectangle over it.
+instead of stamping a separate dark rectangle over it. That also means a
+palette has to suit the ground it lands on — `catppuccin latte` is the one
+built for a light background, and the others assume a dark one.
 
-The four non-default palettes use 24-bit colour. A terminal without truecolor
+The six non-default palettes use 24-bit colour. A terminal without truecolor
 may approximate or ignore them, which is why `default` is the default: the
 out-of-the-box appearance does not depend on truecolor support.
 

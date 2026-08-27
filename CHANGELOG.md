@@ -14,6 +14,12 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **Catppuccin, in two flavours.** `catppuccin mocha` returns after being cut
+  in 0.2.0, rebuilt around the mauve the scheme is actually known by — pastel
+  purple bars, sky selection, yellow today — instead of the blue that vanished
+  against the terminal default. `catppuccin latte` is the same scheme in dark
+  ink and the first palette built for a light terminal background; every
+  other theme assumes a dark one. Seven themes now.
 - **`virga update`**: check whether a newer release exists and print how to
   get it, matched to how this copy was installed — Homebrew, Cargo, the
   install script, or a download on Windows. One request to GitHub's release
