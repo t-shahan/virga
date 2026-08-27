@@ -742,7 +742,7 @@ mod tests {
     /// A typo in a shell profile must not stop the weather from appearing.
     #[test]
     fn an_unusable_value_falls_back_rather_than_failing() {
-        for value in ["", "  ", "solarized", "Catppuccin Latte"] {
+        for value in ["", "  ", "solarized", "Catppuccin Frappe"] {
             assert_eq!(startup_theme(Some(value)), Theme::default(), "{value:?}");
         }
     }
