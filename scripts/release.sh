@@ -61,6 +61,16 @@ release="${version%%-*}"
 grep -q "^## \[$release\]" CHANGELOG.md \
     || die "CHANGELOG.md has no '## [$release]' section. Write the notes first."
 
+# A heading with no prose under it passes the grep above, tags cleanly, and
+# then fails the release workflow's notes step after five platforms have been
+# built. release-pr.yml opens exactly that empty section on purpose, so the
+# check belongs here. Same extraction release.yml uses.
+awk -v want="## [$release]" '
+    index($0, "## [") == 1 { inside = (index($0, want) == 1); next }
+    inside
+' CHANGELOG.md | grep -q '[^[:space:]]' \
+    || die "CHANGELOG.md's [$release] section has a heading but no notes."
+
 # --- bump ------------------------------------------------------------------
 
 step "setting the version to $version"
