@@ -334,7 +334,6 @@ jobs:
           class Virga < Formula
             desc "Responsive terminal weather app with an hourly precipitation chart"
             homepage "https://github.com/${REPOSITORY}"
-            version "${VERSION}"
             license any_of: ["MIT", "Apache-2.0"]
 
             on_macos do
