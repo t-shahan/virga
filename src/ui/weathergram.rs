@@ -172,7 +172,7 @@ pub(super) fn weathergram_render(
     hour_ticks_render(
         frame,
         Rect::new(plot_x, axis_y, plot_width, 1),
-        visible.iter().map(|hour| hour.time.clone()),
+        visible.iter().map(|hour| hour.time.as_str()),
         window.cell_width,
         palette,
     );

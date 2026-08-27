@@ -1,15 +1,15 @@
-//! The hourly precipitation screen: a detail pane above, the mirrored chart
-//! below. A sibling of `current.rs` rather than a generalisation of it — the
+//! The hourly forecast screen: a selected-hour inspector above a weathergram.
+//! A sibling of `current.rs` rather than a generalisation of it — the
 //! daily pane's border budget, period comparison and hero source are all
 //! specific to it, and merging the two would tangle both.
 
 use crate::app::App;
 use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
-use crate::ui::precip_chart::precip_chart_render;
 use crate::ui::precip_week::precip_week_render;
+use crate::ui::weathergram::weathergram_render;
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
-use crate::ui::{precip_chart, precip_week};
+use crate::ui::{precip_week, weathergram};
 use crate::units::Unit;
 use crate::weather::code::description;
 use crate::weather::model::HourlyForecast;
@@ -20,12 +20,16 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-/// Rows the detail pane occupies, borders included — the digit block plus the
+/// Rows the full inspector occupies, borders included — the digit block plus the
 /// two border rows, so it is sized from the font rather than guessed at.
-const DETAIL_ROWS: u16 = DIGIT_ROWS as u16 + 2;
+const FULL_INSPECTOR_ROWS: u16 = DIGIT_ROWS as u16 + 2;
+const COMPACT_INSPECTOR_ROWS: u16 = 4;
+const FULL_PAIR_ROWS: u16 = FULL_INSPECTOR_ROWS + weathergram::FULL_ROWS;
+const COMPACT_PAIR_ROWS: u16 = COMPACT_INSPECTOR_ROWS + weathergram::COMPACT_ROWS;
 
-/// Three digits — chance runs to 100 — plus the per-cent sign.
-const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 1;
+/// Three temperature characters (including a possible minus sign), plus the
+/// two-character unit symbol.
+const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
 /// Matches the daily pane's column. A snow-flagged metric total is the widest
 /// value here and needs every one of these; at 30 it clipped mid-word.
 const DETAIL_WIDTH: u16 = 34;
@@ -37,7 +41,7 @@ const SUMMARY_HOURS: usize = 24;
 /// Past this an hour count stops being useful and a date reads better.
 const HOURS_BEFORE_A_DATE_READS_BETTER: usize = 24;
 
-pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
+pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let crate::app::Fetch::Ready(weather) = &app.weather else {
         return;
     };
@@ -46,22 +50,29 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area
     let selected = app.selected_hour;
     let hour = hours.get(selected);
 
-    // Three readings of the same forecast, coarsening downward: this hour, the
-    // day or so either side of it, then the week. Each box answers a question
-    // the one above it cannot, which is what earns the rows — the alternative
-    // tried first was to spend surplus height on more of the hourly chart, and
-    // three bands of the same bars read as repetition rather than as depth.
-    //
-    // The chart's box is sized to its plot rather than filled. A plot centred
-    // in a taller box leaves blank rows below the bars as well as above, and
-    // the ones below are the pair an axis cannot explain away.
-    // Slack falls below the last box rather than inside any of them. Blank rows
-    // in a bordered box read as a chart that failed; the same rows under the
-    // last one read as the margin they are.
-    let week = week_strip(hours, area);
-    let [pane, chart, week_area, _margin] = Layout::vertical([
-        Constraint::Length(DETAIL_ROWS),
-        Constraint::Max(precip_chart::BOX_ROWS),
+    let compact = area.height < FULL_PAIR_ROWS;
+    let inspector_rows = if compact {
+        COMPACT_INSPECTOR_ROWS
+    } else {
+        FULL_INSPECTOR_ROWS
+    };
+    let gram_rows = if compact {
+        weathergram::COMPACT_ROWS
+    } else {
+        weathergram::FULL_ROWS
+    };
+    let pair_rows = if compact {
+        COMPACT_PAIR_ROWS
+    } else {
+        FULL_PAIR_ROWS
+    };
+    let week = (!compact)
+        .then(|| week_strip(hours, area, pair_rows))
+        .flatten();
+
+    let [inspector, gram, week_area, _margin] = Layout::vertical([
+        Constraint::Length(inspector_rows),
+        Constraint::Length(gram_rows),
         Constraint::Length(
             week.as_ref()
                 .map_or(0, |(_, rows)| precip_week::box_rows(*rows)),
@@ -70,8 +81,8 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area
     ])
     .areas(area);
 
-    detail_pane_render(frame, app, hours, hour, palette, pane);
-    precip_chart_render(frame, weather, palette, chart, app.unit, selected);
+    inspector_render(frame, app, hours, hour, palette, inspector, compact);
+    weathergram_render(frame, hours, palette, gram, app.unit, selected, compact);
     if let Some((days, _)) = &week {
         precip_week_render(frame, days, palette, week_area, app.unit, selected);
     }
@@ -81,24 +92,23 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area
 /// where it does not fit.
 ///
 /// It is the last thing on the screen to be given rows and the first to give
-/// them up: the hourly chart is what the arrows move through, and a strip that
+/// them up: the weathergram is what the arrows move through, and a strip that
 /// squeezed it would cost more than it adds.
 ///
 /// Grouped once, here, for the layout and the strip both. The rows this
 /// reserves and the rows the grid draws used to be two separate walks over the
 /// series, kept equal by a test; sharing one grouping makes them equal by
 /// construction and halves what the screen's most redrawn frame pays for it.
-fn week_strip(hours: &[HourlyForecast], area: Rect) -> Option<(Vec<precip_week::Day<'_>>, usize)> {
+fn week_strip(
+    hours: &[HourlyForecast],
+    area: Rect,
+    pair_rows: u16,
+) -> Option<(Vec<precip_week::Day<'_>>, usize)> {
     if area.width < precip_week::MIN_WIDTH + 2 {
         return None;
     }
 
-    // Measured against the chart's *comfortable* height, not its maximum. The
-    // chart may grow past this when nothing else wants the rows, but it does
-    // not get to crowd the strip out first.
-    let spare = area
-        .height
-        .saturating_sub(DETAIL_ROWS + precip_chart::COMFORT_ROWS);
+    let spare = area.height.saturating_sub(pair_rows);
     let rows = spare.saturating_sub(precip_week::box_rows(0)) as usize;
 
     // Answered from the geometry alone, like the width check above: `rows` is
@@ -118,13 +128,14 @@ fn week_strip(hours: &[HourlyForecast], area: Rect) -> Option<(Vec<precip_week::
     (rows >= precip_week::MIN_DAYS).then_some((days, rows))
 }
 
-fn detail_pane_render(
+fn inspector_render(
     frame: &mut Frame,
     app: &App,
     hours: &[HourlyForecast],
     hour: Option<&HourlyForecast>,
     palette: Palette,
     area: Rect,
+    compact: bool,
 ) {
     let unit = app.unit;
 
@@ -166,6 +177,15 @@ fn detail_pane_render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if compact {
+        let lines = compact_lines(hour, window_from(hours, app.selected_hour), unit);
+        frame.render_widget(
+            Paragraph::new(lines.join("\n")).style(Style::new().fg(palette.text)),
+            inner,
+        );
+        return;
+    }
+
     // Same rule as the daily pane: the digits are decoration and the readings
     // are the content, so drop the hero rather than clip it mid-glyph.
     let full = HERO_WIDTH + COLUMN_GUTTER + DETAIL_WIDTH;
@@ -194,7 +214,7 @@ fn detail_pane_render(
 
     if let Some(hero_area) = hero_area {
         frame.render_widget(
-            Paragraph::new(hero_chance(hour, palette)).alignment(Alignment::Center),
+            Paragraph::new(hero_temperature(hour, unit, palette)).alignment(Alignment::Center),
             hero_area,
         );
     }
@@ -205,34 +225,32 @@ fn detail_pane_render(
     );
 }
 
-/// Chance is the hero because it is defined for every hour and it is what the
-/// rising half of the chart encodes. Amount would read `0` for most of the
-/// week. It appears here and nowhere else on the screen.
-fn hero_chance(hour: Option<&HourlyForecast>, palette: Palette) -> Vec<Line<'static>> {
-    let value = hour
-        .and_then(|h| h.chance)
-        .map_or_else(|| "--".to_string(), |chance| chance.to_string());
+fn hero_temperature(
+    hour: Option<&HourlyForecast>,
+    unit: Unit,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let value = hour.and_then(|h| h.temp_c).map_or_else(
+        || "--".to_string(),
+        |temp| format!("{:.0}", unit.temp(temp)),
+    );
 
     big_digits(&value)
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            // Alignment::Center centres each line on its own width, so the row
-            // carrying the sign would sit offset. Pad the others to match.
             if i == DIGIT_ROWS / 2 {
                 Line::from(vec![
                     Span::from(row.clone()).bold().fg(palette.accent),
-                    Span::from("%").fg(palette.accent),
+                    Span::from(unit.temp_symbol()).fg(palette.accent),
                 ])
             } else {
-                Line::from(format!("{row} ")).bold().fg(palette.accent)
+                Line::from(format!("{row}  ")).bold().fg(palette.accent)
             }
         })
         .collect()
 }
 
-/// This hour, then the day ahead of it. Chance is deliberately absent — it is
-/// the hero, and saying it twice more was the first draft's mistake.
 fn detail_lines(
     hours: &[HourlyForecast],
     selected: usize,
@@ -242,17 +260,162 @@ fn detail_lines(
     let hour = hours.get(selected);
     let ahead = window_from(hours, selected);
 
-    let temperature = hour.and_then(|h| h.temp_c).map_or_else(
+    vec![
+        detail_line("feels like", &feels_line(hour, unit), palette),
+        detail_line("humidity", &humidity_line(hour), palette),
+        detail_line("precip", &precip_line(hour, unit), palette),
+        detail_line("wind", &wind_line(hour, unit), palette),
+        detail_line("24 h total", &total_line(ahead, unit), palette),
+    ]
+}
+
+fn feels_line(hour: Option<&HourlyForecast>, unit: Unit) -> String {
+    hour.and_then(|h| h.feels_like_c).map_or_else(
         || UNKNOWN.to_string(),
         |c| format!("{:.0}{}", unit.temp(c), unit.temp_symbol()),
-    );
+    )
+}
 
-    vec![
-        detail_line("amount", &amount_line(hour, unit), palette),
-        detail_line("temperature", &temperature, palette),
-        detail_line("24 h total", &total_line(ahead, unit), palette),
-        detail_line("24 h peak", &peak_line(ahead), palette),
-        detail_line("wet hours", &wet_hours_line(ahead), palette),
+fn humidity_line(hour: Option<&HourlyForecast>) -> String {
+    hour.and_then(|h| h.humidity_pct)
+        .map_or_else(|| UNKNOWN.to_string(), |value| format!("{value}%"))
+}
+
+fn precip_line(hour: Option<&HourlyForecast>, unit: Unit) -> String {
+    let chance = hour.and_then(|h| h.chance).map(|value| format!("{value}%"));
+    let amount = amount_line(hour, unit);
+    match chance {
+        Some(chance) if amount == UNKNOWN => chance,
+        Some(chance) => format!("{chance} · {amount}"),
+        None => amount,
+    }
+}
+
+fn compass(degrees: f64) -> &'static str {
+    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    POINTS[((degrees.rem_euclid(360.0) / 45.0).round() as usize) % POINTS.len()]
+}
+
+fn wind_line(hour: Option<&HourlyForecast>, unit: Unit) -> String {
+    let Some(hour) = hour else {
+        return UNKNOWN.to_string();
+    };
+    let Some(speed) = hour.wind_kph else {
+        return UNKNOWN.to_string();
+    };
+    let direction = hour
+        .wind_dir_deg
+        .map(compass)
+        .map_or(String::new(), |direction| format!(" {direction}"));
+    match hour.gust_kph {
+        Some(gust) => format!(
+            "{:.0}, gusts {:.0} {}{direction}",
+            unit.speed(speed),
+            unit.speed(gust),
+            unit.speed_label(),
+        ),
+        None => format!("{:.0} {}{direction}", unit.speed(speed), unit.speed_label()),
+    }
+}
+
+fn compact_temp(value: Option<f64>, unit: Unit) -> String {
+    value.map_or_else(
+        || "—".to_string(),
+        |celsius| format!("{:.0}{}", unit.temp(celsius), unit.temp_symbol()),
+    )
+}
+
+fn compact_number(value: f64, decimals: usize, label: &str) -> String {
+    let rendered = format!("{value:.decimals$}");
+    let rendered = if label == "in" {
+        rendered
+            .strip_prefix("0.")
+            .map_or_else(|| rendered.clone(), |tail| format!(".{tail}"))
+    } else {
+        rendered
+    };
+    format!("{rendered}{label}")
+}
+
+fn compact_amount(hour: Option<&HourlyForecast>, unit: Unit) -> String {
+    let Some(hour) = hour else {
+        return "—".to_string();
+    };
+    if let Some(cm) = hour.snow_cm.filter(|cm| *cm > 0.0) {
+        return compact_number(unit.snow(cm), unit.snow_decimals(), unit.snow_label());
+    }
+    match hour.precip_mm {
+        Some(mm) if mm > 0.0 => {
+            let value = unit.precip(mm);
+            let decimals = unit.precip_decimals();
+            let quantum = 0.1_f64.powi(decimals as i32);
+            if value < quantum / 2.0 {
+                format!(
+                    "<{}",
+                    compact_number(quantum, decimals, unit.precip_label())
+                )
+            } else {
+                compact_number(value, decimals, unit.precip_label())
+            }
+        }
+        Some(_) => format!("0{}", unit.precip_label()),
+        None => "—".to_string(),
+    }
+}
+
+fn compact_wind(hour: Option<&HourlyForecast>, unit: Unit) -> String {
+    let Some(hour) = hour else {
+        return "—".to_string();
+    };
+    let Some(speed) = hour.wind_kph else {
+        return "—".to_string();
+    };
+    let direction = hour.wind_dir_deg.map(compass).unwrap_or_default();
+    match hour.gust_kph {
+        Some(gust) => format!(
+            "{direction}{:.0}g{:.0}",
+            unit.speed(speed),
+            unit.speed(gust)
+        ),
+        None => format!("{direction}{:.0}", unit.speed(speed)),
+    }
+}
+
+fn compact_total(ahead: &[HourlyForecast], unit: Unit) -> String {
+    if ahead.is_empty() {
+        return "—".to_string();
+    }
+    let total: f64 = ahead.iter().filter_map(|hour| hour.precip_mm).sum();
+    if total <= 0.0 {
+        return format!("0{}", unit.precip_label());
+    }
+    compact_number(
+        unit.precip(total),
+        unit.precip_decimals(),
+        unit.precip_label(),
+    )
+}
+
+fn compact_lines(
+    hour: Option<&HourlyForecast>,
+    ahead: &[HourlyForecast],
+    unit: Unit,
+) -> [String; 2] {
+    let temp = compact_temp(hour.and_then(|h| h.temp_c), unit);
+    let feels = compact_temp(hour.and_then(|h| h.feels_like_c), unit);
+    let humidity = hour
+        .and_then(|h| h.humidity_pct)
+        .map_or_else(|| "—".to_string(), |value| format!("{value}%"));
+    let chance = hour
+        .and_then(|h| h.chance)
+        .map_or_else(|| "—".to_string(), |value| format!("{value}%"));
+    let amount = compact_amount(hour, unit);
+    let wind = compact_wind(hour, unit);
+    let total = compact_total(ahead, unit);
+
+    [
+        format!("{temp} feels {feels} RH{humidity}"),
+        format!("{chance} {amount} {wind} 24h{total}"),
     ]
 }
 
@@ -320,29 +483,6 @@ fn total_line(ahead: &[HourlyForecast], unit: Unit) -> String {
     amount
 }
 
-fn peak_line(ahead: &[HourlyForecast]) -> String {
-    let peak = ahead
-        .iter()
-        .filter_map(|h| Some((h.chance?, h.time.as_str())))
-        .max_by_key(|(chance, _)| *chance);
-
-    match peak {
-        Some((chance, time)) => format!("{chance}% at {}", short_hour(time)),
-        None => UNKNOWN.to_string(),
-    }
-}
-
-fn wet_hours_line(ahead: &[HourlyForecast]) -> String {
-    if ahead.is_empty() {
-        return UNKNOWN.to_string();
-    }
-    format!(
-        "{} of {}",
-        ahead.iter().filter(|h| h.is_wet()).count(),
-        ahead.len()
-    )
-}
-
 /// The question people actually open a weather app to ask. It earns the
 /// bottom-left border — the slot the daily pane spends on its period
 /// comparison — and costs no interior row.
@@ -408,10 +548,6 @@ fn long_hour(time: &str) -> String {
         || time.to_string(),
         |at| at.format("%a %-d %b, %-I:%M %p").to_string(),
     )
-}
-
-fn short_hour(time: &str) -> String {
-    parse_hour(time).map_or_else(|| time.to_string(), |at| at.format("%-I %p").to_string())
 }
 
 /// The window runs eight days, so every weekday name occurs at least once and
@@ -664,19 +800,93 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_rows_look_a_day_ahead_from_the_selection() {
-        let mut hours = dry_hours(96);
-        for hour in hours.iter_mut().take(30).skip(26) {
-            hour.precip_mm = Some(1.0);
+    fn selected_hour_detail_helpers_keep_independent_missing_values() {
+        let mut hours = dry_hours(1);
+        let hour = hours.first();
+        assert_eq!(feels_line(hour, Unit::Imperial), "66°F");
+        assert_eq!(humidity_line(hour), "55%");
+        assert_eq!(precip_line(hour, Unit::Metric), "10% · none expected");
+        assert_eq!(wind_line(hour, Unit::Metric), "10, gusts 18 km/h SW");
+
+        hours[0].wind_dir_deg = None;
+        assert_eq!(wind_line(hours.first(), Unit::Metric), "10, gusts 18 km/h");
+        hours[0].wind_kph = None;
+        assert_eq!(wind_line(hours.first(), Unit::Metric), UNKNOWN);
+        assert_eq!(compass(-45.0), "NW");
+        assert_eq!(compass(360.0), "N");
+    }
+
+    #[test]
+    fn compact_temperature_keeps_the_active_unit() {
+        assert_eq!(compact_temp(Some(25.0), Unit::Metric), "25°C");
+        assert_eq!(compact_temp(Some(25.0), Unit::Imperial), "77°F");
+        assert_eq!(compact_temp(None, Unit::Imperial), "—");
+    }
+
+    #[test]
+    fn compact_amount_distinguishes_snow_zero_trace_and_missing() {
+        let mut hours = dry_hours(1);
+        hours[0].precip_mm = Some(0.254);
+        assert_eq!(compact_amount(hours.first(), Unit::Imperial), ".01in");
+        assert_eq!(compact_amount(hours.first(), Unit::Metric), "0.3mm");
+
+        hours[0].snow_cm = Some(2.54);
+        assert_eq!(compact_amount(hours.first(), Unit::Imperial), "1.0in");
+        hours[0].snow_cm = Some(0.0);
+        hours[0].precip_mm = Some(0.0);
+        assert_eq!(compact_amount(hours.first(), Unit::Metric), "0mm");
+        assert_eq!(compact_amount(hours.first(), Unit::Imperial), "0in");
+        hours[0].precip_mm = None;
+        assert_eq!(compact_amount(hours.first(), Unit::Metric), "—");
+    }
+
+    #[test]
+    fn compact_wind_keeps_speed_when_direction_is_missing() {
+        let mut hours = dry_hours(1);
+        hours[0].wind_kph = Some(14.5);
+        hours[0].gust_kph = Some(24.1);
+        assert_eq!(compact_wind(hours.first(), Unit::Imperial), "SW9g15");
+        hours[0].wind_dir_deg = None;
+        assert_eq!(compact_wind(hours.first(), Unit::Imperial), "9g15");
+        hours[0].wind_kph = None;
+        assert_eq!(compact_wind(hours.first(), Unit::Imperial), "—");
+    }
+
+    #[test]
+    fn compact_total_uses_converted_precision_without_spaces() {
+        let mut hours = dry_hours(24);
+        for hour in hours.iter_mut().take(4) {
+            hour.precip_mm = Some(6.35);
+        }
+        assert_eq!(compact_total(&hours, Unit::Imperial), "1.00in");
+        assert_eq!(compact_total(&dry_hours(4), Unit::Metric), "0mm");
+        assert_eq!(compact_total(&[], Unit::Metric), "—");
+    }
+
+    #[test]
+    fn compact_lines_fit_the_narrowest_inspector_without_truncation() {
+        let mut hours = dry_hours(24);
+        for hour in &mut hours {
+            hour.temp_c = Some(45.0);
+            hour.feels_like_c = Some(45.0);
+            hour.humidity_pct = Some(100);
+            hour.chance = Some(100);
+            hour.precip_mm = Some(6.35);
+            hour.snow_cm = Some(25.4);
+            hour.wind_kph = Some(15.0);
+            hour.gust_kph = Some(24.0);
+            hour.wind_dir_deg = Some(225.0);
         }
 
-        // From hour 10, the window 10..34 catches all four wet hours.
-        let ahead = window_from(&hours, 10);
-        assert_eq!(ahead.len(), 24);
-        assert_eq!(wet_hours_line(ahead), "4 of 24");
-
-        // From hour 0, the window 0..24 catches none of them.
-        assert_eq!(wet_hours_line(window_from(&hours, 0)), "0 of 24");
+        for unit in [Unit::Metric, Unit::Imperial] {
+            for line in compact_lines(hours.first(), &hours, unit) {
+                assert!(
+                    line.chars().count() <= 32,
+                    "{unit:?} compact line is too wide: {line:?}"
+                );
+                assert!(!line.ends_with('…'), "compact values must not be truncated");
+            }
+        }
     }
 
     /// The window must shorten rather than run off the end of the series.
@@ -686,7 +896,6 @@ mod tests {
         assert_eq!(window_from(&hours, 20).len(), 10);
         assert_eq!(window_from(&hours, 29).len(), 1);
         assert!(window_from(&hours, 30).is_empty());
-        assert_eq!(wet_hours_line(window_from(&hours, 20)), "0 of 10");
     }
 
     #[test]
@@ -704,14 +913,6 @@ mod tests {
             total_line(window_from(&hours, 24), Unit::Imperial),
             "none expected"
         );
-    }
-
-    #[test]
-    fn the_peak_names_the_hour_it_falls_in() {
-        let mut hours = dry_hours(48);
-        hours[15].chance = Some(80);
-
-        assert_eq!(peak_line(window_from(&hours, 0)), "80% at 3 PM");
     }
 
     /// Every value has to fit beside its label or it is clipped mid-word, and
@@ -748,7 +949,7 @@ mod tests {
     fn rendered(width: u16, height: u16, app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| precip_render(f, app, palette(), f.area()))
+            .draw(|f| hourly_render(f, app, palette(), f.area()))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -762,27 +963,23 @@ mod tests {
             .join("\n")
     }
 
-    /// Chance belongs in one place: the hero. The first draft put it in the
-    /// hero, the border and a detail row at once, which read as noise. The
-    /// "24 h peak" row states a percentage too, but that is a different fact
-    /// about a different hour — one occurrence, not three.
     #[test]
-    fn the_chance_is_stated_once() {
-        let mut hours = dry_hours(48);
-        for hour in hours.iter_mut() {
-            hour.chance = Some(53);
+    fn full_hero_rounds_converted_temperature_and_marks_missing_values() {
+        let mut hours = dry_hours(1);
+        hours[0].temp_c = Some(0.4);
+        let hero = hero_temperature(hours.first(), Unit::Imperial, palette());
+        let expected = big_digits("33");
+        for (line, digits) in hero.iter().zip(expected) {
+            assert!(line.to_string().contains(&digits), "{line:?}");
         }
-        let app = app_showing(hours, 0);
-        let text = rendered(100, 16, &app);
+        assert!(hero[DIGIT_ROWS / 2].to_string().ends_with("°F"));
 
+        let missing = hero_temperature(None, Unit::Metric, palette());
+        assert!(missing[DIGIT_ROWS / 2].to_string().ends_with("°C"));
         assert!(
-            text.contains("███"),
-            "the hero draws the chance as block digits:\n{text}"
-        );
-        assert!(
-            text.matches("53%").count() <= 1,
-            "the chance is restated {} times:\n{text}",
-            text.matches("53%").count()
+            missing[DIGIT_ROWS / 2]
+                .to_string()
+                .contains(&big_digits("--")[DIGIT_ROWS / 2])
         );
     }
 
@@ -807,15 +1004,32 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_keeps_its_readings_and_the_chart_gets_the_rest() {
-        let app = app_showing(dry_hours(192), 0);
+    fn full_inspector_states_every_selected_hour_fact() {
+        let app = app_showing(dry_hours(192), 3);
         let text = rendered(100, 24, &app);
 
-        for label in ["amount", "temperature", "24 h total", "wet hours"] {
+        for label in ["feels like", "humidity", "precip", "wind", "24 h total"] {
             assert!(text.contains(label), "lost {label:?}:\n{text}");
         }
-        assert!(text.contains("FREDERICK"), "\n{text}");
-        assert!(text.contains("Precipitation"), "the chart box:\n{text}");
+        assert!(text.contains("Hourly"), "weathergram missing:\n{text}");
+    }
+
+    #[test]
+    fn tall_layout_retains_the_weekly_precipitation_strip() {
+        let app = app_showing(dry_hours(192), 0);
+        let text = rendered(100, 30, &app);
+        assert!(text.contains("Hourly"), "weathergram missing:\n{text}");
+        assert!(text.contains("this week"), "weekly strip missing:\n{text}");
+    }
+
+    #[test]
+    fn compact_pair_uses_exactly_ten_content_rows() {
+        let app = app_showing(dry_hours(192), 0);
+        let text = rendered(34, 10, &app);
+        assert_eq!(text.lines().count(), 10);
+        for label in ["sky", "temp", "rain", "wind"] {
+            assert!(text.contains(label), "lost {label}:\n{text}");
+        }
     }
 
     /// The awkward sizes, including the app's declared minimum and either side
@@ -841,31 +1055,6 @@ mod tests {
         }
     }
 
-    /// The pane is sized to its content whatever the terminal does, so a short
-    /// window keeps every reading and the chart takes what is left.
-    #[test]
-    fn the_pane_keeps_its_size_when_the_chart_cannot_fit() {
-        let app = app_showing(dry_hours(192), 0);
-
-        for height in [DETAIL_ROWS, DETAIL_ROWS + 2, DETAIL_ROWS + 4] {
-            let text = rendered(80, height, &app);
-            for label in ["amount", "temperature", "wet hours"] {
-                assert!(
-                    text.contains(label),
-                    "height {height} lost {label}:\n{text}"
-                );
-            }
-            // The pane's own border must close where its content ends rather
-            // than stretching around blank rows.
-            assert!(
-                text.lines()
-                    .nth(DETAIL_ROWS as usize - 1)
-                    .is_some_and(|l| l.starts_with('└')),
-                "height {height}: the pane did not close at its own height:\n{text}"
-            );
-        }
-    }
-
     #[test]
     fn the_selected_hour_is_named_on_the_border() {
         let app = app_showing(dry_hours(48), 14);
@@ -880,10 +1069,8 @@ mod tests {
     #[test]
     fn hours_that_will_not_parse_fall_back_to_the_raw_value() {
         assert_eq!(long_hour("2026-08-10T16:00"), "Mon 10 Aug, 4:00 PM");
-        assert_eq!(short_hour("2026-08-10T16:00"), "4 PM");
         assert_eq!(day_and_hour("2026-08-10T16:00"), "Mon 10 Aug, 4 PM");
         assert_eq!(long_hour("not-a-time"), "not-a-time");
-        assert_eq!(short_hour(""), "");
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! Column geometry shared by the two bar charts. The daily chart and the
-//! hourly precipitation chart draw completely differently — one is a ratatui
-//! `BarChart`, the other writes cells itself — but they answer the same two
-//! questions first: how wide is a column, and which slice of the series fits.
+//! Column geometry shared by the daily chart and hourly weathergram. They draw
+//! differently, but answer the same questions first: how wide is a column,
+//! and which slice of the series fits. The weekly strip uses fixed calendar
+//! columns instead and shares only the cell-level drawing primitives.
 
 /// Columns between one bar and the next.
 pub(super) const GAP: u16 = 1;
@@ -23,10 +23,8 @@ impl Columns {
     ///
     /// `wanted` is how many bars the caller would *like* on screen, which is
     /// not always the length of its series. The daily chart wants all 22 days
-    /// and passes that. The hourly chart's series is eight days long and never
-    /// fits, so passing its length would peg the stride at the minimum on every
-    /// terminal however wide; it passes the span it actually wants to show and
-    /// spends surplus width on broader bars instead.
+    /// and passes that; consumers with a longer series pass the span they want
+    /// to show so surplus width can buy broader columns.
     pub fn fit(width: u16, wanted: usize, min_stride: u16, max_stride: u16) -> Self {
         let room = width as usize + GAP as usize;
         let stride = (room / wanted.max(1)).clamp(min_stride as usize, max_stride as usize);

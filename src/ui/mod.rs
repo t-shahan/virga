@@ -13,9 +13,8 @@ mod condition_symbol;
 mod current;
 mod digits;
 mod forecast;
+mod hourly;
 mod legend;
-mod precip;
-mod precip_chart;
 mod precip_week;
 mod search;
 mod weathergram;
@@ -23,8 +22,8 @@ mod weathergram;
 use chart::chart_area_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
+use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
-use precip::precip_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
@@ -155,7 +154,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             Fetch::Idle => {}
         },
         Screen::Hourly => match &app.weather {
-            Fetch::Ready(_) => precip_render(frame, app, palette, content),
+            Fetch::Ready(_) => hourly_render(frame, app, palette, content),
             Fetch::Loading => popup_render(
                 frame,
                 area,

@@ -1,19 +1,13 @@
-//! Cell-level drawing and the shared hour axis.
-//!
-//! Both precipitation charts write cells themselves rather than going through a
-//! ratatui widget, and both hang the same hour ticks under their plot. Neither
-//! is interesting on its own; keeping them here is what stops the two charts
-//! from growing separate ideas of what "6a" looks like or how far a label may
-//! run before it collides with its neighbour.
+//! Cell-level drawing and the shared hour axis used by the weathergram and the
+//! weekly precipitation strip. Keeping them here gives both views one idea of
+//! what "6a" looks like and how far a label may run before colliding with its
+//! neighbour.
 
 use crate::theme::Palette;
 use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-
-/// Rows a row of hour ticks takes.
-pub(super) const TICK_ROWS: u16 = 1;
 
 /// Columns kept clear between one tick and the next.
 const TICK_GAP: u16 = 1;
