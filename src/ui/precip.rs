@@ -101,6 +101,13 @@ fn week_strip(hours: &[HourlyForecast], area: Rect) -> Option<(Vec<precip_week::
         .saturating_sub(DETAIL_ROWS + precip_chart::COMFORT_ROWS);
     let rows = spare.saturating_sub(precip_week::box_rows(0)) as usize;
 
+    // Answered from the geometry alone, like the width check above: `rows` is
+    // an upper bound on what the grouping can return, so a terminal too short
+    // for the strip would pay for a grouping that is always thrown away.
+    if rows < precip_week::MIN_DAYS {
+        return None;
+    }
+
     // Calendar dates, not `hours / 24`. A window opening at 6 PM is two and a
     // half days long and touches four dates, and it is dates the strip draws
     // rows for — counting days here reserved one row too few and dropped the
