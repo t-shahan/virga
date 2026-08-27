@@ -42,6 +42,9 @@ step "checking the working tree"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] \
     || die "Releases are cut from $BRANCH, not $(git rev-parse --abbrev-ref HEAD)."
 
+# A && B || C is deliberate here: die on either diff reporting changes, and
+# die never returns.
+# shellcheck disable=SC2015
 git diff --quiet && git diff --cached --quiet \
     || die "The working tree has uncommitted changes."
 

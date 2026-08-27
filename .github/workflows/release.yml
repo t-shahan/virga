@@ -217,6 +217,9 @@ jobs:
             echo "::error::Extracted no release notes for $release from CHANGELOG.md."
             exit 1
           fi
+          # The backticked `SHA256SUMS` below is markdown for the release
+          # page, not a command substitution.
+          # shellcheck disable=SC2016
           printf '\n---\n\nSHA256 checksums are in `SHA256SUMS`. Every binary carries a build\nprovenance attestation:\n\n```\ngh attestation verify ./virga --repo %s\n```\n' "$GITHUB_REPOSITORY" >> notes.md
 
       # Idempotent on purpose: a re-run after a partial failure should finish
