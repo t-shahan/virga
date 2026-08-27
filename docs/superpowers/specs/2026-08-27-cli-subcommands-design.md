@@ -12,7 +12,13 @@ latest release?". Two subcommands:
   how this copy was installed.
 
 Both answer and exit without taking over the terminal, like `--version` and
-`--help` today. The TUI itself is unchanged: every in-app control stays a key,
+`--help` today.
+
+The discovery half of updating lives in the app itself: on startup the TUI
+checks for a newer release in the background and, when one exists, shows a
+one-line notice that the next keypress clears. Nobody runs `virga update` on
+a schedule; the app telling you is what makes the command worth having.
+Beyond that notice the TUI is unchanged: every in-app control stays a key,
 and no flag changes how the application runs once it is running.
 
 ## Why this does not break the "no options" philosophy
@@ -125,6 +131,52 @@ The instruction is chosen by looking at where the running binary lives:
   Distinguishing "outdated" by exit code is a script-facing contract this
   command is not making; it can be added later without breaking anyone.
 
+### The startup notice
+
+When the TUI starts, a dedicated thread makes the same release probe and, if
+a newer release exists, the app shows one muted line anchored above the key
+bar:
+
+```
+update: virga 0.3.0 is available — run `virga update` for how
+```
+
+- **A banner, not a modal.** The app's standing rule is that nothing gets to
+  withhold the forecast — a worse location guess doesn't, a broken state file
+  doesn't, and news about a version can't outrank the weather either. A
+  centered box would also land *asynchronously*, whenever GitHub answers,
+  which means it could appear under the user's fingers mid-search. A muted
+  line in the `muted` role sits in the hierarchy labels already occupy.
+- **Dismissed by living.** The next keypress clears it, and that keypress
+  still does whatever it normally does — the notice must never eat an input.
+  Quitting without pressing anything else re-prints the line on the ordinary
+  screen through the existing exit-warning path, so it is not lost either.
+- **Never on the critical path.** The probe runs on its own one-shot thread,
+  not the worker: the worker serves requests serially, and a slow GitHub
+  response queued ahead of a city search would freeze search for its
+  duration. The thread sends one message into the existing message channel
+  and ends. First paint never waits for it.
+- **Failure is silence.** No network, a proxy in the way, GitHub down — the
+  notice simply does not appear. An update check failing is not
+  warning-worthy; the weather fetch will complain about the network if the
+  network deserves complaining about.
+- **The instruction is precomputed.** The message carries the finished
+  notice text (version and install-method instruction resolved in the
+  probe), so `App` and `ui` stay free of paths, environments, and
+  networking.
+- **Off switch.** `VIRGA_UPDATE=off` skips the probe entirely, with the same
+  grammar and the same forgiveness as `VIRGA_GEOIP`: recognized offs and ons,
+  and an unusable value warns and leaves the check on. The check is also
+  skipped when the terminal is below the minimum size, where there is no
+  room to say anything anyway.
+- **Once per launch, every launch.** No throttling and no "skip this
+  version" memory in the first cut: the probe costs one redirected request,
+  and remembering dismissals means growing the state file for a preference
+  nobody has asked for yet. If the line proves naggy, a
+  `dismissed: "0.3.0"` field is a small follow-up.
+
+### What `virga update` still does not do
+
 `virga update` does **not** replace the binary. Self-update means shipping a
 tar.gz extractor, a checksum verifier, and an atomic installer inside the
 program — three new dependencies and a new way to brick an install, duplicated
@@ -204,7 +256,15 @@ Format rules, chosen so a document never claims a newer format than it needs:
 - **`src/update.rs` (new)** owns the release probe: resolving the latest tag
   from a redirect, comparing versions, classifying the install method from a
   path, and composing the instruction. Everything but the single HTTP call is
-  a pure function.
+  a pure function. The subcommand and the startup notice are the same probe
+  called from two places.
+- **`src/events.rs`** gains a `Message::UpdateAvailable { notice: String }`
+  and a `spawn_update_check` that runs the probe on a one-shot thread and
+  sends at most one message. It does not touch the request queue.
+- **`src/app.rs`** holds `Option<String>` of notice text, sets it on the
+  message, clears it on the next action.
+- **`src/ui`** renders the notice in the `muted` role above the key bar when
+  present and the terminal has the room.
 - **`src/state.rs`** gains the optional-field document, a `Persisted` value
   (remembered location + theme), and merge-preserving `save_location` /
   `save_theme`. Still no networking.
@@ -227,7 +287,10 @@ Format rules, chosen so a document never claims a newer format than it needs:
 
 - README: `--help` excerpt, Themes section (persistence paragraph replaces
   "the theme is not written to disk"), Configuration section, Limitations,
-  Updating table (add `virga update` as the way to find out), Data and
-  Privacy (the update check's single request; the state file's contents).
+  Updating table (the startup notice and `virga update` as the ways to find
+  out), Data and Privacy (the startup probe's single request to GitHub on
+  each launch, carrying nothing but the request itself, and `VIRGA_UPDATE=off`
+  to prevent it; the state file's contents).
+- `--help` Environment section grows `VIRGA_UPDATE`.
 - CHANGELOG under `Unreleased`, since the release tooling refuses to publish
   what it does not describe.
