@@ -1,0 +1,388 @@
+# Tag push in, installable binaries out. Nothing here should ever need a human
+# between the tag and the release, because a release process with a manual step
+# is a release process that stops happening.
+#
+# Actions are pinned to commit SHAs for the same reason ci.yml pins them, only
+# more so: this workflow holds `contents: write` and a token for the Homebrew
+# tap. A mutable tag in a job with write permissions is not a gate.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # So a publish that failed halfway can be re-run without inventing a new tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (e.g. v0.2.0)
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: tag, manifest and changelog agree
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      # The tag reaches the script through the environment, never interpolated
+      # into the shell body: on a workflow_dispatch it is attacker-shaped input.
+      - id: resolve
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH[-prerelease]."
+            exit 1
+          fi
+
+          version="${TAG#v}"
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::Tag says $version, Cargo.toml says $manifest."
+            exit 1
+          fi
+
+          # A prerelease borrows its predecessor's notes: v0.2.0-rc1 is
+          # describing the v0.2.0 entry, not one of its own.
+          release="${version%%-*}"
+          if ! grep -q "^## \[$release\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$release]' section."
+            exit 1
+          fi
+
+          prerelease=false
+          if [ "$version" != "$release" ]; then
+            prerelease=true
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      # Provenance attestation: proves an artifact came from this workflow, on
+      # this commit, rather than from someone's laptop.
+      id-token: write
+      attestations: write
+    strategy:
+      # One platform failing should not hide the state of the others, and a
+      # release with four good archives is worth inspecting.
+      fail-fast: false
+      matrix:
+        include:
+          # musl, not glibc: statically linked means the Linux binaries run on
+          # any distribution rather than on distributions new enough.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Built on the arm64 runner rather than macos-13, whose image is on
+          # its way out. The macOS SDK cross-compiles to Intel without help.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      # `ring` compiles C, so a musl target needs a musl C compiler as well as
+      # a musl linker. Cargo takes both through per-target variables.
+      - name: musl toolchain
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+          underscored=$(printf '%s' "$TARGET" | tr '-' '_')
+          upper=$(printf '%s' "$underscored" | tr '[:lower:]' '[:upper:]')
+          {
+            echo "CC_${underscored}=musl-gcc"
+            echo "CARGO_TARGET_${upper}_LINKER=musl-gcc"
+          } >> "$GITHUB_ENV"
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Attest the binary rather than the archive, so `gh attestation verify`
+      # works on the thing the user actually installed and can point at.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: target/${{ matrix.target }}/release/virga${{ runner.os == 'Windows' && '.exe' || '' }}
+
+      # A single top-level directory, so extracting in someone's Downloads
+      # folder produces one folder instead of four loose files.
+      - name: archive
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage="virga-${VERSION}-${TARGET}"
+          mkdir "$stage"
+          cp "target/${TARGET}/release/virga" "$stage/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
+
+      - name: archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          $stage = "virga-$env:VERSION-$env:TARGET"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/$env:TARGET/release/virga.exe" $stage
+          Copy-Item README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE $stage
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: virga-${{ matrix.target }}
+          path: |
+            virga-*.tar.gz
+            virga-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish the release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          # Relative names, so `sha256sum -c` works wherever the file is put.
+          sha256sum virga-* > SHA256SUMS
+          cat SHA256SUMS
+
+      # The release notes are the changelog section. Keeping one source means
+      # the repository and the release page cannot disagree about a version.
+      - name: notes
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          release="${VERSION%%-*}"
+          # index(), not a regex match: "## [0.2.0]" read as a regular
+          # expression is a character class, and would match the wrong section.
+          awk -v want="## [$release]" '
+            index($0, "## [") == 1 { inside = (index($0, want) == 1); next }
+            inside
+          ' CHANGELOG.md | sed '/^\[[^]]*\]: http/d' > notes.md
+
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::Extracted no release notes for $release from CHANGELOG.md."
+            exit 1
+          fi
+          # The backticked `SHA256SUMS` below is markdown for the release
+          # page, not a command substitution.
+          # shellcheck disable=SC2016
+          printf '\n---\n\nSHA256 checksums are in `SHA256SUMS`. Every binary carries a build\nprovenance attestation:\n\n```\ngh attestation verify ./virga --repo %s\n```\n' "$GITHUB_REPOSITORY" >> notes.md
+
+      # Idempotent on purpose: a re-run after a partial failure should finish
+      # the job, not refuse because the release already exists.
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file notes.md --prerelease="$PRERELEASE"
+          else
+            gh release create "$TAG" dist/* \
+              --title "virga $TAG" \
+              --notes-file notes.md \
+              --prerelease="$PRERELEASE"
+          fi
+
+  homebrew:
+    name: update the tap
+    needs: [verify, publish]
+    # A release candidate must not become what `brew install` hands people.
+    if: needs.verify.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    env:
+      # An SSH deploy key rather than a personal access token: a deploy key
+      # grants write to exactly one repository, cannot reach anything else in
+      # the account, and does not expire and quietly stop working.
+      #
+      # Secrets cannot be read from a job-level `if`, so the gate is a step
+      # condition on this. A missing key means skip, not fail: the release
+      # itself succeeded, and the tap can be filled in later.
+      TAP_KEY: ${{ secrets.TAP_KEY }}
+    steps:
+      - name: no tap key
+        if: env.TAP_KEY == ''
+        run: echo "::warning::TAP_KEY is not set, so the Homebrew tap was left alone."
+
+      - name: authenticate to the tap
+        if: env.TAP_KEY != ''
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$TAP_KEY" > ~/.ssh/tap
+          chmod 600 ~/.ssh/tap
+
+          # GitHub's published host key, pinned rather than collected with
+          # ssh-keyscan: accepting whatever answers on first contact is not a
+          # check. Compare against https://api.github.com/meta if it changes.
+          cat > ~/.ssh/known_hosts <<'HOSTKEY'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          HOSTKEY
+
+          # IdentitiesOnly stops ssh from offering any other key the runner may
+          # happen to have loaded.
+          echo "GIT_SSH_COMMAND=ssh -i ~/.ssh/tap -o IdentitiesOnly=yes" >> "$GITHUB_ENV"
+
+      - name: clone the tap
+        if: env.TAP_KEY != ''
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: git clone --depth 1 "git@github.com:${OWNER}/homebrew-tap.git" tap
+
+      - name: write the formula
+        if: env.TAP_KEY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$REPOSITORY" --pattern SHA256SUMS --output sums
+
+          # Reading the checksums back off the published release, rather than
+          # trusting a value carried between jobs, means the formula can only
+          # describe bytes that are actually downloadable.
+          # Resolved before the formula is written, not inside it: a command
+          # substitution that fails inside a heredoc yields an empty string
+          # rather than stopping the script, and an empty sha256 would reach
+          # the tap as a working-looking formula that installs nothing.
+          digest() {
+            line=$(grep " virga-${VERSION}-$1.tar.gz\$" sums || true)
+            if [ -z "$line" ]; then
+              echo "::error::No checksum for $1 in the release's SHA256SUMS." >&2
+              exit 1
+            fi
+            printf '%s' "${line%% *}"
+          }
+
+          macos_arm=$(digest aarch64-apple-darwin)
+          macos_intel=$(digest x86_64-apple-darwin)
+          linux_arm=$(digest aarch64-unknown-linux-musl)
+          linux_intel=$(digest x86_64-unknown-linux-musl)
+
+          # `exit 1` inside $( ) leaves the subshell, not this script, so the
+          # aborts above only work because of `set -e`. Checked again here so
+          # that an empty sha256 cannot reach the tap if that ever changes.
+          if [ -z "$macos_arm" ] || [ -z "$macos_intel" ] \
+            || [ -z "$linux_arm" ] || [ -z "$linux_intel" ]; then
+            echo "::error::SHA256SUMS for $TAG is missing a tarball checksum." >&2
+            cat sums >&2
+            exit 1
+          fi
+
+          base="https://github.com/${REPOSITORY}/releases/download/${TAG}"
+          mkdir -p tap/Formula
+          cat > tap/Formula/virga.rb <<FORMULA
+          # Generated by the release workflow in ${REPOSITORY}. Do not edit by
+          # hand: the next release will overwrite it.
+          class Virga < Formula
+            desc "Responsive terminal weather app with an hourly precipitation chart"
+            homepage "https://github.com/${REPOSITORY}"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/virga-${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${macos_arm}"
+              else
+                url "${base}/virga-${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${macos_intel}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${base}/virga-${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${linux_arm}"
+              else
+                url "${base}/virga-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${linux_intel}"
+              end
+            end
+
+            def install
+              bin.install "virga"
+            end
+
+            test do
+              assert_match "virga #{version}", shell_output("#{bin}/virga --version")
+            end
+          end
+          FORMULA
+
+      - name: push the formula
+        if: env.TAP_KEY != ''
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/virga.rb
+          # Re-running a release that changed nothing is not a failure.
+          if git diff --cached --quiet; then
+            echo "Formula already describes ${VERSION}."
+            exit 0
+          fi
+          git commit -m "virga ${VERSION}"
+          git push

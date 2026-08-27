@@ -185,7 +185,7 @@ pub(super) fn precip_chart_render(
         hour_ticks_render(
             frame,
             row,
-            visible.iter().map(|h| h.time.clone()),
+            visible.iter().map(|h| h.time.as_str()),
             columns.stride,
             palette,
         );
