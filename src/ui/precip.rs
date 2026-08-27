@@ -58,28 +58,37 @@ pub(super) fn precip_render(frame: &mut Frame, app: &App, palette: Palette, area
     // Slack falls below the last box rather than inside any of them. Blank rows
     // in a bordered box read as a chart that failed; the same rows under the
     // last one read as the margin they are.
-    let week_days = week_days(hours, area);
-    let [pane, chart, week, _margin] = Layout::vertical([
+    let week = week_strip(hours, area);
+    let [pane, chart, week_area, _margin] = Layout::vertical([
         Constraint::Length(DETAIL_ROWS),
         Constraint::Max(precip_chart::BOX_ROWS),
-        Constraint::Length(week_days.map_or(0, precip_week::box_rows)),
+        Constraint::Length(
+            week.as_ref()
+                .map_or(0, |(_, rows)| precip_week::box_rows(*rows)),
+        ),
         Constraint::Fill(1),
     ])
     .areas(area);
 
     detail_pane_render(frame, app, hours, hour, palette, pane);
     precip_chart_render(frame, weather, palette, chart, app.unit, selected);
-    if week_days.is_some() {
-        precip_week_render(frame, hours, palette, week, app.unit, selected);
+    if let Some((days, _)) = &week {
+        precip_week_render(frame, days, palette, week_area, app.unit, selected);
     }
 }
 
-/// How many days the week strip may show here, or `None` where it does not fit.
+/// The week strip's grouping and how many days it may show here, or `None`
+/// where it does not fit.
 ///
 /// It is the last thing on the screen to be given rows and the first to give
 /// them up: the hourly chart is what the arrows move through, and a strip that
 /// squeezed it would cost more than it adds.
-fn week_days(hours: &[HourlyForecast], area: Rect) -> Option<usize> {
+///
+/// Grouped once, here, for the layout and the strip both. The rows this
+/// reserves and the rows the grid draws used to be two separate walks over the
+/// series, kept equal by a test; sharing one grouping makes them equal by
+/// construction and halves what the screen's most redrawn frame pays for it.
+fn week_strip(hours: &[HourlyForecast], area: Rect) -> Option<(Vec<precip_week::Day<'_>>, usize)> {
     if area.width < precip_week::MIN_WIDTH + 2 {
         return None;
     }
@@ -90,15 +99,16 @@ fn week_days(hours: &[HourlyForecast], area: Rect) -> Option<usize> {
     let spare = area
         .height
         .saturating_sub(DETAIL_ROWS + precip_chart::COMFORT_ROWS);
-    let days = spare.saturating_sub(precip_week::box_rows(0)) as usize;
+    let rows = spare.saturating_sub(precip_week::box_rows(0)) as usize;
 
     // Calendar dates, not `hours / 24`. A window opening at 6 PM is two and a
     // half days long and touches four dates, and it is dates the strip draws
     // rows for — counting days here reserved one row too few and dropped the
     // tail of the forecast even with the height to show it.
-    let days = days.min(precip_week::day_count(hours));
+    let days = precip_week::group_by_day(hours);
+    let rows = rows.min(days.len());
 
-    (days >= precip_week::MIN_DAYS).then_some(days)
+    (rows >= precip_week::MIN_DAYS).then_some((days, rows))
 }
 
 fn detail_pane_render(
