@@ -21,6 +21,15 @@ refuse to publish a version this file does not describe.
   ink and the first palette built for a light terminal background; every
   other theme assumes a dark one. Seven themes now.
 
+### Changed
+
+- Buffered input is drained before each redraw, so a held arrow key can no
+  longer queue repeats faster than frames are drawn and keep scrolling after
+  it is released.
+- The precipitation screen's week strip is grouped once per frame and borrows
+  its hours instead of cloning them, dropping several hundred allocations and
+  timestamp parses from every redraw of the screen.
+
 ## [0.2.0] - 2026-08-27
 
 The release that stops asking people to install Rust. Prebuilt binaries for five

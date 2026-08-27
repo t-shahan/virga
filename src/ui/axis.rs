@@ -64,10 +64,10 @@ pub(super) fn put_right(frame: &mut Frame, x: u16, y: u16, width: u16, text: &st
 /// The leading tick is what places the plot in the week. Without it a chart
 /// whose first six-hour mark is five columns in reads as starting there, which
 /// is the mistake an axis exists to prevent.
-pub(super) fn hour_ticks_render(
+pub(super) fn hour_ticks_render<'a>(
     frame: &mut Frame,
     row: Rect,
-    times: impl Iterator<Item = String>,
+    times: impl Iterator<Item = &'a str>,
     stride: u16,
     palette: Palette,
 ) {
@@ -77,7 +77,7 @@ pub(super) fn hour_ticks_render(
     let mut taken = row.x;
 
     for (i, time) in times.enumerate() {
-        let label = if i == 0 { anchor(&time) } else { tick(&time) };
+        let label = if i == 0 { anchor(time) } else { tick(time) };
         let Some(label) = label else { continue };
 
         let x = row.x + i as u16 * stride;

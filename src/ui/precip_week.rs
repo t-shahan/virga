@@ -132,7 +132,7 @@ pub(super) const MIN_WIDTH: u16 = DAY_WIDTH + HOURS_IN_A_DAY as u16 + 2;
 
 pub(super) fn precip_week_render(
     frame: &mut Frame,
-    hours: &[HourlyForecast],
+    days: &[Day],
     palette: Palette,
     area: Rect,
     unit: Unit,
@@ -150,7 +150,6 @@ pub(super) fn precip_week_render(
         return;
     }
 
-    let days = group_by_day(hours);
     let shown = days.len().min((inner.height - AXIS_ROWS) as usize);
 
     // Wider cells where there is room. One column an hour is legible but
@@ -251,12 +250,23 @@ fn hour_axis_render(frame: &mut Frame, y: u16, grid_x: u16, cell: u16, palette: 
 /// in. The first day is nearly always partial — the series starts at the
 /// current hour — and its leading slots stay empty so the columns still line
 /// up with every row beneath it.
-struct Day {
+///
+/// The hours are borrowed rather than cloned. The grouping runs on every frame
+/// of the precipitation screen, and cloning put nearly two hundred heap
+/// allocations into each one for series the caller already holds.
+pub(super) struct Day<'a> {
     name: String,
-    hours: [Option<(usize, HourlyForecast)>; HOURS_IN_A_DAY],
+    hours: [Option<(usize, &'a HourlyForecast)>; HOURS_IN_A_DAY],
 }
 
-fn group_by_day(hours: &[HourlyForecast]) -> Vec<Day> {
+/// The strip's rows, one per calendar date the series touches.
+///
+/// The one place a date is derived from an hour, and the caller reserves the
+/// rows this returns. The strip draws a row per calendar date; while the
+/// layout made its own calculation — dividing the hour count by 24 — the two
+/// disagreed for every window that did not open at midnight, and the strip
+/// silently lost its last row.
+pub(super) fn group_by_day(hours: &[HourlyForecast]) -> Vec<Day<'_>> {
     let mut days = grouped(hours);
 
     // Hour zero of the forward window is now, so whichever day it landed in is
@@ -267,7 +277,7 @@ fn group_by_day(hours: &[HourlyForecast]) -> Vec<Day> {
     days
 }
 
-fn grouped(hours: &[HourlyForecast]) -> Vec<Day> {
+fn grouped(hours: &[HourlyForecast]) -> Vec<Day<'_>> {
     let mut days: Vec<Day> = Vec::new();
     let mut current = None;
 
@@ -283,41 +293,18 @@ fn grouped(hours: &[HourlyForecast]) -> Vec<Day> {
         }
 
         if let Some(day) = days.last_mut() {
-            day.hours[at.hour() as usize % HOURS_IN_A_DAY] = Some((index, hour.clone()));
+            day.hours[at.hour() as usize % HOURS_IN_A_DAY] = Some((index, hour));
         }
     }
 
     days
 }
 
-/// The stamp an hour carries, or `None` where it will not parse.
-///
-/// The one place a date is derived from an hour. The strip draws a row per
-/// calendar date and the layout reserves rows per calendar date; while those
-/// were two separate calculations — one grouping by date, the other dividing
-/// the hour count by 24 — they disagreed for every window that did not open at
-/// midnight, and the strip silently lost its last row.
+/// The stamp an hour carries, or `None` where it will not parse. An
+/// unparseable stamp must not open a row of its own, or a malformed response
+/// would push the strip past the height reserved for it.
 fn date_of(hour: &HourlyForecast) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(&hour.time, "%Y-%m-%dT%H:%M").ok()
-}
-
-/// How many rows the strip would draw for these hours.
-///
-/// Equal to `group_by_day(hours).len()` by construction, and asserted to stay
-/// that way — this exists so the layout can ask without paying for the
-/// grouping, not so it can have an opinion of its own.
-pub(super) fn day_count(hours: &[HourlyForecast]) -> usize {
-    let mut count = 0;
-    let mut current = None;
-
-    for at in hours.iter().filter_map(date_of) {
-        if current != Some(at.date()) {
-            current = Some(at.date());
-            count += 1;
-        }
-    }
-
-    count
 }
 
 fn shade(chance: Option<u8>) -> &'static Step {
@@ -389,7 +376,8 @@ mod tests {
     #[test]
     fn an_hour_lands_in_the_column_its_clock_names() {
         // Starting at 6 PM: six hours today, two whole days, then a part day.
-        let days = group_by_day(&hours(60, 18));
+        let series = hours(60, 18);
+        let days = group_by_day(&series);
 
         assert_eq!(days.len(), 4);
         assert!(
@@ -404,38 +392,21 @@ mod tests {
         assert!(days[1].hours.iter().all(Option::is_some), "a whole day");
     }
 
-    /// The invariant the layout depends on. `day_count` exists so the caller
-    /// can reserve rows without paying for the grouping, which is only safe
-    /// while it answers exactly what the grouping would.
-    ///
-    /// Swept across every starting hour, because that is the axis the two came
-    /// apart on: `hours / 24` and a count of calendar dates agree only for a
-    /// window that opens at midnight, and the forward window opens whenever
-    /// the app happens to be started.
-    #[test]
-    fn the_row_count_the_layout_reserves_is_the_one_the_grid_draws() {
-        for start in 0..24 {
-            for count in [1usize, 6, 23, 24, 25, 60, 192] {
-                let series = hours(count, start);
-                assert_eq!(
-                    day_count(&series),
-                    group_by_day(&series).len(),
-                    "{count} hours from {start}:00"
-                );
-            }
-        }
-
-        assert_eq!(day_count(&[]), 0, "no hours, no rows");
-    }
-
-    /// The case the sweep above is really about, stated on its own so a
-    /// regression names the bug rather than a coordinate.
+    /// The bug the grouping exists to prevent, stated on its own so a
+    /// regression names it rather than a coordinate: `hours / 24` is the
+    /// number of *days* a window spans and not the number of dates it touches,
+    /// and the two agree only for a window that opens at midnight.
     #[test]
     fn an_evening_window_is_counted_by_date_and_not_by_elapsed_days() {
         let series = hours(60, 18);
 
-        assert_eq!(day_count(&series), 4, "6 PM plus 60 hours touches 4 dates");
+        assert_eq!(
+            group_by_day(&series).len(),
+            4,
+            "6 PM plus 60 hours touches 4 dates"
+        );
         assert_eq!(60_usize.div_ceil(24), 3, "where the day count says 3");
+        assert!(group_by_day(&[]).is_empty(), "no hours, no rows");
     }
 
     /// An unparseable stamp must not open a row of its own, or a malformed
@@ -445,15 +416,15 @@ mod tests {
         let mut series = hours(48, 0);
         series[5].time = "not-a-time".to_string();
 
-        assert_eq!(day_count(&series), 2);
-        assert_eq!(day_count(&series), group_by_day(&series).len());
+        assert_eq!(group_by_day(&series).len(), 2);
     }
 
     /// The index carried alongside each hour is what the selection is matched
     /// against, so it has to survive the regrouping.
     #[test]
     fn the_series_index_survives_being_grouped() {
-        let days = group_by_day(&hours(60, 18));
+        let series = hours(60, 18);
+        let days = group_by_day(&series);
 
         assert_eq!(days[0].hours[18].as_ref().map(|(i, _)| *i), Some(0));
         assert_eq!(days[0].hours[23].as_ref().map(|(i, _)| *i), Some(5));
@@ -488,7 +459,8 @@ mod tests {
 
     #[test]
     fn a_dry_day_reads_as_an_absence_rather_than_a_measurement() {
-        let days = group_by_day(&hours(48, 0));
+        let series = hours(48, 0);
+        let days = group_by_day(&series);
         assert_eq!(day_total(&days[0], Unit::Imperial), "—");
     }
 
@@ -506,17 +478,11 @@ mod tests {
 
     fn rendered(width: u16, height: u16, selected: usize) -> String {
         let weather = Weather::fixture(22, 14);
+        let days = group_by_day(weather.forecast_hours());
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| {
-                precip_week_render(
-                    f,
-                    weather.forecast_hours(),
-                    palette(),
-                    f.area(),
-                    Unit::Imperial,
-                    selected,
-                );
+                precip_week_render(f, &days, palette(), f.area(), Unit::Imperial, selected);
             })
             .unwrap();
 
@@ -535,7 +501,8 @@ mod tests {
     /// reader nothing to decode. Every row below it keeps its weekday.
     #[test]
     fn the_current_day_is_named_rather_than_dated() {
-        let days = group_by_day(&hours(60, 18));
+        let series = hours(60, 18);
+        let days = group_by_day(&series);
 
         assert_eq!(days[0].name, TODAY);
         assert!(
@@ -591,18 +558,12 @@ mod tests {
             // The bottom of the ramp, which is the step that dims.
             hour.chance = Some(5);
         }
+        let days = group_by_day(weather.forecast_hours());
 
         let mut terminal = Terminal::new(TestBackend::new(90, 11)).unwrap();
         terminal
             .draw(|f| {
-                precip_week_render(
-                    f,
-                    weather.forecast_hours(),
-                    palette(),
-                    f.area(),
-                    Unit::Imperial,
-                    3,
-                );
+                precip_week_render(f, &days, palette(), f.area(), Unit::Imperial, 3);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -635,18 +596,12 @@ mod tests {
         for hour in &mut weather.hourly {
             hour.chance = Some(5);
         }
+        let days = group_by_day(weather.forecast_hours());
 
         let mut terminal = Terminal::new(TestBackend::new(90, 11)).unwrap();
         terminal
             .draw(|f| {
-                precip_week_render(
-                    f,
-                    weather.forecast_hours(),
-                    palette(),
-                    f.area(),
-                    Unit::Imperial,
-                    3,
-                );
+                precip_week_render(f, &days, palette(), f.area(), Unit::Imperial, 3);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -684,7 +639,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 11)).unwrap();
         terminal
             .draw(|f| {
-                precip_week_render(f, &[], palette(), f.area(), Unit::Imperial, 0);
+                precip_week_render(
+                    f,
+                    &group_by_day(&[]),
+                    palette(),
+                    f.area(),
+                    Unit::Imperial,
+                    0,
+                );
             })
             .unwrap();
 
