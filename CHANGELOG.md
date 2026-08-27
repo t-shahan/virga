@@ -12,6 +12,12 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.3.0]
+
+Catppuccin comes back in two flavours, one of them the first palette Virga has
+shipped for a light terminal, and the precipitation screen stops rebuilding its
+week strip from scratch on every frame.
+
 ### Added
 
 - **Catppuccin, in two flavours.** `catppuccin mocha` returns after being cut
@@ -95,6 +101,7 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/t-shahan/virga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t-shahan/virga/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/t-shahan/virga/releases/tag/v0.1.0
