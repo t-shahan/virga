@@ -198,6 +198,17 @@ pub(crate) fn report(current: &Release, latest: &Release, method: &InstallMethod
     )
 }
 
+/// The one-line startup notice, or `None` when there is nothing newsworthy.
+///
+/// It points at `virga update` rather than carrying the instruction itself:
+/// one muted line has room to say that news exists, and the subcommand is
+/// where the full answer already lives.
+pub(crate) fn notice(current: &Release, latest: &Release) -> Option<String> {
+    latest.newer_than(current).then(|| {
+        format!("update: virga {latest} is available (you have {current}) — run `virga update`")
+    })
+}
+
 fn instruction(method: &InstallMethod) -> String {
     let repository = env!("CARGO_PKG_REPOSITORY");
     match method {
@@ -468,6 +479,31 @@ mod tests {
             assert!(report.contains("you have 0.2.0"), "{method:?}");
             assert!(report.contains(expected), "{method:?}: {report}");
         }
+    }
+
+    #[test]
+    fn no_newer_release_means_no_notice() {
+        let current = Release::parse("0.2.0").unwrap();
+        let behind = Release::parse("0.1.0").unwrap();
+
+        assert_eq!(notice(&current, &current), None);
+        assert_eq!(notice(&current, &behind), None, "being ahead is not news");
+    }
+
+    #[test]
+    fn the_notice_names_both_versions_and_points_at_the_subcommand() {
+        let current = Release::parse("0.2.0").unwrap();
+        let latest = Release::parse("0.3.0").unwrap();
+
+        let notice = notice(&current, &latest).unwrap();
+
+        assert!(notice.contains("0.3.0"));
+        assert!(notice.contains("0.2.0"));
+        assert!(notice.contains("virga update"));
+        assert!(
+            !notice.contains('\n'),
+            "the notice is one line above the key bar, not a paragraph"
+        );
     }
 
     /// The variable has to ride the `sh` side of the pipe: prefixed onto

@@ -93,8 +93,9 @@ No option changes how the application runs. Every control inside it is a key,
 and the bar along the bottom names them. `q` quits.
 
 Environment:
-  VIRGA_THEME  Startup palette, for one launch
-  VIRGA_GEOIP  Set to `off` to skip the IP location lookup
+  VIRGA_THEME   Startup palette, for one launch
+  VIRGA_GEOIP   Set to `off` to skip the IP location lookup
+  VIRGA_UPDATE  Set to `off` to skip the startup release check
 
 Weather, air quality and geocoding come from Open-Meteo. No account or API key
 is required. <{repository}>",
@@ -207,5 +208,6 @@ mod tests {
         assert!(text.contains("update"));
         assert!(text.contains("VIRGA_THEME"));
         assert!(text.contains("VIRGA_GEOIP"));
+        assert!(text.contains("VIRGA_UPDATE"));
     }
 }

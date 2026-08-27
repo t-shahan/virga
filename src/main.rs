@@ -102,6 +102,10 @@ fn main() -> Result<()> {
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
+    let (check_updates, warning) = checks_enabled(std::env::var("VIRGA_UPDATE").ok().as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
 
     let (startup, state_path, persisted_theme) = match state::path() {
         Ok(path) => {
@@ -131,16 +135,24 @@ fn main() -> Result<()> {
 
     let terminal = ratatui::init();
     let mut warning = None;
+    let mut notice = None;
     let result = run(
         terminal,
         startup,
         theme,
         state_path.as_deref(),
+        check_updates,
         &mut warning,
+        &mut notice,
     );
     ratatui::restore();
     if let Some(warning) = warning {
         eprintln!("{warning}");
+    }
+    // News a straight-to-quit launch never gave a frame. Information, not a
+    // complaint, so it goes to stdout.
+    if let Some(notice) = notice {
+        println!("{notice}");
     }
     result
 }
@@ -192,6 +204,16 @@ fn startup_location(remembered: Option<Remembered>, detect: bool) -> Startup {
     }
 }
 
+/// The spellings of on and off an environment switch accepts, or `None` for
+/// a value that is neither — the caller owns the complaint.
+fn switch(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" | "no" => Some(false),
+        "on" | "1" | "true" | "yes" => Some(true),
+        _ => None,
+    }
+}
+
 /// Whether to ask the network where the user is, given whatever `VIRGA_GEOIP`
 /// was set to.
 ///
@@ -204,13 +226,31 @@ fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
         return (true, None);
     };
 
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "0" | "false" | "no" => (false, None),
-        "on" | "1" | "true" | "yes" => (true, None),
-        _ => (
+    match switch(value) {
+        Some(enabled) => (enabled, None),
+        None => (
             true,
             Some(format!(
                 "virga: VIRGA_GEOIP={value:?} is not on or off; leaving location detection on."
+            )),
+        ),
+    }
+}
+
+/// Whether to probe for a newer release at startup, given whatever
+/// `VIRGA_UPDATE` was set to. `VIRGA_GEOIP`'s grammar and `VIRGA_GEOIP`'s
+/// forgiveness, for the same reasons.
+fn checks_enabled(requested: Option<&str>) -> (bool, Option<String>) {
+    let Some(value) = requested else {
+        return (true, None);
+    };
+
+    match switch(value) {
+        Some(enabled) => (enabled, None),
+        None => (
+            true,
+            Some(format!(
+                "virga: VIRGA_UPDATE={value:?} is not on or off; leaving the update check on."
             )),
         ),
     }
@@ -360,7 +400,9 @@ fn run(
     startup: Startup,
     theme: Theme,
     state_path: Option<&Path>,
+    check_updates: bool,
     warning: &mut Option<String>,
+    notice: &mut Option<String>,
 ) -> Result<()> {
     // Bounded: see `events::REQUEST_QUEUE`. Messages back stay unbounded — the
     // worker produces at most one per request it was handed, so bounding the
@@ -368,6 +410,16 @@ fn run(
     // would be a deadlock waiting to happen.
     let (request_tx, request_rx) = mpsc::sync_channel(events::REQUEST_QUEUE);
     let (message_tx, message_rx) = mpsc::channel();
+    // The probe rides its own thread and the shared message channel; the
+    // worker's request queue is serial, and news must never stall a search.
+    if check_updates {
+        events::spawn_update_check(message_tx.clone(), || {
+            let current = update::Release::parse(env!("CARGO_PKG_VERSION")).ok()?;
+            let latest =
+                update::Release::parse(&update::latest_tag(update::RELEASES_URL).ok()?).ok()?;
+            update::notice(&current, &latest)
+        });
+    }
     events::spawn_worker(request_rx, message_tx);
 
     let mut app = App::with_startup(startup);
@@ -452,6 +504,10 @@ fn run(
                             dispatch(&request_tx, &mut app, request)?;
                         }
                         if app.should_quit {
+                            // Quit left the notice standing exactly when no
+                            // other key ever cleared it; hand it out for the
+                            // ordinary screen.
+                            *notice = app.update_notice.take();
                             return Ok(());
                         }
                     }
@@ -609,6 +665,28 @@ mod tests {
         }
         assert!(detection_enabled(None).0);
         assert_eq!(detection_enabled(Some("off")).1, None);
+    }
+
+    /// One grammar for every switch: the update check accepts exactly the
+    /// spellings detection does.
+    #[test]
+    fn the_environment_variable_turns_the_update_check_off() {
+        for value in ["off", "Off", " OFF ", "0", "false", "no"] {
+            assert!(!checks_enabled(Some(value)).0, "{value:?}");
+        }
+        for value in ["on", "1", "true", "yes"] {
+            assert!(checks_enabled(Some(value)).0, "{value:?}");
+        }
+        assert!(checks_enabled(None).0);
+        assert_eq!(checks_enabled(Some("off")).1, None);
+    }
+
+    #[test]
+    fn an_unusable_update_value_warns_and_leaves_the_check_on() {
+        let (enabled, warning) = checks_enabled(Some("maybe"));
+
+        assert!(enabled);
+        assert!(warning.unwrap().contains("VIRGA_UPDATE"));
     }
 
     /// The `VIRGA_THEME` precedent: a typo in a shell profile is a warning and
