@@ -12,7 +12,19 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **`virga theme`**: list the colour themes and mark the startup default, or
+  persist one — `virga theme tokyo night` — so every later launch starts in
+  it. The choice is stored in `state.json` beside the remembered location;
+  `VIRGA_THEME` still overrides it for a single launch, and `t` still cycles
+  themes for the session. `virga help` and `virga version` also now work as
+  word spellings of `-h` and `-V`.
+
 ### Changed
+
+- An unusable `VIRGA_THEME` value now falls back to the persisted startup
+  theme, when one is set, rather than to the built-in default.
 
 - Buffered input is drained before each redraw, so a held arrow key can no
   longer queue repeats faster than frames are drawn and keep scrolling after

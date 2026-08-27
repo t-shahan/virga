@@ -126,8 +126,9 @@ slower to render.
 Uninstalling from source takes the *package* name, `virga-tui`, not the binary
 name.
 
-Removing the binary leaves the one file Virga writes, a `state.json` holding the
-last location you chose. It lives in the platform's per-user state directory:
+Removing the binary leaves the one file Virga writes, a `state.json` holding
+the last location you chose and, if you set one, your startup theme. It lives
+in the platform's per-user state directory:
 
 | Platform | Path |
 |---|---|
@@ -235,17 +236,28 @@ The four non-default palettes use 24-bit colour. A terminal without truecolor
 may approximate or ignore them, which is why `default` is the default: the
 out-of-the-box appearance does not depend on truecolor support.
 
-Set `VIRGA_THEME` to start somewhere other than the default. Names are
-case-insensitive and forgiving about separators, so `tokyo night`,
-`tokyo-night`, and `Tokyo_Night` select the same theme:
+To make a theme the startup default, persist it:
+
+```bash
+virga theme tokyo night
+```
+
+`virga theme` alone lists the palettes and marks the one the next launch will
+use. Names are case-insensitive and forgiving about separators, so `tokyo
+night`, `tokyo-night`, and `Tokyo_Night` select the same theme, and multi-word
+names need no quotes.
+
+`VIRGA_THEME` still works and outranks the persisted theme for one launch:
 
 ```bash
 VIRGA_THEME=gruvbox-dark virga
 ```
 
-An unrecognized name prints the known themes and starts in `default` rather
-than refusing to run. The theme is not written to disk; like the unit toggle,
-it lasts for the current session.
+From weakest to strongest, the startup theme is the built-in `default`, the
+persisted theme, `VIRGA_THEME`, and whatever `t` lands on — which lasts for
+the session only, so cycling is a preview rather than a commitment. An
+unrecognized `VIRGA_THEME` prints the known themes and falls back to the
+persisted theme rather than refusing to run.
 
 ## Where it starts
 
@@ -273,13 +285,14 @@ value prints a warning and leaves detection on rather than refusing to run.
 
 ## Configuration
 
-`VIRGA_THEME` sets the startup palette and `VIRGA_GEOIP` turns location
-detection off, both as described above. Unit and theme changes made in the app
-last for the session.
+`virga theme` persists the startup palette, `VIRGA_THEME` overrides it for one
+launch, and `VIRGA_GEOIP` turns location detection off, all as described above.
+Unit and theme changes made in the app last for the session.
 
-Virga takes no options that change how it runs, since the terminal is the whole
-interface. It answers two questions without starting up: `virga --version` and
-`virga --help`.
+No option changes how the application runs, since the terminal is the whole
+interface. What the command line answers, it answers without starting up:
+`virga theme` lists or persists the startup palette, and `virga --version` and
+`virga --help` answer what they always have.
 
 ## Contributing
 
@@ -322,8 +335,8 @@ still publishes and only the tap update is skipped, with a warning.
 ## Limitations
 
 - There is no general configuration file, and weather is never cached. Every
-  launch fetches fresh weather; only the startup theme and location detection
-  can be set through the environment.
+  launch fetches fresh weather; only the startup theme and location are
+  persisted, and units last for the session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
@@ -358,8 +371,9 @@ That request is not made at all once you have chosen a city, or with
 
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
-chose it or it was detected. Your IP address is never written to disk — the
-resolved city is. It does not store weather responses, searches, or history.
+chose it or it was detected — and, if you set one with `virga theme`, the name
+of your startup theme. Your IP address is never written to disk — the resolved
+city is. It does not store weather responses, searches, or history.
 Weather and air-quality requests send the location coordinates to Open-Meteo;
 city searches submit their search text to its geocoder. Open-Meteo's
 free-service logs may retain IP addresses and coordinates for 90 days. See
