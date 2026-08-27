@@ -15,6 +15,10 @@ pub(crate) enum Invocation {
     Run,
     Version,
     Help,
+    /// List the themes, or — with a name — persist one as the startup
+    /// default. The name is everything after `theme` joined with spaces, so
+    /// multi-word names need no quoting.
+    Theme(Option<String>),
     /// An argument that means nothing to us. Carried rather than reported here
     /// so the caller owns the exit code and the stream it is written to.
     Unknown(String),
@@ -22,23 +26,33 @@ pub(crate) enum Invocation {
 
 /// Classify the arguments, ignoring `argv[0]`.
 ///
-/// Only the first argument is inspected, because none of them combine: whatever
-/// it asks for is the whole answer, and `virga --help --version` printing help
-/// is as good as any other rule. An unrecognized argument is an error rather
-/// than something to skip past — a typo must not silently start the
-/// application, because the user asked a question they would never see answered.
+/// The first argument decides everything. Only `theme` reads past it — the
+/// rest of the line is its argument — because nothing else combines: whatever
+/// the first argument asks for is the whole answer, and `virga --help
+/// --version` printing help is as good as any other rule. An unrecognized
+/// argument is an error rather than something to skip past — a typo must not
+/// silently start the application, because the user asked a question they
+/// would never see answered.
 pub(crate) fn parse_args<I, S>(arguments: I) -> Invocation
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let Some(argument) = arguments.into_iter().next() else {
+    let mut arguments = arguments.into_iter();
+    let Some(argument) = arguments.next() else {
         return Invocation::Run;
     };
 
     match argument.as_ref() {
-        "-V" | "--version" => Invocation::Version,
-        "-h" | "--help" => Invocation::Help,
+        "-V" | "--version" | "version" => Invocation::Version,
+        "-h" | "--help" | "help" => Invocation::Help,
+        "theme" => {
+            let name = arguments
+                .map(|argument| argument.as_ref().to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Invocation::Theme((!name.is_empty()).then_some(name))
+        }
         other => Invocation::Unknown(other.to_string()),
     }
 }
@@ -50,17 +64,21 @@ pub(crate) fn usage() -> String {
 virga {version}
 {description}
 
-Usage: virga [OPTIONS]
+Usage: virga [COMMAND]
+
+Commands:
+  theme [NAME]   List the themes, or set the startup default
+  help, version  What -h and -V print
 
 Options:
   -h, --help     Print this message
   -V, --version  Print the version
 
-Virga takes no other options. Every other control is a key inside the
-application, and the bar along the bottom names them. `q` quits.
+No option changes how the application runs. Every control inside it is a key,
+and the bar along the bottom names them. `q` quits.
 
 Environment:
-  VIRGA_THEME  Startup palette
+  VIRGA_THEME  Startup palette, for one launch
   VIRGA_GEOIP  Set to `off` to skip the IP location lookup
 
 Weather, air quality and geocoding come from Open-Meteo. No account or API key
@@ -118,10 +136,48 @@ mod tests {
     }
 
     #[test]
-    fn usage_names_the_binary_the_version_and_both_environment_variables() {
+    fn help_and_version_work_as_words_too() {
+        // With subcommands in the grammar, `virga help` is what people will
+        // type; making it an error while `theme` works would be a trap.
+        assert_eq!(parse_args(["help"]), Invocation::Help);
+        assert_eq!(parse_args(["version"]), Invocation::Version);
+    }
+
+    #[test]
+    fn theme_alone_asks_for_the_list() {
+        assert_eq!(parse_args(["theme"]), Invocation::Theme(None));
+    }
+
+    #[test]
+    fn theme_joins_its_arguments_so_multiword_names_need_no_quotes() {
+        assert_eq!(
+            parse_args(["theme", "tokyo", "night"]),
+            Invocation::Theme(Some("tokyo night".to_string()))
+        );
+        assert_eq!(
+            parse_args(["theme", "tokyo-night"]),
+            Invocation::Theme(Some("tokyo-night".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_subcommand_typo_is_still_unknown() {
+        assert_eq!(
+            parse_args(["them"]),
+            Invocation::Unknown("them".to_string())
+        );
+        assert_eq!(
+            parse_args(["themes"]),
+            Invocation::Unknown("themes".to_string())
+        );
+    }
+
+    #[test]
+    fn usage_names_the_commands_and_both_environment_variables() {
         let text = usage();
         assert!(text.starts_with("virga "));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(text.contains("theme"));
         assert!(text.contains("VIRGA_THEME"));
         assert!(text.contains("VIRGA_GEOIP"));
     }

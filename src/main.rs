@@ -34,6 +34,44 @@ fn main() -> Result<()> {
             println!("{}", cli::usage());
             return Ok(());
         }
+        // The one command that reads the state file on purpose. A file that
+        // cannot be found or read still gets the list — the marker just sits
+        // on the default, and the complaint goes to stderr beside it.
+        Invocation::Theme(None) => {
+            let (persisted, warning) = match state::path() {
+                Ok(path) => load_persisted(&path),
+                Err(error) => (
+                    state::Persisted::default(),
+                    Some(format!(
+                        "virga: could not determine where themes are remembered: {error:#}"
+                    )),
+                ),
+            };
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            print!("{}", theme_listing(persisted.theme));
+            return Ok(());
+        }
+        Invocation::Theme(Some(name)) => {
+            // Unlike VIRGA_THEME — where a typo must not stop the weather —
+            // an explicit command asked a question and deserves a real
+            // answer, not a fallback.
+            let Some(theme) = Theme::from_name(&name) else {
+                eprintln!("{}", unknown_theme_complaint(&name));
+                std::process::exit(2);
+            };
+            match state::path().and_then(|path| state::save_theme(&path, theme)) {
+                Ok(()) => {
+                    println!("{}", theme_set_message(theme));
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("virga: could not save the startup theme: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Invocation::Unknown(argument) => {
             eprintln!("virga: unrecognized argument {argument:?}\n");
             eprintln!("{}", cli::usage());
@@ -41,38 +79,39 @@ fn main() -> Result<()> {
         }
     }
 
-    // Read before the terminal is taken over: a complaint about the variable
-    // has to go to the ordinary screen, or it is written to the alternate
-    // screen and wiped the moment the app exits.
-    let theme = startup_theme(std::env::var("VIRGA_THEME").ok().as_deref());
+    // All read before the terminal is taken over: a complaint about a
+    // variable or the state file has to go to the ordinary screen, or it is
+    // written to the alternate screen and wiped the moment the app exits.
     let (detect, warning) = detection_enabled(std::env::var("VIRGA_GEOIP").ok().as_deref());
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
 
-    let (startup, state_path) = match state::path() {
+    let (startup, state_path, persisted_theme) = match state::path() {
         Ok(path) => {
-            let (startup, warning) = startup_location(&path, detect);
+            let (persisted, warning) = load_persisted(&path);
             if let Some(warning) = warning {
                 eprintln!("{warning}");
             }
-            (startup, Some(path))
+            (
+                startup_location(persisted.remembered, detect),
+                Some(path),
+                persisted.theme,
+            )
         }
         // Nowhere to remember a location is not a reason to stop working out
         // where the user is: the two are unrelated, and a user with no writable
         // state directory still deserves their own city.
         Err(error) => {
             eprintln!("virga: could not determine where to remember location: {error:#}");
-            (
-                Startup {
-                    location: ActiveLocation::default(),
-                    source: LocationSource::Fallback,
-                    detect,
-                },
-                None,
-            )
+            (startup_location(None, detect), None, None)
         }
     };
+
+    let theme = startup_theme(
+        std::env::var("VIRGA_THEME").ok().as_deref(),
+        persisted_theme,
+    );
 
     let terminal = ratatui::init();
     let mut warning = None;
@@ -90,24 +129,30 @@ fn main() -> Result<()> {
     result
 }
 
-/// How the app should open, given what is on disk and whether detection is
-/// allowed to run.
+/// Read the state file, folding every complaint into one warning: a document
+/// that cannot be read is a warning and an empty document, never a refusal
+/// to start.
+fn load_persisted(path: &Path) -> (state::Persisted, Option<String>) {
+    match state::load_from(path) {
+        Ok(persisted) => {
+            let warning = persisted.warning.clone();
+            (persisted, warning)
+        }
+        Err(error) => (
+            state::Persisted::default(),
+            Some(format!("virga: could not load remembered state: {error:#}")),
+        ),
+    }
+}
+
+/// How the app should open, given what was remembered and whether detection
+/// is allowed to run.
 ///
 /// The precedence is the whole feature: a city the user chose wins outright, a
 /// city that was detected before is kept only as the answer for a launch where
 /// detection fails, and with neither there is New York and a lookup.
-fn startup_location(path: &Path, detect: bool) -> (Startup, Option<String>) {
-    let (remembered, warning) = match state::load_from(path) {
-        Ok(remembered) => (remembered, None),
-        Err(error) => (
-            None,
-            Some(format!(
-                "virga: could not load remembered location: {error:#}"
-            )),
-        ),
-    };
-
-    let startup = match remembered {
+fn startup_location(remembered: Option<Remembered>, detect: bool) -> Startup {
+    match remembered {
         // A choice is a choice. Detection does not get a vote.
         Some(Remembered {
             location,
@@ -128,9 +173,7 @@ fn startup_location(path: &Path, detect: bool) -> (Startup, Option<String>) {
             source: LocationSource::Fallback,
             detect,
         },
-    };
-
-    (startup, warning)
+    }
 }
 
 /// Whether to ask the network where the user is, given whatever `VIRGA_GEOIP`
@@ -166,7 +209,7 @@ fn accept_message(
 ) -> (Option<Request>, Option<String>) {
     let outcome = app.on_message(message);
     let save_warning = outcome.remember.and_then(|remembered| {
-        state::save_to(path, &remembered)
+        state::save_location(path, &remembered)
             .err()
             .map(|error| format!("virga: could not remember location: {error:#}"))
     });
@@ -181,25 +224,75 @@ fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>)
     }
 }
 
-/// The palette to start in, given whatever `VIRGA_THEME` was set to.
+/// The palette to start in, given `VIRGA_THEME` and whatever `virga theme`
+/// persisted.
 ///
-/// An unusable value is a warning and the default, not an exit: the variable
-/// is a convenience, and refusing to show the weather because of a typo in a
-/// shell profile is a poor trade.
-fn startup_theme(requested: Option<&str>) -> Theme {
+/// The environment outranks the persisted theme because a variable is set per
+/// invocation, deliberately. An unusable value is a warning and the persisted
+/// theme, not an exit — and not the built-in default either: the standing
+/// choice absorbs the typo, because refusing to honor one setting over a typo
+/// in another is a poor trade.
+fn startup_theme(requested: Option<&str>, persisted: Option<Theme>) -> Theme {
+    let fallback = persisted.unwrap_or_default();
     let Some(name) = requested else {
-        return Theme::default();
+        return fallback;
     };
 
     Theme::from_name(name).unwrap_or_else(|| {
         let known: Vec<&str> = Theme::ALL.into_iter().map(Theme::name).collect();
         eprintln!(
             "virga: VIRGA_THEME={name:?} is not a theme; using {}.\n       known themes: {}",
-            Theme::default().name(),
+            fallback.name(),
             known.join(", "),
         );
-        Theme::default()
+        fallback
     })
+}
+
+/// The `virga theme` listing: every theme, its character, and a marker on the
+/// one the next launch will start in.
+fn theme_listing(persisted: Option<Theme>) -> String {
+    let startup = persisted.unwrap_or_default();
+    let width = Theme::ALL
+        .into_iter()
+        .map(|theme| theme.name().chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut listing = String::new();
+    for theme in Theme::ALL {
+        let marker = if theme == startup { '*' } else { ' ' };
+        let name = theme.name();
+        listing.push_str(&format!("{marker} {name:width$}  {}\n", theme_blurb(theme)));
+    }
+    listing.push_str(
+        "\nThe marked theme is the startup default. VIRGA_THEME overrides it for one\n\
+         launch; `t` cycles themes inside the app for one session.\n",
+    );
+    listing
+}
+
+/// One line of character per theme, matching the README's table.
+fn theme_blurb(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Default => "the terminal's own sixteen colours",
+        Theme::GruvboxDark => "warm — orange bars, gold selection, green today",
+        Theme::Nord => "cool — icy bars, aurora-purple selection",
+        Theme::TokyoNight => "blue and violet, one warm selection",
+        Theme::Dracula => "loud — pink bars, lime selection, cyan today",
+    }
+}
+
+fn theme_set_message(theme: Theme) -> String {
+    format!("virga: startup theme is now {}.", theme.name())
+}
+
+fn unknown_theme_complaint(name: &str) -> String {
+    let known: Vec<&str> = Theme::ALL.into_iter().map(Theme::name).collect();
+    format!(
+        "virga: {name:?} is not a theme.\n       known themes: {}",
+        known.join(", ")
+    )
 }
 
 /// Hand a request to the worker without ever blocking the draw loop.
@@ -392,27 +485,18 @@ mod tests {
     /// city next launch, wherever the network thinks you are.
     #[test]
     fn a_chosen_location_is_carried_into_startup_without_detection() {
-        let test = tempfile::tempdir().unwrap();
-        let path = test.path().join("state.json");
-        state::save_to(&path, &chosen(berlin())).unwrap();
-
-        let (startup, warning) = startup_location(&path, true);
+        let startup = startup_location(Some(chosen(berlin())), true);
 
         assert_eq!(startup.location, berlin());
         assert_eq!(startup.source, LocationSource::Chosen);
         assert!(!startup.detect, "a chosen city must not be re-detected");
-        assert_eq!(warning, None);
     }
 
     /// Yesterday's guess is worth keeping only as the answer for a launch where
     /// today's lookup does not come back.
     #[test]
     fn a_detected_location_is_kept_only_as_the_fallback() {
-        let test = tempfile::tempdir().unwrap();
-        let path = test.path().join("state.json");
-        state::save_to(&path, &detected(berlin())).unwrap();
-
-        let (startup, _) = startup_location(&path, true);
+        let startup = startup_location(Some(detected(berlin())), true);
 
         assert_eq!(
             startup.location,
@@ -425,23 +509,16 @@ mod tests {
 
     #[test]
     fn no_state_detects_from_the_builtin_fallback() {
-        let test = tempfile::tempdir().unwrap();
-
-        let (startup, warning) = startup_location(&test.path().join("state.json"), true);
+        let startup = startup_location(None, true);
 
         assert_eq!(startup.location, ActiveLocation::default());
         assert_eq!(startup.source, LocationSource::Fallback);
         assert!(startup.detect);
-        assert_eq!(warning, None);
     }
 
     #[test]
     fn opting_out_never_detects() {
-        let test = tempfile::tempdir().unwrap();
-        let path = test.path().join("state.json");
-        state::save_to(&path, &detected(berlin())).unwrap();
-
-        let (startup, _) = startup_location(&path, false);
+        let startup = startup_location(Some(detected(berlin())), false);
         assert!(!startup.detect);
         assert_eq!(
             startup.location,
@@ -449,7 +526,7 @@ mod tests {
             "the last guess is still the best one"
         );
 
-        let (startup, _) = startup_location(&test.path().join("nothing.json"), false);
+        let startup = startup_location(None, false);
         assert!(!startup.detect);
         assert_eq!(startup.location, ActiveLocation::default());
     }
@@ -460,7 +537,8 @@ mod tests {
         let path = test.path().join("state.json");
         std::fs::write(&path, "{").unwrap();
 
-        let (startup, warning) = startup_location(&path, true);
+        let (persisted, warning) = load_persisted(&path);
+        let startup = startup_location(persisted.remembered, true);
 
         assert_eq!(startup.location, ActiveLocation::default());
         assert_eq!(startup.source, LocationSource::Fallback);
@@ -468,11 +546,27 @@ mod tests {
             startup.detect,
             "an unreadable file is a reason to detect, not a reason to give up"
         );
-        assert!(
-            warning
-                .unwrap()
-                .contains("could not load remembered location")
-        );
+        assert!(warning.unwrap().contains("could not load remembered state"));
+    }
+
+    /// The state module reports the parts of a document it could use and a
+    /// complaint about the part it could not; the fold here has to carry that
+    /// complaint out, or it dies unheard.
+    #[test]
+    fn a_partly_usable_state_file_keeps_its_warning() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","theme":"solarized"}"#,
+        )
+        .unwrap();
+
+        let (persisted, warning) = load_persisted(&path);
+
+        assert!(persisted.remembered.is_some());
+        assert_eq!(persisted.theme, None);
+        assert!(warning.unwrap().contains("solarized"));
     }
 
     #[test]
@@ -507,7 +601,10 @@ mod tests {
         let message = loaded(app.startup_request());
 
         assert_eq!(accept_message(&mut app, message, &path).1, None);
-        assert_eq!(state::load_from(&path).unwrap(), Some(chosen(berlin())));
+        assert_eq!(
+            state::load_from(&path).unwrap().remembered,
+            Some(chosen(berlin()))
+        );
     }
 
     /// The end-to-end shape of a first run: detect, fetch what came back, and
@@ -535,7 +632,7 @@ mod tests {
         );
         assert_eq!(warning, None);
         assert_eq!(
-            state::load_from(&path).unwrap(),
+            state::load_from(&path).unwrap().remembered,
             None,
             "a detection nobody has seen the weather for is not worth keeping"
         );
@@ -544,7 +641,7 @@ mod tests {
 
         assert_eq!(warning, None);
         assert_eq!(
-            state::load_from(&path).unwrap(),
+            state::load_from(&path).unwrap().remembered,
             Some(detected(reykjavik()))
         );
     }
@@ -564,7 +661,7 @@ mod tests {
         let message = loaded(app.startup_request());
 
         assert_eq!(accept_message(&mut app, message, &path).1, None);
-        assert_eq!(state::load_from(&path).unwrap(), None);
+        assert_eq!(state::load_from(&path).unwrap().remembered, None);
     }
 
     #[test]
@@ -596,7 +693,7 @@ mod tests {
     fn stale_and_failed_loads_do_not_replace_state() {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
-        state::save_to(&path, &chosen(berlin())).unwrap();
+        state::save_location(&path, &chosen(berlin())).unwrap();
         let mut app = App::new();
         let stale = app.startup_request();
         let current = app.startup_request();
@@ -617,26 +714,107 @@ mod tests {
             .1,
             None
         );
-        assert_eq!(state::load_from(&path).unwrap(), Some(chosen(berlin())));
+        assert_eq!(
+            state::load_from(&path).unwrap().remembered,
+            Some(chosen(berlin()))
+        );
     }
 
     #[test]
-    fn no_environment_variable_means_the_default_theme() {
-        assert_eq!(startup_theme(None), Theme::default());
+    fn nothing_set_anywhere_means_the_default_theme() {
+        assert_eq!(startup_theme(None, None), Theme::default());
     }
 
     #[test]
     fn the_environment_variable_picks_the_starting_theme() {
         for theme in Theme::ALL {
-            assert_eq!(startup_theme(Some(theme.name())), theme);
+            assert_eq!(startup_theme(Some(theme.name()), None), theme);
         }
+    }
+
+    #[test]
+    fn the_persisted_theme_outranks_the_default() {
+        assert_eq!(startup_theme(None, Some(Theme::Nord)), Theme::Nord);
+    }
+
+    /// A variable is set per invocation, deliberately; the persisted theme is
+    /// the standing default it overrides.
+    #[test]
+    fn the_environment_outranks_the_persisted_theme() {
+        assert_eq!(
+            startup_theme(Some("dracula"), Some(Theme::Nord)),
+            Theme::Dracula
+        );
     }
 
     /// A typo in a shell profile must not stop the weather from appearing.
     #[test]
     fn an_unusable_value_falls_back_rather_than_failing() {
         for value in ["", "  ", "solarized", "Catppuccin Latte"] {
-            assert_eq!(startup_theme(Some(value)), Theme::default(), "{value:?}");
+            assert_eq!(
+                startup_theme(Some(value), None),
+                Theme::default(),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// The standing choice absorbs the typo: refusing to honor one setting
+    /// over a mistake in another would be a poor trade.
+    #[test]
+    fn an_unusable_environment_value_falls_back_to_the_persisted_theme() {
+        assert_eq!(
+            startup_theme(Some("solarized"), Some(Theme::Nord)),
+            Theme::Nord
+        );
+    }
+
+    #[test]
+    fn the_listing_names_every_theme_once() {
+        let listing = theme_listing(None);
+        for theme in Theme::ALL {
+            assert!(
+                listing.contains(theme.name()),
+                "{} is missing",
+                theme.name()
+            );
+        }
+    }
+
+    /// The marker is the answer to "what will the next launch look like":
+    /// it sits on the persisted theme, or on the built-in default when
+    /// nothing was ever persisted.
+    #[test]
+    fn the_marker_sits_on_the_startup_default() {
+        let marked = |listing: &str| -> String {
+            listing
+                .lines()
+                .find(|line| line.starts_with('*'))
+                .expect("no line is marked")
+                .to_string()
+        };
+
+        assert!(marked(&theme_listing(None)).contains("default"));
+        assert!(marked(&theme_listing(Some(Theme::TokyoNight))).contains("tokyo night"));
+    }
+
+    #[test]
+    fn setting_a_theme_confirms_it_by_name() {
+        assert!(theme_set_message(Theme::Nord).contains("nord"));
+    }
+
+    /// The complaint an explicit `virga theme` typo earns has to leave the
+    /// user able to fix it without opening the README.
+    #[test]
+    fn an_unknown_theme_complaint_lists_what_would_have_worked() {
+        let complaint = unknown_theme_complaint("solarized");
+        assert!(complaint.contains("solarized"));
+        for theme in Theme::ALL {
+            assert!(
+                complaint.contains(theme.name()),
+                "{} is missing",
+                theme.name()
+            );
         }
     }
 }
