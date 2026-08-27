@@ -7,9 +7,9 @@ Virga is a responsive Rust terminal weather application for current conditions,
 multi-day forecasts, historical context, and hourly precipitation
 visualization. It is powered by Open-Meteo and requires no account or API key.
 
-> **Project status: Feature-complete.** Virga is not under active maintenance,
-> but it remains available to install and use. Focused contributions are
-> welcome; reviews and responses may take time.
+> **Project status: actively developed.** Virga works and is worth installing
+> today. Features and fixes still land, so expect the occasional release.
+> Contributions are welcome.
 
 *Virga* is precipitation that evaporates before it reaches the ground. It is
 also, most weeks, what the precipitation chart draws.
@@ -46,21 +46,96 @@ umbrella.
 
 ## Install
 
-Virga requires **Rust 1.88 or later**, a terminal with Unicode support, and an
-internet connection. Ratatui requires Rust 1.88 even though the Rust 2024
-edition itself supports earlier compilers.
+Virga needs a terminal with Unicode support and an internet connection. It does
+not need Rust unless you are building it yourself.
+
+### Homebrew
+
+```bash
+brew install t-shahan/tap/virga
+```
+
+macOS and Linux. This is the path that needs the least explanation on macOS,
+because Homebrew does not apply the Gatekeeper quarantine that stops a binary
+downloaded through a browser from opening.
+
+### Install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/t-shahan/virga/main/install.sh | sh
+```
+
+macOS and Linux. It picks the right build for your machine, checks the download
+against the release's `SHA256SUMS` before installing anything, and puts the
+binary in `~/.local/bin`. Two variables change what it does:
+
+| Variable | Effect |
+|---|---|
+| `VIRGA_INSTALL_DIR` | Where the binary goes. Default `~/.local/bin` |
+| `VIRGA_VERSION` | Install a specific tag, for example `v0.2.0` |
+
+### Download it yourself
+
+Every release on the [releases page][releases] carries a build for Linux
+(x86_64 and aarch64, statically linked so distribution does not matter), macOS
+(Apple silicon and Intel), and Windows (x86_64). Windows is not covered by the
+install script, so the `.zip` is the way in.
+
+Check what you downloaded against `SHA256SUMS`:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Every binary also carries a build provenance attestation, which proves it was
+produced by this repository's release workflow rather than by someone else:
+
+```bash
+gh attestation verify ./virga --repo t-shahan/virga
+```
+
+If you downloaded through a browser on macOS, Gatekeeper will refuse to open an
+unsigned binary. Clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine ./virga
+```
+
+### From source
+
+Building requires **Rust 1.88 or later**. Ratatui requires 1.88 even though the
+Rust 2024 edition itself supports earlier compilers.
 
 ```bash
 cargo install --git https://github.com/t-shahan/virga
-virga
 ```
 
-The binary is installed at `~/.cargo/bin/virga`. Re-run the install command to
-update Virga. To remove it, use `cargo uninstall virga-tui` — Cargo expects the
-*package* name, not the binary name.
+The binary lands at `~/.cargo/bin/virga`. From a local checkout, use `cargo run
+--release`; a plain `cargo run` produces an unoptimized build that is noticeably
+slower to render.
 
-From a local checkout, use `cargo run --release`. A plain `cargo run` produces
-an unoptimized build that is noticeably slower to render.
+### Updating and removing
+
+| Installed with | Update | Remove |
+|---|---|---|
+| Homebrew | `brew upgrade virga` | `brew uninstall virga` |
+| Install script | Re-run the one-liner | `rm ~/.local/bin/virga` |
+| Download | Download the new release | Delete the binary |
+| Source | `cargo install --git https://github.com/t-shahan/virga --force` | `cargo uninstall virga-tui` |
+
+Uninstalling from source takes the *package* name, `virga-tui`, not the binary
+name.
+
+Removing the binary leaves the one file Virga writes, a `state.json` holding the
+last location you chose. It lives in the platform's per-user state directory:
+
+| Platform | Path |
+|---|---|
+| macOS | `~/Library/Application Support/com.t-shahan.virga/state.json` |
+| Linux | `~/.local/state/virga/state.json` |
+| Windows | `%LOCALAPPDATA%\t-shahan\virga\data\state.json` |
+
+[releases]: https://github.com/t-shahan/virga/releases/latest
 
 ## Keys
 
@@ -119,7 +194,7 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **269 deterministic tests**; two
+Virga's default locked test suite passes **301 deterministic tests**; three
 provider-dependent live Open-Meteo tests are ignored during normal runs.
 Coverage includes:
 
@@ -202,12 +277,16 @@ value prints a warning and leaves detection on rather than refusing to run.
 detection off, both as described above. Unit and theme changes made in the app
 last for the session.
 
+Virga takes no options that change how it runs, since the terminal is the whole
+interface. It answers two questions without starting up: `virga --version` and
+`virga --help`.
+
 ## Contributing
 
-Focused bug fixes, documentation improvements, tests, accessibility work, and
+Bug fixes, documentation improvements, tests, accessibility work, and
 well-scoped features are welcome. Please open an issue before beginning a
-substantial change so the approach and scope can be discussed. Because Virga is
-not actively maintained, review timing and responses may vary.
+substantial change so the approach and scope can be discussed. This is a
+side project, so review timing varies, but pull requests do get read.
 
 Before opening a pull request, run the same core checks used by CI:
 
@@ -217,6 +296,28 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked --all-targets
 cargo package --locked
 ```
+
+Notable changes belong in [`CHANGELOG.md`](CHANGELOG.md) under `Unreleased`.
+That is not bookkeeping for its own sake: release notes are generated from that
+file, and both the release script and CI refuse to publish a version it does not
+describe.
+
+### Cutting a release
+
+```bash
+./scripts/release.sh 0.3.0
+```
+
+It checks the working tree, bumps the manifest, runs the four gates above, then
+commits, tags, and pushes. From there
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds all five
+platforms, publishes the release with checksums and build provenance, and
+updates the Homebrew tap. The tap push authenticates with a `TAP_KEY` secret
+holding an SSH private key whose public half is a write-enabled deploy key on
+[the tap repository](https://github.com/t-shahan/homebrew-tap). A deploy key
+rather than a personal access token, because it grants write to that one
+repository and nothing else, and does not expire. Without the secret the release
+still publishes and only the tap update is skipped, with a warning.
 
 ## Limitations
 

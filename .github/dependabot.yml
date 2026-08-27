@@ -1,0 +1,25 @@
+# Virga pins its GitHub Actions to commit SHAs and builds with `--locked`, which
+# means nothing updates on its own. That is the point, but it also means the
+# `cargo audit --deny warnings` job in ci.yml will eventually go red on an
+# advisory nobody has seen. These weekly pull requests surface that as routine
+# maintenance instead of as a surprise on the day you try to cut a release.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+
+  # Dependabot rewrites the pinned SHA and the trailing version comment
+  # together, so the pins stay readable after an update.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
