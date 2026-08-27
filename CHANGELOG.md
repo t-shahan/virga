@@ -24,6 +24,12 @@ refuse to publish a version this file does not describe.
   get it, matched to how this copy was installed — Homebrew, Cargo, the
   install script, or a download on Windows. One request to GitHub's release
   redirect answers it; the binary is never replaced in place.
+- **A startup update notice.** Each launch makes the same release check in
+  the background — on its own thread, never delaying the first frame — and
+  shows one muted line above the key bar when a newer release exists. The
+  next keypress clears it and still does its own job; quitting straight away
+  prints the line on the ordinary screen instead. `VIRGA_UPDATE=off` skips
+  the check, and a launch that cannot reach GitHub simply shows no notice.
 - **`virga theme`**: list the colour themes and mark the startup default, or
   persist one — `virga theme tokyo night` — so every later launch starts in
   it. The choice is stored in `state.json` beside the remembered location;

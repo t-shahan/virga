@@ -116,9 +116,15 @@ slower to render.
 
 ### Updating and removing
 
-`virga update` says whether a newer release exists and, judging from where
-the running binary lives, which row of this table applies to you. It never
-replaces the binary itself:
+Virga checks for a newer release once per launch, in the background, and
+shows one muted line above the key bar when it finds one — the next keypress
+clears it, and quitting straight away prints it on the way out instead. Set
+`VIRGA_UPDATE=off` to skip the check; a launch that cannot reach GitHub
+simply shows no notice.
+
+`virga update` asks the same question on demand and, judging from where the
+running binary lives, says which row of this table applies to you. Neither
+ever replaces the binary itself:
 
 | Installed with | Update | Remove |
 |---|---|---|
@@ -294,8 +300,9 @@ value prints a warning and leaves detection on rather than refusing to run.
 ## Configuration
 
 `virga theme` persists the startup palette, `VIRGA_THEME` overrides it for one
-launch, and `VIRGA_GEOIP` turns location detection off, all as described above.
-Unit and theme changes made in the app last for the session.
+launch, `VIRGA_GEOIP` turns location detection off, and `VIRGA_UPDATE` turns
+the startup release check off, all as described above. Unit and theme changes
+made in the app last for the session.
 
 No option changes how the application runs, since the terminal is the whole
 interface. What the command line answers, it answers without starting up:
@@ -378,10 +385,12 @@ policy](https://ipapi.co/privacy/) for what they retain.
 That request is not made at all once you have chosen a city, or with
 `VIRGA_GEOIP=off` set.
 
-Running `virga update` — and nothing else — makes one request to GitHub's
-release-redirect endpoint at github.com, carrying nothing but the request
-itself: no version string, no identifier. The answer is read from a response
-header, and no release page or file is downloaded.
+Checking for a newer release makes one request to GitHub's release-redirect
+endpoint at github.com, carrying nothing but the request itself: no version
+string, no identifier. The answer is read from a response header, and no
+release page or file is downloaded. The check runs once per launch in the
+background and whenever you run `virga update`; set `VIRGA_UPDATE=off` and
+the launch-time request is not made at all.
 
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
