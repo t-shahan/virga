@@ -48,18 +48,22 @@ pub enum Theme {
     Nord,
     TokyoNight,
     Dracula,
+    CatppuccinMocha,
+    CatppuccinLatte,
 }
 
 impl Theme {
     /// Every theme, in cycle order. Kept honest by
     /// `cycling_visits_every_theme_and_comes_back`: `next` is the definition,
     /// and this array has to agree with it.
-    pub const ALL: [Theme; 5] = [
+    pub const ALL: [Theme; 7] = [
         Theme::Default,
         Theme::GruvboxDark,
         Theme::Nord,
         Theme::TokyoNight,
         Theme::Dracula,
+        Theme::CatppuccinMocha,
+        Theme::CatppuccinLatte,
     ];
 
     /// The next theme along, wrapping.
@@ -73,7 +77,9 @@ impl Theme {
             Theme::GruvboxDark => Theme::Nord,
             Theme::Nord => Theme::TokyoNight,
             Theme::TokyoNight => Theme::Dracula,
-            Theme::Dracula => Theme::Default,
+            Theme::Dracula => Theme::CatppuccinMocha,
+            Theme::CatppuccinMocha => Theme::CatppuccinLatte,
+            Theme::CatppuccinLatte => Theme::Default,
         }
     }
 
@@ -86,6 +92,8 @@ impl Theme {
             Theme::Nord => "nord",
             Theme::TokyoNight => "tokyo night",
             Theme::Dracula => "dracula",
+            Theme::CatppuccinMocha => "catppuccin mocha",
+            Theme::CatppuccinLatte => "catppuccin latte",
         }
     }
 
@@ -163,6 +171,34 @@ impl Theme {
                 now: Color::Rgb(139, 233, 253),       // cyan
                 error: Color::Rgb(255, 85, 85),       // red
                 border: Color::Rgb(255, 184, 108),    // orange
+            },
+            // Catppuccin, back after being cut, and this time it commits:
+            // mauve bars — the one purple series in the set — under a sky
+            // selection and a yellow today. The first cut went blue on
+            // `accent` and vanished against the terminal default; mauve is
+            // the colour Catppuccin is actually known by.
+            Theme::CatppuccinMocha => Palette {
+                accent: Color::Rgb(203, 166, 247),    // mauve
+                text: Color::Rgb(205, 214, 244),      // text
+                muted: Color::Rgb(108, 112, 134),     // overlay0
+                selection: Color::Rgb(137, 220, 235), // sky
+                now: Color::Rgb(249, 226, 175),       // yellow
+                error: Color::Rgb(243, 139, 168),     // red
+                border: Color::Rgb(69, 71, 90),       // surface1
+            },
+            // The same scheme in Catppuccin's light flavour, and the one
+            // palette here built for a pale terminal: every other theme sets
+            // near-white text that washes out on a light background. Same
+            // roles as Mocha — mauve bars, sky selection, yellow today — in
+            // ink dark enough to read on paper.
+            Theme::CatppuccinLatte => Palette {
+                accent: Color::Rgb(136, 57, 239),   // mauve
+                text: Color::Rgb(76, 79, 105),      // text
+                muted: Color::Rgb(140, 143, 161),   // overlay1
+                selection: Color::Rgb(4, 165, 229), // sky
+                now: Color::Rgb(223, 142, 29),      // yellow
+                error: Color::Rgb(210, 15, 57),     // red
+                border: Color::Rgb(172, 176, 190),  // surface2
             },
         }
     }
@@ -271,7 +307,9 @@ mod tests {
         }
     }
 
-    /// A typo must not land silently on some other palette.
+    /// A typo must not land silently on some other palette. `catppuccin`
+    /// alone stays rejected now that it names two flavours: picking one
+    /// would be the guessing this test forbids.
     #[test]
     fn an_unknown_name_is_rejected_rather_than_guessed_at() {
         for name in ["", "terminal", "catppuccin", "tokyo", "solarized", "nordic"] {
@@ -370,8 +408,9 @@ mod tests {
     /// default theme draws its boxes in the terminal's own colour.
     #[test]
     fn no_two_themes_draw_the_same_border() {
-        /// Comfortably clear of the 37 the current set manages, and far above
-        /// the 1 the previous set managed at its closest pair.
+        /// Comfortably clear of the 40 the current set manages at its closest
+        /// pair (Gruvbox's bg3 against Mocha's surface1), and far above the 1
+        /// the pre-0.2.0 set managed at its.
         const MIN_SEPARATION: f64 = 24.0;
 
         let named: Vec<Theme> = Theme::ALL
@@ -404,6 +443,33 @@ mod tests {
                 "{}: the border and the labels on it are the same colour",
                 theme.name()
             );
+        }
+    }
+
+    /// Latte is the palette for a light terminal, and that is a property of
+    /// its ink: readings dark where every other theme's are light. If a later
+    /// edit brightens Latte's text — or darkens another theme's below it —
+    /// the set is back to assuming every terminal is dark.
+    #[test]
+    fn latte_alone_writes_in_dark_ink() {
+        let lightness = |colour: Color| {
+            let Color::Rgb(r, g, b) = colour else {
+                panic!("{colour:?} is an ANSI colour and has no fixed value to measure");
+            };
+            (u16::from(r) + u16::from(g) + u16::from(b)) / 3
+        };
+
+        for theme in Theme::ALL.into_iter().filter(|t| *t != Theme::Default) {
+            let ink = lightness(theme.palette().text);
+            if theme == Theme::CatppuccinLatte {
+                assert!(ink < 128, "latte's text is too light to read on paper");
+            } else {
+                assert!(
+                    ink > 128,
+                    "{}: text too dark for the dark terminals it assumes",
+                    theme.name()
+                );
+            }
         }
     }
 

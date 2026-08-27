@@ -12,6 +12,15 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **Catppuccin, in two flavours.** `catppuccin mocha` returns after being cut
+  in 0.2.0, rebuilt around the mauve the scheme is actually known by — pastel
+  purple bars, sky selection, yellow today — instead of the blue that vanished
+  against the terminal default. `catppuccin latte` is the same scheme in dark
+  ink and the first palette built for a light terminal background; every
+  other theme assumes a dark one. Seven themes now.
+
 ### Changed
 
 - Buffered input is drained before each redraw, so a held arrow key can no
