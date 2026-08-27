@@ -370,7 +370,15 @@ fn run(
             }
         }
 
-        if event::poll(Duration::from_millis(100))? {
+        // The first wait is the long one; after it, whatever else the burst
+        // has already buffered is applied before the frame is drawn. Handled
+        // one per frame, a held arrow key could outrun the draw — each repeat
+        // paid for a full redraw before the next was read, so the queue grew
+        // and the selection kept sliding after the key was released. The
+        // frames a drain skips are ones that would never have been seen.
+        let mut wait = Duration::from_millis(100);
+        while event::poll(wait)? {
+            wait = Duration::ZERO;
             match event::read()? {
                 // A resize invalidates the whole buffer. The old loop redrew ten
                 // times a second and papered over this; now that it only draws on
@@ -386,7 +394,7 @@ fn run(
                             dispatch(&request_tx, &mut app, request)?;
                         }
                         if app.should_quit {
-                            break Ok(());
+                            return Ok(());
                         }
                     }
                 }
