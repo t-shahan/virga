@@ -18,6 +18,7 @@ mod precip;
 mod precip_chart;
 mod precip_week;
 mod search;
+mod weathergram;
 
 use chart::chart_area_render;
 use current::current_area_render;
