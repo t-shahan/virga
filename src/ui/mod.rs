@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 mod axis;
 mod bars;
 mod chart;
+mod condition_symbol;
 mod current;
 mod digits;
 mod forecast;
