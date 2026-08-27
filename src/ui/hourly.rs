@@ -33,6 +33,8 @@ const HERO_WIDTH: u16 = 3 * CELL_WIDTH + 2;
 /// Matches the daily pane's column. A snow-flagged metric total is the widest
 /// value here and needs every one of these; at 30 it clipped mid-word.
 const DETAIL_WIDTH: u16 = 34;
+/// Two border columns around the widest full detail line.
+const FULL_INSPECTOR_WIDTH: u16 = DETAIL_WIDTH + 2;
 const COLUMN_GUTTER: u16 = 3;
 
 /// How far ahead the summary rows look. A day is the horizon people actually
@@ -50,7 +52,7 @@ pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area
     let selected = app.selected_hour;
     let hour = hours.get(selected);
 
-    let compact = area.height < FULL_PAIR_ROWS;
+    let compact = area.height < FULL_PAIR_ROWS || area.width < FULL_INSPECTOR_WIDTH;
     let inspector_rows = if compact {
         COMPACT_INSPECTOR_ROWS
     } else {
@@ -385,7 +387,13 @@ fn compact_total(ahead: &[HourlyForecast], unit: Unit) -> String {
     if ahead.is_empty() {
         return "—".to_string();
     }
-    let total: f64 = ahead.iter().filter_map(|hour| hour.precip_mm).sum();
+    let Some(total) = ahead
+        .iter()
+        .filter_map(|hour| hour.precip_mm)
+        .reduce(|total, value| total + value)
+    else {
+        return "—".to_string();
+    };
     if total <= 0.0 {
         return format!("0{}", unit.precip_label());
     }
@@ -471,7 +479,13 @@ fn total_line(ahead: &[HourlyForecast], unit: Unit) -> String {
         return UNKNOWN.to_string();
     }
 
-    let total: f64 = ahead.iter().filter_map(|h| h.precip_mm).sum();
+    let Some(total) = ahead
+        .iter()
+        .filter_map(|hour| hour.precip_mm)
+        .reduce(|total, value| total + value)
+    else {
+        return UNKNOWN.to_string();
+    };
     if total <= 0.0 {
         return "none expected".to_string();
     }
@@ -864,6 +878,26 @@ mod tests {
     }
 
     #[test]
+    fn compact_total_is_unavailable_when_every_measurement_is_missing() {
+        let mut hours = dry_hours(24);
+        for hour in &mut hours {
+            hour.precip_mm = None;
+        }
+
+        assert_eq!(compact_total(&hours, Unit::Metric), "—");
+        let app = app_showing(hours, 0);
+        let text = rendered(34, COMPACT_PAIR_ROWS, &app);
+        let total = text
+            .lines()
+            .find(|line| line.contains("24h"))
+            .expect("compact total line");
+        assert!(
+            total.contains("24h—"),
+            "all-missing total claimed dryness: {total:?}"
+        );
+    }
+
+    #[test]
     fn compact_lines_fit_the_narrowest_inspector_without_truncation() {
         let mut hours = dry_hours(24);
         for hour in &mut hours {
@@ -912,6 +946,26 @@ mod tests {
         assert_eq!(
             total_line(window_from(&hours, 24), Unit::Imperial),
             "none expected"
+        );
+    }
+
+    #[test]
+    fn full_total_is_unavailable_when_every_measurement_is_missing() {
+        let mut hours = dry_hours(24);
+        for hour in &mut hours {
+            hour.precip_mm = None;
+        }
+
+        assert_eq!(total_line(&hours, Unit::Metric), UNKNOWN);
+        let app = app_showing(hours, 0);
+        let text = rendered(100, FULL_PAIR_ROWS, &app);
+        let total = text
+            .lines()
+            .find(|line| line.contains("24 h total"))
+            .expect("full total line");
+        assert!(
+            total.contains(UNKNOWN),
+            "all-missing total claimed dryness: {total:?}"
         );
     }
 
@@ -1030,6 +1084,21 @@ mod tests {
         for label in ["sky", "temp", "rain", "wind"] {
             assert!(text.contains(label), "lost {label}:\n{text}");
         }
+    }
+
+    #[test]
+    fn minimum_width_full_height_keeps_every_wind_fact() {
+        let mut hours = dry_hours(24);
+        hours[0].wind_kph = Some(200.0);
+        hours[0].gust_kph = Some(300.0);
+        hours[0].wind_dir_deg = Some(225.0);
+        let mut app = app_showing(hours, 0);
+        app.unit = Unit::Metric;
+
+        let text = rendered(34, FULL_PAIR_ROWS, &app);
+        assert!(text.contains("200"), "wind speed was lost:\n{text}");
+        assert!(text.contains("300"), "wind gust was lost:\n{text}");
+        assert!(text.contains("SW"), "wind direction was lost:\n{text}");
     }
 
     /// The awkward sizes, including the app's declared minimum and either side
