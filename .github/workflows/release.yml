@@ -65,7 +65,9 @@ jobs:
           fi
 
           prerelease=false
-          [ "$version" != "$release" ] && prerelease=true
+          if [ "$version" != "$release" ]; then
+            prerelease=true
+          fi
 
           {
             echo "tag=$TAG"

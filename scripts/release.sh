@@ -20,7 +20,12 @@ step() { printf '\n==> %s\n' "$1"; }
 
 version="${1:-}"
 assume_yes=false
-[ "${2:-}" = "--yes" ] && assume_yes=true
+# An `if`, not `[ ... ] && ...`: the latter leaves the whole list at status 1
+# when the test is false, which is inert here but bites the moment such a line
+# becomes the last one in a `set -e` script.
+if [ "${2:-}" = "--yes" ]; then
+    assume_yes=true
+fi
 
 case "$version" in
     '') die "Usage: ./scripts/release.sh <version> [--yes]   (e.g. 0.2.0)" ;;

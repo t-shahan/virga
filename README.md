@@ -194,7 +194,7 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **269 deterministic tests**; two
+Virga's default locked test suite passes **301 deterministic tests**; three
 provider-dependent live Open-Meteo tests are ignored during normal runs.
 Coverage includes:
 

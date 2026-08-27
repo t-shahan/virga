@@ -84,6 +84,9 @@ need tar
 target=$(detect_target)
 tag="${VIRGA_VERSION:-$(latest_tag)}"
 [ -n "$tag" ] || die "Could not work out the latest release. Set VIRGA_VERSION to a tag."
+# Release tags carry a leading v. Accept VIRGA_VERSION either way rather than
+# building a URL that 404s on a difference the user cannot see.
+case "$tag" in v*) ;; *) tag="v$tag" ;; esac
 
 version="${tag#v}"
 archive="virga-${version}-${target}.tar.gz"
@@ -116,10 +119,17 @@ binary=$(find "$work" -type f -name virga | head -n 1)
 [ -n "$binary" ] || die "The archive did not contain a virga binary."
 
 mkdir -p "$INSTALL_DIR"
-# Move onto the final path in one step, so an interrupted install never leaves
-# a partial binary where the shell will find it.
-chmod +x "$binary"
-mv -f "$binary" "$INSTALL_DIR/virga"
+
+# Stage beside the target and rename, rather than moving straight out of the
+# temporary directory. A rename within one directory is atomic; `mv` across
+# filesystems is a copy followed by an unlink, and on Linux $TMPDIR is usually
+# tmpfs while the install directory is not. An interrupted copy would leave a
+# truncated binary on PATH, which is worse than no binary at all.
+staged="$INSTALL_DIR/.virga.install.$$"
+trap 'rm -rf "$work"; rm -f "$staged"' EXIT INT TERM
+cp "$binary" "$staged"
+chmod +x "$staged"
+mv -f "$staged" "$INSTALL_DIR/virga"
 
 # Running what was just installed is the only check that the binary matches
 # the machine. It must not be fatal, though: the install already succeeded, and
