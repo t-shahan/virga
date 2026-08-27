@@ -108,12 +108,15 @@ fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
 }
 
 fn precipitation_summary(hours: &[HourlyForecast], selected: usize, unit: Unit) -> String {
-    let total: f64 = hours
+    let end = selected.saturating_add(24).min(hours.len());
+    let window = hours.get(selected..end).unwrap_or_default();
+    let Some(total) = window
         .iter()
-        .skip(selected)
-        .take(24)
         .filter_map(|hour| hour.precip_mm)
-        .sum();
+        .reduce(|total, value| total + value)
+    else {
+        return "—".to_string();
+    };
     let decimals = unit.precip_decimals();
     format!("{:.decimals$} {}", unit.precip(total), unit.precip_label())
 }
@@ -330,6 +333,12 @@ mod tests {
                     text.contains("Hourly"),
                     "compact horizon at {width}:\n{text}"
                 );
+                let wind = text
+                    .lines()
+                    .nth(4)
+                    .unwrap_or_else(|| panic!("compact wind row missing at {width}:\n{text}"));
+                assert_eq!(wind.chars().nth(18), Some('↘'), "twelfth hour:\n{text}");
+                assert_eq!(wind.chars().nth(19), Some(' '), "thirteenth hour:\n{text}");
             } else {
                 assert!(
                     text.contains(&format!("next {hours} h")),
@@ -355,6 +364,29 @@ mod tests {
             hour.precip_mm = None;
         }
         let _ = rendered(&missing, 80, FULL_ROWS, 0, false);
+    }
+
+    #[test]
+    fn all_missing_precipitation_is_unavailable_in_the_summary_and_renderer() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.precip_mm = None;
+        }
+
+        assert_eq!(
+            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            "—"
+        );
+        let text = rendered(&weather, 80, FULL_ROWS, 0, false);
+        let rain = text
+            .lines()
+            .find(|line| line.contains("rain"))
+            .unwrap_or_else(|| panic!("rain row missing:\n{text}"));
+        assert!(
+            rain.contains('—'),
+            "missing precipitation reads as dry:\n{text}"
+        );
     }
 
     fn rendered(
