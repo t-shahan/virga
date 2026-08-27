@@ -16,6 +16,29 @@ also, most weeks, what the precipitation chart draws.
 
 <img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
+## Contents
+
+- [Hourly precipitation](#hourly-precipitation)
+- [Highlights](#highlights)
+- [Install](#install)
+  - [Homebrew](#homebrew)
+  - [Install script](#install-script)
+  - [Download it yourself](#download-it-yourself)
+  - [From source](#from-source)
+  - [Updating and removing](#updating-and-removing)
+- [Keys](#keys)
+- [Architecture](#architecture)
+- [Engineering Quality](#engineering-quality)
+- [Themes](#themes)
+- [Where it starts](#where-it-starts)
+- [Configuration](#configuration)
+- [Contributing](#contributing)
+  - [Cutting a release](#cutting-a-release)
+- [Limitations](#limitations)
+- [Data and Privacy](#data-and-privacy)
+  - [Attribution](#attribution)
+- [License](#license)
+
 ## Hourly precipitation
 
 Press `p` for the hourly precipitation view. Probability rises above the

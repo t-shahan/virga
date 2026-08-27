@@ -1,0 +1,236 @@
+# Keeps one pull request open describing the release that has not been cut yet.
+#
+# The version arithmetic and the "there is unreleased work on main" nag are the
+# mechanical parts of cutting a release, so they live here. The prose does not:
+# a generator would replace "Catppuccin, in two flavours" with the commit
+# subject that produced it, and CHANGELOG.md is read by people. This workflow
+# writes the heading and hands you the raw material; you write the section.
+#
+# Merging the pull request releases nothing on its own. It lands the notes on
+# main, and `./scripts/release.sh <version>` still does the manifest bump, the
+# date stamp, the gates and the tag. One release path, not two.
+#
+# Actions are pinned to commit SHAs for the same reason ci.yml pins them.
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+  # So the pull request can be rebuilt after it is closed by hand.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# A later push recomputes everything from main, so an in-flight run has nothing
+# to finish. Not keyed on the ref: every run targets the same branch and the
+# same pull request, and two of them racing would fight over both.
+concurrency:
+  group: release-pr
+  cancel-in-progress: true
+
+jobs:
+  release-pr:
+    name: describe the next release
+    runs-on: ubuntu-latest
+    env:
+      # A fixed branch, so the pull request survives a version changing under
+      # it. A patch release that a later `feat` turns into a minor one should
+      # move the heading, not orphan a branch called release/v0.3.1.
+      BRANCH: release-notes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Tags and the whole history: the range to describe starts at the
+          # last release, which a shallow clone cannot see.
+          fetch-depth: 0
+
+      - name: what is unreleased
+        id: unreleased
+        run: |
+          set -euo pipefail
+
+          # Full releases only. A prerelease tag is a real tag but the wrong
+          # base to count from: v0.4.0-rc1 is describing the v0.4.0 that has
+          # not shipped, and the commits before it are still unreleased.
+          last=$(git describe --tags --abbrev=0 \
+            --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' 2>/dev/null || true)
+          if [ -z "$last" ]; then
+            echo "::notice::No release tag yet, so there is nothing to count from."
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          subjects=$(git log --format='%s' "${last}..HEAD")
+          bodies=$(git log --format='%b' "${last}..HEAD")
+
+          version="${last#v}"
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+
+          # Conventional commits, with the release types spelled out rather
+          # than inferred: anything not listed here (chore, ci, docs, test,
+          # refactor, style, build) is real work that no user can observe, and
+          # should not on its own produce a version.
+          breaking=false
+          if printf '%s\n' "$subjects" | grep -qE '^[a-zA-Z]+(\([^)]*\))?!:' \
+            || printf '%s\n' "$bodies" | grep -qE '^BREAKING[ -]CHANGE:'; then
+            breaking=true
+          fi
+
+          if [ "$breaking" = true ] && [ "$major" -gt 0 ]; then
+            bump="major"
+          elif [ "$breaking" = true ] \
+            || printf '%s\n' "$subjects" | grep -qE '^feat(\([^)]*\))?!?:'; then
+            # While the major version is 0 a breaking change is a minor bump,
+            # which is the policy CHANGELOG.md already states.
+            bump="minor"
+          elif printf '%s\n' "$subjects" | grep -qE '^(fix|perf)(\([^)]*\))?!?:'; then
+            bump="patch"
+          else
+            bump="none"
+          fi
+
+          case "$bump" in
+            major) next="$((major + 1)).0.0" ;;
+            minor) next="${major}.$((minor + 1)).0" ;;
+            patch) next="${major}.${minor}.$((patch + 1))" ;;
+            *)     next="" ;;
+          esac
+
+          {
+            echo "last=$last"
+            echo "bump=$bump"
+            echo "next=$next"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: the pull request body
+        if: steps.unreleased.outputs.bump != 'none'
+        env:
+          LAST: ${{ steps.unreleased.outputs.last }}
+          NEXT: ${{ steps.unreleased.outputs.next }}
+          BUMP: ${{ steps.unreleased.outputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # Commit subjects are pull request titles, which is to say text other
+          # people wrote. They reach the body through a file and are never
+          # interpolated into a command or a workflow expression.
+          section() {
+            found=$(git log --format='- %s' "${LAST}..HEAD" \
+              | grep -E "^- ($1)(\([^)]*\))?!?:" || true)
+            if [ -n "$found" ]; then
+              printf '\n**%s**\n\n%s\n' "$2" "$found" >> body.md
+            fi
+          }
+
+          cat > body.md <<HEADER
+          \`$LAST\` shipped, and the commits below have not. A \`$BUMP\` bump puts
+          the next release at **$NEXT**.
+
+          This branch renames CHANGELOG.md's \`## [Unreleased]\` heading to
+          \`## [$NEXT]\` and moves the link references. **The section is empty of
+          prose. Write it here.** The heading is deliberately undated;
+          \`scripts/release.sh\` stamps the date when it runs.
+
+          Then, on main:
+
+          \`\`\`
+          ./scripts/release.sh ${NEXT}
+          \`\`\`
+
+          ## What is unreleased
+          HEADER
+
+          section 'feat' 'Features'
+          section 'fix' 'Fixes'
+          section 'perf' 'Performance'
+          section 'chore|ci|docs|test|refactor|style|build' \
+            'Maintenance (not usually worth a changelog entry)'
+
+          printf '\nNothing here is written to this branch after it is opened, so\nedits to the section survive later merges to main. If the recommended\nversion moves, this body says so and the heading is yours to correct.\n' >> body.md
+
+      - name: open or refresh the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUMP: ${{ steps.unreleased.outputs.bump }}
+          NEXT: ${{ steps.unreleased.outputs.next }}
+          LAST: ${{ steps.unreleased.outputs.last }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          open=$(gh pr list --head "$BRANCH" --state open \
+            --json number --jq '.[0].number // empty')
+
+          # A release cut by hand moves the tag out from under an open pull
+          # request, leaving it describing commits that have shipped. Closing
+          # it is the correct end state, not an error.
+          if [ "$BUMP" = none ]; then
+            if [ -n "$open" ]; then
+              gh pr close "$open" --delete-branch \
+                --comment "Everything this described has been released. Closed by the release-pr workflow."
+            else
+              echo "Nothing user-facing is unreleased."
+            fi
+            exit 0
+          fi
+
+          # The branch is never rewritten once the pull request is open. Any
+          # prose written into it would be the thing a force-push destroyed,
+          # and that is the whole point of the pull request.
+          if [ -n "$open" ]; then
+            gh pr edit "$open" --title "docs: notes for $NEXT" --body-file body.md
+            echo "Refreshed #${open}."
+            exit 0
+          fi
+
+          if grep -q "^## \[$NEXT\]" CHANGELOG.md; then
+            echo "::notice::CHANGELOG.md already has a $NEXT section. Nothing to open."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+
+          # `next` is an awk keyword, hence newtag.
+          awk -v newtag="## [$NEXT]" '
+            { print }
+            !done && index($0, "## [Unreleased]") == 1 {
+              print ""
+              print newtag
+              done = 1
+            }
+          ' CHANGELOG.md > CHANGELOG.new && mv CHANGELOG.new CHANGELOG.md
+
+          awk -v last="$LAST" -v newtag="v$NEXT" -v repo="$REPOSITORY" '
+            index($0, "[Unreleased]: ") == 1 {
+              base = "https://github.com/" repo "/compare/"
+              print "[Unreleased]: " base newtag "...HEAD"
+              print "[" substr(newtag, 2) "]: " base last "..." newtag
+              next
+            }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.new && mv CHANGELOG.new CHANGELOG.md
+
+          if git diff --quiet; then
+            echo "::warning::CHANGELOG.md has no '## [Unreleased]' heading to rename."
+            exit 0
+          fi
+
+          git add CHANGELOG.md
+          git commit -m "docs: open the $NEXT changelog section"
+          # --force is safe here and only here: no pull request is open on this
+          # branch, so whatever it points at is the leftover of a merged one.
+          git push --force origin "$BRANCH"
+
+          # Opened with GITHUB_TOKEN, which by design does not start other
+          # workflows, so this pull request shows no CI. It changes one
+          # markdown file that no job reads; the gates that matter run on the
+          # release commit that scripts/release.sh makes afterwards.
+          gh pr create --base main --head "$BRANCH" \
+            --title "docs: notes for $NEXT" --body-file body.md
