@@ -12,7 +12,7 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-08-26
+## [0.2.0] - 2026-08-27
 
 The release that stops asking people to install Rust. Prebuilt binaries for five
 platforms, a Homebrew tap, and an install script, alongside the colour themes,
