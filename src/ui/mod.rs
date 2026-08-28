@@ -65,6 +65,9 @@ const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 /// set this from the *comfortable* layout and rejected an ordinary 100x20.
 const MIN_WIDTH: u16 = 34;
 const MIN_HEIGHT: u16 = 12;
+/// Once the full 48-hour weathergram fits, wider borders only detach titles
+/// and controls from the information they describe.
+const HOURLY_MAX_WIDTH: u16 = 120;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     render_with(frame, app, app.theme.palette());
@@ -84,15 +87,26 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         return;
     }
 
+    let page_area = if app.screen == Screen::Hourly {
+        let width = area.width.min(HOURLY_MAX_WIDTH);
+        Rect {
+            x: area.x + (area.width - width) / 2,
+            width,
+            ..area
+        }
+    } else {
+        area
+    };
+
     // The legend is pinned to the bottom; everything else is laid out inside
     // what remains so panes can be sized to their content. It asks for its own
     // height, because a narrow terminal wraps it onto a second row rather than
     // clipping bindings mid-word.
     let [content, legend_area] = Layout::vertical([
         Constraint::Fill(1),
-        Constraint::Length(legend_rows(app, area.width)),
+        Constraint::Length(legend_rows(app, page_area.width)),
     ])
-    .areas(area);
+    .areas(page_area);
 
     match app.screen {
         Screen::Weather => match &app.weather {
@@ -158,12 +172,12 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             Fetch::Ready(_) => hourly_render(frame, app, palette, content),
             Fetch::Loading => popup_render(
                 frame,
-                area,
+                page_area,
                 palette,
                 loading_title(app),
                 &format!("{} {}", spinner(app.tick), loading_verb(app)),
             ),
-            Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
+            Fetch::Failed(msg) => popup_render(frame, page_area, palette, "Error", msg),
             Fetch::Idle => {}
         },
         Screen::Search => search_render(frame, app, palette, area),
@@ -595,6 +609,33 @@ mod tests {
             assert!(text.contains(label), "minimum lost {label}:\n{text}");
         }
         assert!(!text.contains("Terminal too small"));
+    }
+
+    /// The hourly screen is a measured dashboard, not wallpaper. Its panels
+    /// and controls should stop growing once the 48-hour tier fits, while a
+    /// narrower terminal still receives every available column.
+    #[test]
+    fn hourly_screen_uses_one_centered_120_column_canvas() {
+        let app = ready(Screen::Hourly);
+
+        for width in [87, 122, 169] {
+            let height = 34;
+            let buffer = drawn(&app, Theme::default().palette(), width, height);
+            let canvas_width = width.min(120);
+            let left = (width - canvas_width) / 2;
+            let right = left + canvas_width - 1;
+
+            let painted: Vec<u16> = (0..width)
+                .filter(|x| (0..height).any(|y| !buffer[(*x, y)].symbol().trim().is_empty()))
+                .collect();
+
+            assert_eq!(painted.first().copied(), Some(left), "width {width}");
+            assert_eq!(painted.last().copied(), Some(right), "width {width}");
+            assert!(
+                painted.iter().all(|x| (left..=right).contains(x)),
+                "width {width} painted beyond {left}..={right}"
+            );
+        }
     }
 
     #[test]

@@ -156,14 +156,16 @@ pub(super) fn weathergram_render(
         block
     } else {
         block.title(
-            Line::from(format!("Hourly weather · next {} h", window.hours)).fg(palette.muted),
+            Line::from(format!(" Hourly weather · next {} h ", window.hours)).fg(palette.muted),
         )
     };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let plot_x = inner.x + LABEL_WIDTH;
     let plot_width = window.hours as u16 * window.cell_width;
+    let used_width = LABEL_WIDTH + plot_width + SUMMARY_GAP + SUMMARY_WIDTH;
+    let content_x = inner.x + inner.width.saturating_sub(used_width) / 2;
+    let plot_x = content_x + LABEL_WIDTH;
     let summary_x = plot_x + plot_width + SUMMARY_GAP;
     let axis_y = if compact { area.y } else { inner.y };
     let first_track_y = if compact { inner.y } else { inner.y + 1 };
@@ -181,7 +183,7 @@ pub(super) fn weathergram_render(
         Rect::new(plot_x, axis_y, plot_width, 1),
         visible.iter().map(|hour| hour.time.as_str()),
         window.cell_width,
-        1,
+        u16::from(window.start == 0),
         palette,
     );
 
@@ -199,7 +201,7 @@ pub(super) fn weathergram_render(
         .enumerate()
     {
         let y = first_track_y + row as u16;
-        put_text(frame, inner.x, y, label, palette.muted);
+        put_text(frame, content_x, y, label, palette.muted);
         put_right(frame, summary_x, y, SUMMARY_WIDTH, &summary, palette.muted);
 
         for (offset, hour) in visible.iter().enumerate() {
@@ -377,6 +379,74 @@ mod tests {
             );
             assert!(text.contains('▲'), "selection marker missing:\n{text}");
         }
+    }
+
+    /// Once navigation has moved to a later page there is no current-hour
+    /// marker in the first plot cell. The axis must stop reserving a phantom
+    /// column for it and put the leading anchor on the first hour.
+    #[test]
+    fn a_scrolled_page_does_not_keep_the_current_markers_offset() {
+        let weather = Weather::fixture(22, 14);
+        let width = 80;
+        let buffer = rendered_buffer_in(
+            &weather,
+            width,
+            FULL_ROWS,
+            24,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+        let axis_y = 1;
+        let sky_y = 2;
+        let label_x = (1..width - 3)
+            .find(|x| {
+                buffer[(*x, sky_y)].symbol() == "s"
+                    && buffer[(*x + 1, sky_y)].symbol() == "k"
+                    && buffer[(*x + 2, sky_y)].symbol() == "y"
+            })
+            .expect("sky label");
+        let plot_x = label_x + LABEL_WIDTH;
+        let first_axis_x = (1..width - 1)
+            .find(|x| !buffer[(*x, axis_y)].symbol().trim().is_empty())
+            .expect("leading axis anchor");
+
+        assert_eq!(first_axis_x, plot_x);
+        assert!(
+            marker_coordinates(&buffer, width, FULL_ROWS, "┬").is_empty(),
+            "current marker leaked onto a scrolled page"
+        );
+    }
+
+    /// The plot, labels, and summaries are one measured unit. Centering that
+    /// unit prevents the 24-hour tier from leaving a conspicuous void only on
+    /// its right at the 87-column Apple Terminal layout.
+    #[test]
+    fn the_24_hour_weathergram_is_balanced_inside_its_frame() {
+        let weather = Weather::fixture(22, 14);
+        let width = 87;
+        let buffer = rendered_buffer_in(
+            &weather,
+            width,
+            FULL_ROWS,
+            0,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+        let temp_y = 3;
+        let occupied: Vec<u16> = (1..width - 1)
+            .filter(|x| !buffer[(*x, temp_y)].symbol().trim().is_empty())
+            .collect();
+        let first = *occupied.first().expect("temperature row content");
+        let last = *occupied.last().expect("temperature row content");
+        let left_slack = first - 1;
+        let right_slack = (width - 2) - last;
+
+        assert!(
+            left_slack.abs_diff(right_slack) <= 1,
+            "weathergram is not centred: left {left_slack}, right {right_slack}"
+        );
     }
 
     #[test]

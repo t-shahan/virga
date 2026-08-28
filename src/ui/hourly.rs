@@ -27,6 +27,8 @@ const FULL_INSPECTOR_ROWS: u16 = DIGIT_ROWS as u16 + 2;
 const COMPACT_INSPECTOR_ROWS: u16 = 4;
 const FULL_PAIR_ROWS: u16 = FULL_INSPECTOR_ROWS + weathergram::FULL_ROWS;
 const COMPACT_PAIR_ROWS: u16 = COMPACT_INSPECTOR_ROWS + weathergram::COMPACT_ROWS;
+const TOP_PADDING_ROWS: u16 = 1;
+const PANEL_GAP_ROWS: u16 = 1;
 
 /// Three temperature characters (including a possible minus sign), plus the
 /// two-character unit symbol.
@@ -64,18 +66,42 @@ pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area
     } else {
         weathergram::FULL_ROWS
     };
-    let pair_rows = if compact {
+    let base_pair_rows = if compact {
         COMPACT_PAIR_ROWS
     } else {
         FULL_PAIR_ROWS
     };
+    let spare_rows = area.height.saturating_sub(base_pair_rows);
+    let pair_gap = if !compact && spare_rows >= PANEL_GAP_ROWS {
+        PANEL_GAP_ROWS
+    } else {
+        0
+    };
+    let top_padding = if !compact && spare_rows >= PANEL_GAP_ROWS + TOP_PADDING_ROWS {
+        TOP_PADDING_ROWS
+    } else {
+        0
+    };
+    let pair_rows = top_padding + inspector_rows + pair_gap + gram_rows;
     let week = (!compact)
-        .then(|| week_strip(hours, area, pair_rows))
+        .then(|| week_strip(hours, area, pair_rows + PANEL_GAP_ROWS))
         .flatten();
+    let week_gap = if week.is_some() { PANEL_GAP_ROWS } else { 0 };
 
-    let [inspector, gram, week_area, _margin] = Layout::vertical([
+    let [
+        _top_padding,
+        inspector,
+        _pair_gap,
+        gram,
+        _week_gap,
+        week_area,
+        _margin,
+    ] = Layout::vertical([
+        Constraint::Length(top_padding),
         Constraint::Length(inspector_rows),
+        Constraint::Length(pair_gap),
         Constraint::Length(gram_rows),
+        Constraint::Length(week_gap),
         Constraint::Length(
             week.as_ref()
                 .map_or(0, |(_, rows)| precip_week::box_rows(*rows)),
@@ -158,11 +184,24 @@ fn inspector_render(
 
     let mut block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
-        .title_bottom(Line::from(when).fg(palette.text).right_aligned());
+        .title_top(
+            Line::from(format!(" {city}"))
+                .bold()
+                .fg(palette.accent)
+                .left_aligned(),
+        )
+        .title_bottom(
+            Line::from(format!("{when} "))
+                .fg(palette.text)
+                .right_aligned(),
+        );
 
     if let Some(condition) = condition {
-        block = block.title_top(Line::from(condition).fg(palette.text).right_aligned());
+        block = block.title_top(
+            Line::from(format!("{condition} "))
+                .fg(palette.text)
+                .right_aligned(),
+        );
     }
     if let Some(upcoming) = upcoming {
         // The question people open the app to ask, so it gets the loud colour
@@ -170,7 +209,7 @@ fn inspector_render(
         // to begin with and read as chrome — the eye went straight past the one
         // line on the screen that answers "do I need a coat".
         block = block.title_bottom(
-            Line::from(upcoming)
+            Line::from(format!(" {upcoming}"))
                 .bold()
                 .fg(palette.selection)
                 .left_aligned(),
@@ -1294,11 +1333,7 @@ mod tests {
         (0..height)
             .find(|y| {
                 let line = row_text(buffer, width, *y);
-                let leading = line
-                    .chars()
-                    .take_while(|ch| matches!(ch, ' ' | '│'))
-                    .count();
-                leading <= 3 && line.trim_start_matches([' ', '│']).starts_with(label)
+                line.trim_start_matches([' ', '│']).starts_with(label)
             })
             .unwrap_or_else(|| panic!("{label} track missing"))
     }
@@ -1418,6 +1453,59 @@ mod tests {
         assert!(text.contains("this week"), "weekly strip missing:\n{text}");
     }
 
+    /// At ordinary desktop heights the stack needs breathing room around and
+    /// between its three independent frames. Tight layouts still use every
+    /// row; the padding is only for a pane that can afford it.
+    #[test]
+    fn tall_layout_pads_and_separates_each_panel() {
+        let app = app_showing(dry_hours(192), 0);
+        let buffer = rendered_buffer(100, 30, &app);
+        let panel_tops: Vec<u16> = (0..30)
+            .filter(|y| buffer[(0, *y)].symbol() == "┌")
+            .collect();
+
+        assert_eq!(panel_tops, [1, 9, 18]);
+        for y in [0, 8, 17] {
+            assert!(
+                row_text(&buffer, 100, y).trim().is_empty(),
+                "row {y} should be breathing room"
+            );
+        }
+    }
+
+    /// One spare row cannot provide both outer padding and a panel gap. The
+    /// gap wins because it separates two distinct frames instead of leaving
+    /// an unexplained blank below them.
+    #[test]
+    fn one_spare_row_separates_the_inspector_and_weathergram() {
+        let app = app_showing(dry_hours(192), 0);
+        let height = FULL_PAIR_ROWS + 1;
+        let buffer = rendered_buffer(100, height, &app);
+        let panel_tops: Vec<u16> = (0..height)
+            .filter(|y| buffer[(0, *y)].symbol() == "┌")
+            .collect();
+
+        assert_eq!(panel_tops, [0, FULL_INSPECTOR_ROWS + 1]);
+        assert!(
+            row_text(&buffer, 100, FULL_INSPECTOR_ROWS)
+                .trim()
+                .is_empty(),
+            "the only spare row should separate panels"
+        );
+    }
+
+    /// Titles replace border cells, so a literal space is the only reliable
+    /// inset across terminal emulators and box-drawing fonts.
+    #[test]
+    fn full_panel_titles_keep_one_cell_clear_of_their_corners() {
+        let app = app_showing(dry_hours(192), 0);
+        let buffer = rendered_buffer(100, 30, &app);
+
+        assert_eq!(buffer[(1, 1)].symbol(), " ", "inspector title inset");
+        assert_eq!(buffer[(1, 9)].symbol(), " ", "weathergram title inset");
+        assert_eq!(buffer[(98, 18)].symbol(), " ", "weekly title inset");
+    }
+
     #[test]
     fn compact_pair_uses_exactly_ten_content_rows() {
         let app = app_showing(dry_hours(192), 0);
@@ -1501,28 +1589,28 @@ mod tests {
                         assert_eq!(marker_coordinates(&buffer, width, height, "▲"), []);
                         assert_eq!(
                             marker_coordinates(&buffer, width, height, "┬"),
-                            [(7, 8)],
+                            [(12, 10)],
                             "the empty chart lost its current-hour axis anchor:\n{text}"
                         );
                     }
                     "one hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(8, 13)],
+                        [(36, 15)],
                         "the single hour is not centered in its visible cell:\n{text}"
                     ),
                     "first hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(7, 13)],
+                        [(12, 15)],
                         "{case} selection is not on the first visible hour:\n{text}"
                     ),
                     "page edge" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(7, 13)],
+                        [(12, 15)],
                         "the next page did not begin at its selected hour:\n{text}"
                     ),
                     "last hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(53, 13)],
+                        [(58, 15)],
                         "the final page did not keep the last hour selected:\n{text}"
                     ),
                     "all optional readings missing" => {
@@ -1552,30 +1640,30 @@ mod tests {
                         assert_eq!(
                             track_glyph_coordinates(&buffer, width, height, "temp", &["▄"]),
                             vec![
-                                (7, "▄".to_string()),
-                                (9, "▄".to_string()),
-                                (11, "▄".to_string()),
-                                (13, "▄".to_string()),
-                                (15, "▄".to_string()),
-                                (17, "▄".to_string()),
-                                (19, "▄".to_string()),
-                                (21, "▄".to_string()),
-                                (23, "▄".to_string()),
-                                (25, "▄".to_string()),
-                                (27, "▄".to_string()),
-                                (29, "▄".to_string()),
-                                (31, "▄".to_string()),
-                                (33, "▄".to_string()),
-                                (35, "▄".to_string()),
-                                (37, "▄".to_string()),
-                                (39, "▄".to_string()),
-                                (41, "▄".to_string()),
-                                (43, "▄".to_string()),
-                                (45, "▄".to_string()),
-                                (47, "▄".to_string()),
-                                (49, "▄".to_string()),
-                                (51, "▄".to_string()),
-                                (53, "▄".to_string()),
+                                (12, "▄".to_string()),
+                                (14, "▄".to_string()),
+                                (16, "▄".to_string()),
+                                (18, "▄".to_string()),
+                                (20, "▄".to_string()),
+                                (22, "▄".to_string()),
+                                (24, "▄".to_string()),
+                                (26, "▄".to_string()),
+                                (28, "▄".to_string()),
+                                (30, "▄".to_string()),
+                                (32, "▄".to_string()),
+                                (34, "▄".to_string()),
+                                (36, "▄".to_string()),
+                                (38, "▄".to_string()),
+                                (40, "▄".to_string()),
+                                (42, "▄".to_string()),
+                                (44, "▄".to_string()),
+                                (46, "▄".to_string()),
+                                (48, "▄".to_string()),
+                                (50, "▄".to_string()),
+                                (52, "▄".to_string()),
+                                (54, "▄".to_string()),
+                                (56, "▄".to_string()),
+                                (58, "▄".to_string()),
                             ],
                             "flat temperatures did not keep their middle glyphs in every cell:\n{text}"
                         );
@@ -1588,14 +1676,14 @@ mod tests {
                                 &["·", "▂", "▄", "▆", "█"]
                             ),
                             vec![
-                                (7, "·".to_string()),
-                                (9, "▂".to_string()),
-                                (11, "▂".to_string()),
-                                (13, "▄".to_string()),
-                                (15, "▄".to_string()),
-                                (17, "▆".to_string()),
-                                (19, "▆".to_string()),
-                                (21, "█".to_string()),
+                                (12, "·".to_string()),
+                                (14, "▂".to_string()),
+                                (16, "▂".to_string()),
+                                (18, "▄".to_string()),
+                                (20, "▄".to_string()),
+                                (22, "▆".to_string()),
+                                (24, "▆".to_string()),
+                                (26, "█".to_string()),
                             ],
                             "rain thresholds no longer render their visible ramp:\n{text}"
                         );
@@ -1608,10 +1696,10 @@ mod tests {
                                 &["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
                             ),
                             vec![
-                                (7, "↖".to_string()),
-                                (9, "↑".to_string()),
-                                (11, "↑".to_string()),
-                                (13, "↑".to_string()),
+                                (12, "↖".to_string()),
+                                (14, "↑".to_string()),
+                                (16, "↑".to_string()),
+                                (18, "↑".to_string()),
                             ],
                             "wind sectors no longer render at their forecast hours:\n{text}"
                         );
