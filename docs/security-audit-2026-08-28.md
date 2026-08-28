@@ -53,10 +53,12 @@ three paths print network-derived strings to the plain terminal with
   would print terminal escape sequences (title changes, screen
   manipulation, and on some emulators worse) on every launch.
 - `src/main.rs:150` (via `app.rs:376-379`) — the detection-failure
-  warning embeds the persisted location label verbatim. Labels originate
-  from ipapi.co / Open-Meteo geocoding responses, are persisted to
+  warning embeds the startup location label verbatim. Within a single
+  session no API-derived label reaches a raw print, but a label that came
+  from ipapi.co / Open-Meteo geocoding on an earlier run is persisted to
   `state.json` without character-level sanitization (`state.rs:96` checks
-  only for non-empty), and are later printed raw to stderr.
+  only for non-empty), becomes the next launch's startup location, and is
+  then printed raw to stderr when that launch's detection fails.
 
 Exploitation requires a compromised provider, a CA-level TLS break, or a
 hand-edited state file — hence Low. But the fix is cheap and closes the
@@ -69,7 +71,29 @@ class:
   `GeoIpDto::into_location` / `GeocodeResultDto::into_location`), or at
   the `eprintln!` boundary.
 
-### V-2 (Low): install.sh checksum verifies integrity, not authenticity
+### V-2 (Low): unchecked `u16` arithmetic on a data-derived table height
+
+`src/ui/mod.rs:114-117`:
+
+```rust
+let table_rows = w.daily.len().saturating_sub(w.today_index) as u16 + 1;
+let table_box = table_rows + 2;
+```
+
+`w.daily.len()` comes straight from the forecast JSON. A response whose
+`daily` arrays carry 65 535 entries all dated in the future (so
+`today_index` falls back to 0) fits in ~2 MB — well inside the 10 MB body
+cap — and makes the `as u16` cast produce 65 535, after which `+ 1`
+overflows. A debug/test build panics on every weather-screen frame; the
+shipped release build (overflow checks off) wraps to a degenerate layout
+rather than crashing. Not memory-unsafe, and it needs a hostile or
+compromised forecast endpoint — but it is the one series length in the UI
+that is cast to `u16` without first being clamped to the terminal size.
+Fix: clamp before the cast (e.g. `.min(area.height as usize)`) or use
+`saturating_add`, or cap series lengths at the DTO→model boundary
+(which also addresses V-6).
+
+### V-3 (Low): install.sh checksum verifies integrity, not authenticity
 
 `install.sh` downloads `SHA256SUMS` from the same GitHub release it
 downloads the archive from (lines 100-103). This catches truncation and
@@ -82,7 +106,7 @@ is not. Also worth noting: the curl-pipe-to-sh pattern itself is an
 accepted-risk choice the README makes deliberately; the script's internal
 hygiene (staged atomic install, `set -eu`, no sudo) is exemplary.
 
-### V-3 (Low): geoIP lookup sends the user's IP to a third party by default
+### V-4 (Low): geoIP lookup sends the user's IP to a third party by default
 
 `https://ipapi.co/json/` is contacted on first launch (and on launches
 where no chosen location is remembered) unless `VIRGA_GEOIP=off`. This is
@@ -92,7 +116,7 @@ user's IP-derived location to a party other than Open-Meteo. A privacy
 paragraph in the README naming ipapi.co explicitly (the README currently
 credits Open-Meteo only) would make the disclosure complete.
 
-### V-4 (Info): update probe runs on every launch by default
+### V-5 (Info): update probe runs on every launch by default
 
 `spawn_update_check` (`main.rs:415-422`) contacts github.com on every
 launch unless `VIRGA_UPDATE=off`. It is redirect-only, 5-second bounded,
@@ -101,7 +125,29 @@ V-1 it is the one path where a github.com response influences terminal
 output outside ratatui. With V-1's parse tightening this becomes fully
 inert.
 
-### V-5 (Info): tar extraction trusts the archive layout
+### V-6 (Info): bounded allocation/CPU amplification from oversized series
+
+`DailyDto`/`HourlyDto` (`src/weather/dto.rs:112-170`) deserialize into
+unbounded vectors, and `precip_week::group_by_day`
+(`src/ui/precip_week.rs:280-301`) re-parses every hourly timestamp with
+chrono on each precipitation-screen frame. A maximally packed ~10 MB
+response (~500 K hourly entries) inflates to tens of MB of model structs
+and makes that screen briefly sluggish. The 10 MB `read_json` cap keeps
+this far from an OOM, and no indexing panics (everything is `.get()`- or
+`filter_map`-based), so this is defense-in-depth only: a sanity cap on
+series lengths at the DTO→model conversion (a forecast is never more than
+a few hundred hours) would close it together with V-2.
+
+### V-7 (Info): bidirectional and zero-width characters in place names
+
+ratatui's control-character filter stops escape sequences, but bidi
+overrides (U+202E) and zero-width joiners are not control characters and
+pass through to the border titles and search list. A geocoding result
+named `"Paris\u{202E}..."` renders visually reordered — cosmetic
+Trojan-Source-style spoofing of a city name, nothing more. Optional
+hardening: extend the ingestion filter from V-1 to strip bidi controls.
+
+### V-8 (Info): tar extraction trusts the archive layout
 
 `install.sh:117-118` extracts the release archive and then locates the
 binary with `find`. Modern GNU tar and bsdtar refuse `..` and absolute
@@ -120,12 +166,21 @@ file.
 - **Hostile API data**: the DTO layer treats every measurement as
   optional; required top-level blocks are enforced so an empty body is an
   error, not an empty screen. Response bodies are capped at ureq's 10 MB
-  default before JSON parsing, bounding allocation. Non-finite and
-  out-of-range coordinates are rejected at every boundary (client,
-  state-file load, state-file save). Rendering code was exercised against
-  degenerate sizes and data in the existing test suite and reviewed for
-  panicking indexing; the UI layer's series lengths are derived from the
-  data actually present, not from assumed shapes.
+  default before JSON parsing, bounding allocation; serde_json's strict
+  mode rejects NaN/Infinity literals, so non-finite floats never enter
+  through JSON numbers. Non-finite and out-of-range coordinates are
+  rejected at every boundary (client, state-file load, state-file save).
+- **Rendering against hostile data**: every float→int cast in the UI is a
+  Rust saturating cast, additionally clamped or `rem_euclid`-guarded
+  (`compass` takes `% 360`, durations take `.max(0.0)`), so huge or
+  negative measurements saturate rather than wrap. Divisions are guarded
+  (`comparison()` checks for an empty series, `fraction()` requires a
+  positive scale, chart spans are floored at 0.1). The two direct slice
+  expressions (`chart.rs:57`, `precip_chart.rs:126`) were checked
+  in-bounds by construction; everything else indexes with `.get()` or
+  `filter_map`. Timestamp slicing uses fallible `.get(..)` and chrono
+  parses fall back to the raw value, so malformed timestamps degrade
+  instead of panicking. The one unclamped length cast found is V-2.
 - **Network**: TLS via rustls with webpki-roots (no system-store or
   plaintext fallback); every agent carries explicit connect and global
   timeouts, verified by tests; query parameters are built with ureq's
@@ -165,8 +220,11 @@ file.
 ## Suggested follow-ups, in order
 
 1. Tighten `Release::parse` to reject non-`[0-9A-Za-z.-]` pre-release
-   suffixes, and strip control characters from location labels at
-   ingestion (V-1).
-2. Mention ipapi.co by name in the README's data-source/privacy prose
-   (V-3).
-3. Consider opportunistic `gh attestation verify` in `install.sh` (V-2).
+   suffixes, and strip control characters (and optionally bidi controls,
+   V-7) from location labels at ingestion (V-1).
+2. Clamp or saturate the table-height arithmetic in `ui/mod.rs`, or cap
+   series lengths at the DTO→model boundary, which also closes the
+   amplification in V-6 (V-2).
+3. Mention ipapi.co by name in the README's data-source/privacy prose
+   (V-4).
+4. Consider opportunistic `gh attestation verify` in `install.sh` (V-3).
