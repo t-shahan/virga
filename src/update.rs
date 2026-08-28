@@ -81,6 +81,16 @@ impl Release {
         let version = version.strip_prefix('v').unwrap_or(version);
         let (triple, prerelease) = match version.split_once('-') {
             Some((triple, prerelease)) if !prerelease.is_empty() => {
+                // The marker is echoed to a terminal and arrives off the
+                // network, so it is held to what semver allows. Anything
+                // else — a control character riding a hostile redirect —
+                // is not a version, and must never reach stdout.
+                anyhow::ensure!(
+                    prerelease
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+                    "{tag:?} has a pre-release marker with characters outside 0-9A-Za-z.-"
+                );
                 (triple, Some(prerelease.to_string()))
             }
             Some(_) => anyhow::bail!("{tag:?} has an empty pre-release marker"),
@@ -352,6 +362,22 @@ mod tests {
         ] {
             assert!(Release::parse(tag).is_err(), "{tag:?} was accepted");
         }
+    }
+
+    /// The tag rides GitHub's redirect and its pre-release marker is echoed
+    /// to the terminal, so a marker outside semver's alphabet — above all a
+    /// control character — must be an error, never something to print.
+    #[test]
+    fn a_pre_release_marker_outside_semver_is_rejected() {
+        for tag in [
+            "0.2.0-rc\u{1b}]0;owned\u{7}",
+            "0.2.0-rc 1",
+            "0.2.0-rc\n1",
+            "0.2.0-rc_1",
+        ] {
+            assert!(Release::parse(tag).is_err(), "{tag:?} was accepted");
+        }
+        assert!(Release::parse("0.2.0-rc.1").is_ok(), "semver dots are fine");
     }
 
     #[test]
