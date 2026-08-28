@@ -1587,10 +1587,9 @@ mod tests {
                 match case {
                     "empty" => {
                         assert_eq!(marker_coordinates(&buffer, width, height, "▲"), []);
-                        assert_eq!(
-                            marker_coordinates(&buffer, width, height, "┬"),
-                            [(12, 10)],
-                            "the empty chart lost its current-hour axis anchor:\n{text}"
+                        assert!(
+                            marker_coordinates(&buffer, width, height, "┬").is_empty(),
+                            "the empty chart drew a redundant current marker:\n{text}"
                         );
                     }
                     "one hour" => assert_eq!(

@@ -183,7 +183,12 @@ pub(super) fn weathergram_render(
         Rect::new(plot_x, axis_y, plot_width, 1),
         visible.iter().map(|hour| hour.time.as_str()),
         window.cell_width,
-        u16::from(window.start == 0),
+        u16::from(compact),
+        if window.start == 0 {
+            palette.now
+        } else {
+            palette.muted
+        },
         palette,
     );
 
@@ -226,9 +231,6 @@ pub(super) fn weathergram_render(
         }
     }
 
-    if window.start == 0 {
-        put(frame, plot_x, axis_y, "┬", palette.now);
-    }
     if selected >= window.start && selected < end {
         let offset = selected - window.start;
         let x = plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
@@ -338,10 +340,10 @@ mod tests {
         );
     }
 
-    /// The selected hour and the current hour communicate with shapes as well
-    /// as colours, so neither state disappears for a monochrome terminal.
+    /// The selection keeps its shape in monochrome, while the opening label
+    /// still states the current day and time without a separate marker.
     #[test]
-    fn selected_and_current_hour_markers_survive_a_monochrome_palette() {
+    fn selected_marker_and_current_time_anchor_survive_a_monochrome_palette() {
         let weather = Weather::fixture(22, 14);
         let monochrome = Palette {
             accent: Color::Gray,
@@ -357,27 +359,63 @@ mod tests {
             let text = rendered_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
             assert!(text.contains('▲'), "selection lost without colour:\n{text}");
             assert!(
-                text.contains('┬'),
-                "current-hour axis mark lost without colour:\n{text}"
+                text.contains("Sun 12a"),
+                "current day and time lost without colour:\n{text}"
+            );
+            assert!(
+                !text.contains('┬'),
+                "redundant current marker returned:\n{text}"
             );
         }
     }
 
+    /// The current time label itself is the indicator. Giving it the `now`
+    /// role keeps the day and time readable without stacking a separate glyph
+    /// above the first weather column.
     #[test]
-    fn current_marker_leaves_the_first_clock_anchor_readable() {
+    fn current_time_anchor_replaces_the_separate_marker() {
         let weather = Weather::fixture(22, 14);
+        let palette = Theme::default().palette();
 
         for (width, rows, compact) in [(34, COMPACT_ROWS, true), (80, FULL_ROWS, false)] {
-            let text = rendered(&weather, width, rows, 3, compact);
-            let axis = text
-                .lines()
-                .find(|line| line.contains('┬'))
-                .unwrap_or_else(|| panic!("current marker missing:\n{text}"));
+            let buffer =
+                rendered_buffer_in(&weather, width, rows, 3, compact, palette, Unit::Metric);
+            let text: String = (0..rows)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let axis_y = if compact { 0 } else { 1 };
+            let anchor_x = (1..width - 1)
+                .find(|x| buffer[(*x, axis_y)].symbol() == "S")
+                .expect("current time anchor");
+            let axis: String = (0..width).map(|x| buffer[(x, axis_y)].symbol()).collect();
+
             assert!(
                 axis.contains("Sun") && axis.contains("12a"),
-                "first anchor was overwritten: {axis:?}"
+                "current day and time disappeared from {axis:?}"
+            );
+            assert_eq!(buffer[(anchor_x, axis_y)].fg, palette.now);
+            assert!(
+                !text.contains('┬'),
+                "redundant current marker returned:\n{text}"
             );
             assert!(text.contains('▲'), "selection marker missing:\n{text}");
+
+            if !compact {
+                let sky_y = 2;
+                let label_x = (1..width - 3)
+                    .find(|x| {
+                        buffer[(*x, sky_y)].symbol() == "s"
+                            && buffer[(*x + 1, sky_y)].symbol() == "k"
+                            && buffer[(*x + 2, sky_y)].symbol() == "y"
+                    })
+                    .expect("sky label");
+                assert_eq!(anchor_x, label_x + LABEL_WIDTH);
+            }
         }
     }
 
@@ -412,6 +450,11 @@ mod tests {
             .expect("leading axis anchor");
 
         assert_eq!(first_axis_x, plot_x);
+        assert_eq!(
+            buffer[(first_axis_x, axis_y)].fg,
+            Theme::default().palette().muted,
+            "a later page presented its anchor as the current time"
+        );
         assert!(
             marker_coordinates(&buffer, width, FULL_ROWS, "┬").is_empty(),
             "current marker leaked onto a scrolled page"
@@ -450,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn every_theme_keeps_the_selected_and_current_markers_in_place() {
+    fn every_theme_keeps_the_selection_and_current_anchor_in_place() {
         let weather = Weather::fixture(22, 14);
         let baseline = rendered_buffer_in(
             &weather,
@@ -462,18 +505,14 @@ mod tests {
             Unit::Metric,
         );
         let selected = marker_coordinates(&baseline, 80, FULL_ROWS, "▲");
-        let current = marker_coordinates(&baseline, 80, FULL_ROWS, "┬");
+        let anchor_x = (1..79)
+            .find(|x| baseline[(*x, 1)].symbol() == "S")
+            .expect("current time anchor");
 
         for theme in Theme::ALL {
-            let buffer = rendered_buffer_in(
-                &weather,
-                80,
-                FULL_ROWS,
-                3,
-                false,
-                theme.palette(),
-                Unit::Metric,
-            );
+            let palette = theme.palette();
+            let buffer =
+                rendered_buffer_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
             assert_eq!(
                 marker_coordinates(&buffer, 80, FULL_ROWS, "▲"),
                 selected,
@@ -481,9 +520,9 @@ mod tests {
                 theme.name()
             );
             assert_eq!(
-                marker_coordinates(&buffer, 80, FULL_ROWS, "┬"),
-                current,
-                "{} moved the current-hour marker",
+                buffer[(anchor_x, 1)].fg,
+                palette.now,
+                "{} did not style the current time anchor",
                 theme.name()
             );
         }
