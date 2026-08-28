@@ -269,6 +269,9 @@ Coverage includes:
 GitHub Actions runs the locked suite on Linux, macOS, and Windows. Separate
 gates enforce rustfmt, Clippy with warnings denied, the Rust 1.89 minimum
 supported version, package-content completeness, and pinned dependency audits.
+One more reads `CHANGELOG.md`: a section that has shipped may not be edited,
+and a change a user can observe must describe itself under the section that
+will carry it.
 
 ## Themes
 
