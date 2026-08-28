@@ -8,8 +8,9 @@ repository = "https://github.com/t-shahan/virga"
 readme = "README.md"
 # Not the edition floor of 1.85: ratatui 0.30.2 and ratatui-core 0.1.2 both
 # declare 1.88.0, and a dependency graph's minimum is not the same thing as
-# edition support.
-rust-version = "1.88"
+# edition support. 1.89 is this crate's own ask: `File::lock`, which
+# serializes concurrent state saves, stabilized there.
+rust-version = "1.89"
 keywords = ["weather", "tui", "terminal", "cli", "forecast"]
 categories = ["command-line-utilities"]
 

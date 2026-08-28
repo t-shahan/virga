@@ -175,6 +175,10 @@ pub struct App {
     /// a status readout nobody is reading, holding columns the bar can put to
     /// better use — and on a narrow terminal it costs a whole binding.
     theme_readout_until: Option<Instant>,
+    /// The one line of release news, when the background probe found any.
+    /// Composed in the probe, so this module never learns about versions,
+    /// paths, or the network — it holds a string and lets it go.
+    pub update_notice: Option<String>,
 }
 
 /// How long the palette's name stays on the key bar after `t`. Long enough to
@@ -226,6 +230,7 @@ impl App {
             should_quit: false,
             search_return: Screen::Weather,
             theme_readout_until: None,
+            update_notice: None,
         }
     }
 
@@ -249,6 +254,14 @@ impl App {
     /// I/O out here — the caller owns the channel — is what lets every
     /// transition below be tested without a terminal or a network.
     pub fn on_action(&mut self, action: Action) -> Option<Request> {
+        // The notice is dismissed by living — but only by a key that could
+        // have seen it. The search screen never renders the notice, so keys
+        // pressed there must not silently delete news nobody was shown; and
+        // quit keeps it, so the event loop can hand it back for the ordinary
+        // screen a straight-to-quit launch never gave it a frame on.
+        if !matches!(action, Action::Quit) && self.screen != Screen::Search {
+            self.update_notice = None;
+        }
         match action {
             Action::Quit => self.should_quit = true,
             Action::Back => self.back(),
@@ -304,6 +317,12 @@ impl App {
     /// has since changed must not repopulate the list.
     pub fn on_message(&mut self, message: Message) -> Outcome {
         match message {
+            // No id and no staleness: at most one is ever sent, and news
+            // about a release does not go stale over a session.
+            Message::UpdateAvailable { notice } => {
+                self.update_notice = Some(notice);
+                Outcome::nothing()
+            }
             Message::Loaded {
                 id,
                 location,
@@ -1973,5 +1992,71 @@ mod tests {
             outstanding.len(),
             crate::events::REQUEST_QUEUE
         );
+    }
+
+    fn news() -> Message {
+        Message::UpdateAvailable {
+            notice: "update: virga 9.9.9 is available — run `virga update`".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_update_message_raises_the_notice_and_asks_for_nothing() {
+        let mut app = App::new();
+
+        let outcome = app.on_message(news());
+
+        assert!(app.update_notice.is_some());
+        assert!(outcome.request.is_none(), "news chains no request");
+        assert!(outcome.remember.is_none(), "and persists nothing");
+    }
+
+    /// Dismissed by living: the key that clears the notice still does its
+    /// job, so the notice can never eat an input.
+    #[test]
+    fn the_next_action_clears_the_notice_and_still_acts() {
+        let mut app = App::new();
+        app.on_message(news());
+
+        app.on_action(Action::ToggleUnits);
+
+        assert_eq!(app.update_notice, None);
+        assert_eq!(app.unit, Unit::Metric, "the keypress still did its work");
+    }
+
+    /// The search screen never renders the notice, so keys pressed there —
+    /// every letter of a city name — must not silently delete news nobody
+    /// was shown. It stands until a screen that shows it has had a key.
+    #[test]
+    fn search_keys_do_not_dismiss_a_notice_nobody_saw() {
+        let mut app = App::new();
+        app.on_action(Action::OpenSearch);
+        app.on_message(news());
+
+        app.on_action(Action::Insert('a'));
+        assert!(app.update_notice.is_some(), "typing deleted hidden news");
+
+        app.on_action(Action::Back);
+        assert!(
+            app.update_notice.is_some(),
+            "leaving search is the first chance to see it"
+        );
+
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(app.update_notice, None, "a key that saw it clears it");
+    }
+
+    /// A straight-to-quit launch may never give the notice a frame, so quit
+    /// leaves it in place for the event loop to hand back to the ordinary
+    /// screen — the exit path warnings already use.
+    #[test]
+    fn quitting_keeps_the_notice_for_the_ordinary_screen() {
+        let mut app = App::new();
+        app.on_message(news());
+
+        app.on_action(Action::Quit);
+
+        assert!(app.should_quit);
+        assert!(app.update_notice.is_some());
     }
 }

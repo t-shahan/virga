@@ -26,8 +26,35 @@ week strip from scratch on every frame.
   against the terminal default. `catppuccin latte` is the same scheme in dark
   ink and the first palette built for a light terminal background; every
   other theme assumes a dark one. Seven themes now.
+- **`virga update`**: check whether a newer release exists and print how to
+  get it, matched to how this copy was installed — Homebrew, Cargo, the
+  install script, or a download on Windows. One request to GitHub's release
+  redirect answers it; the binary is never replaced in place.
+- **A startup update notice.** Each launch makes the same release check in
+  the background — on its own thread, never delaying the first frame — and
+  shows one muted line above the key bar when a newer release exists. The
+  next keypress on a screen that shows it clears it and still does its own
+  job — keys typed into the city search leave it standing, since that screen
+  never shows it; news that arrived before you quit is printed on the
+  ordinary screen instead. `VIRGA_UPDATE=off` skips the check, and a launch
+  that cannot reach GitHub — or that quits before GitHub answers — simply
+  shows no notice.
+- **`virga theme`**: list the colour themes and mark the startup default, or
+  persist one — `virga theme tokyo night` — so every later launch starts in
+  it. The choice is stored in `state.json` beside the remembered location;
+  `VIRGA_THEME` still overrides it for a single launch, and `t` still cycles
+  themes for the session. `virga help` and `virga version` also now work as
+  word spellings of `-h` and `-V`.
 
 ### Changed
+
+- The minimum supported Rust version rises from 1.88 to 1.89, for
+  `File::lock`: state saves are now serialized across processes, so the app
+  remembering a location while `virga theme` runs can no longer drop one
+  side's change. A state file that cannot be read, or that was written by a
+  newer Virga, now blocks saves instead of being replaced.
+- An unusable `VIRGA_THEME` value now falls back to the persisted startup
+  theme, when one is set, rather than to the built-in default.
 
 - Buffered input is drained before each redraw, so a held arrow key can no
   longer queue repeats faster than frames are drawn and keep scrolling after
