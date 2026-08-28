@@ -27,6 +27,7 @@ also, most weeks, what the precipitation chart draws.
   - [From source](#from-source)
   - [Updating and removing](#updating-and-removing)
 - [Keys](#keys)
+- [Commands](#commands)
 - [Architecture](#architecture)
 - [Engineering Quality](#engineering-quality)
 - [Themes](#themes)
@@ -197,6 +198,26 @@ the amount scale.
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
 
+## Commands
+
+No option changes how Virga runs, since the terminal is the whole interface.
+What the command line answers, it answers without starting up.
+
+| Command | What it does |
+|---|---|
+| `virga` | Start the application |
+| `virga theme` | List the themes, marking the startup default with `*` |
+| `virga theme NAME` | Persist a startup theme, e.g. `virga theme tokyo night`; multi-word names need no quotes |
+| `virga update` | Check whether a newer release exists and print how to get it |
+| `virga help` / `-h` / `--help` | Print the usage text |
+| `virga version` / `-V` / `--version` | Print the version |
+
+An unknown argument is an error rather than something to skip past. A typo
+would otherwise start the application while the question behind it went
+unanswered. Neither `virga update` nor the startup check replaces the binary; see
+[Updating and removing](#updating-and-removing) for the command that does, and
+[Configuration](#configuration) for the three environment variables.
+
 ## Architecture
 
 Virga separates provider-specific data and network activity from application
@@ -330,11 +351,8 @@ launch, `VIRGA_GEOIP` turns location detection off, and `VIRGA_UPDATE` turns
 the startup release check off, all as described above. Unit and theme changes
 made in the app last for the session.
 
-No option changes how the application runs, since the terminal is the whole
-interface. What the command line answers, it answers without starting up:
-`virga theme` lists or persists the startup palette, `virga update` checks for
-a newer release, and `virga --version` and `virga --help` answer what they
-always have.
+Nothing else is configurable. The command line takes no options at all, only
+the questions [Commands](#commands) lists.
 
 ## Contributing
 
