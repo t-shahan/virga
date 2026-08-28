@@ -57,12 +57,14 @@ pub(super) fn put_right(frame: &mut Frame, x: u16, y: u16, width: u16, text: &st
 ///
 /// The leading tick is what places the plot in the week. Without it a chart
 /// whose first six-hour mark is five columns in reads as starting there, which
-/// is the mistake an axis exists to prevent.
+/// is the mistake an axis exists to prevent. `leading_offset` reserves cells
+/// for a marker without shifting the later ticks off their hour columns.
 pub(super) fn hour_ticks_render<'a>(
     frame: &mut Frame,
     row: Rect,
     times: impl Iterator<Item = &'a str>,
     stride: u16,
+    leading_offset: u16,
     palette: Palette,
 ) {
     // Columns already spoken for. The leading tick is wider than the rest and a
@@ -74,7 +76,7 @@ pub(super) fn hour_ticks_render<'a>(
         let label = if i == 0 { anchor(time) } else { tick(time) };
         let Some(label) = label else { continue };
 
-        let x = row.x + i as u16 * stride;
+        let x = row.x + i as u16 * stride + if i == 0 { leading_offset } else { 0 };
         let width = label.chars().count() as u16;
         if x < taken || x + width > row.right() {
             continue;

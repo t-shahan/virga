@@ -16,6 +16,7 @@ mod forecast;
 mod hourly;
 mod legend;
 mod precip_week;
+mod precipitation;
 mod search;
 mod weathergram;
 
@@ -251,6 +252,7 @@ fn spinner(tick: usize) -> &'static str {
 mod tests {
     use super::*;
     use crate::theme::Theme;
+    use crate::units::Unit;
     use crate::weather::model::{Location, Weather};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -593,6 +595,59 @@ mod tests {
             assert!(text.contains(label), "minimum lost {label}:\n{text}");
         }
         assert!(!text.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn minimum_hourly_inspector_keeps_extreme_facts_in_both_units() {
+        let mut app = ready(Screen::Hourly);
+        app.location.label = "A location name far longer than the minimum terminal".to_string();
+        let Fetch::Ready(weather) = &mut app.weather else {
+            panic!("ready weather")
+        };
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now).take(24) {
+            hour.chance = Some(100);
+            hour.code = Some(99);
+            hour.precip_mm = Some(120.5);
+            hour.snow_cm = Some(0.0);
+            hour.wind_kph = Some(200.0);
+            hour.gust_kph = Some(300.0);
+            hour.wind_dir_deg = Some(225.0);
+        }
+
+        for (unit, facts) in [
+            (Unit::Metric, ["100%", "120.5mm", "SW200g300", "24h2892mm"]),
+            (
+                Unit::Imperial,
+                ["100%", "4.74in", "SW124g186", "24h113.86in"],
+            ),
+        ] {
+            app.unit = unit;
+            let rows = symbols(
+                &drawn(&app, Theme::default().palette(), MIN_WIDTH, MIN_HEIGHT),
+                MIN_WIDTH,
+                MIN_HEIGHT,
+            );
+            let text = rows.join("\n");
+            assert!(
+                text.contains("Thunderstorm, heavy hail"),
+                "minimum lost its spelled-out condition in {unit:?}:\n{text}"
+            );
+            let detail = rows
+                .iter()
+                .find(|row| row.contains("100%"))
+                .unwrap_or_else(|| panic!("compact detail missing in {unit:?}:\n{text}"));
+            for fact in facts {
+                assert!(
+                    detail.contains(fact),
+                    "minimum clipped {fact:?} in {unit:?}: {detail:?}"
+                );
+            }
+            assert!(
+                detail.starts_with('│') && detail.ends_with('│'),
+                "compact detail overwrote its border in {unit:?}: {detail:?}"
+            );
+        }
     }
 
     #[test]

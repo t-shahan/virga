@@ -4,9 +4,8 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Virga is a responsive Rust terminal weather application for current conditions,
-multi-day forecasts, historical context, and hourly precipitation
-conditions visualization. It is powered by Open-Meteo and requires no account
-or API key.
+multi-day forecasts, historical context, and hourly conditions visualization.
+It is powered by Open-Meteo and requires no account or API key.
 
 > **Project status: actively developed.** Virga works and is worth installing
 > today. Features and fixes still land, so expect the occasional release.

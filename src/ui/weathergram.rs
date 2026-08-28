@@ -2,6 +2,7 @@ use crate::theme::Palette;
 use crate::ui::axis::{hour_ticks_render, put, put_right, put_text};
 use crate::ui::bars::window_start;
 use crate::ui::condition_symbol;
+use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
 use crate::units::Unit;
 use crate::weather::model::HourlyForecast;
 use ratatui::Frame;
@@ -110,26 +111,32 @@ fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
 fn precipitation_summary(hours: &[HourlyForecast], selected: usize, unit: Unit) -> String {
     let end = selected.saturating_add(24).min(hours.len());
     let window = hours.get(selected..end).unwrap_or_default();
-    let Some(total) = window
-        .iter()
-        .filter_map(|hour| hour.precip_mm)
-        .reduce(|total, value| total + value)
-    else {
-        return "—".to_string();
-    };
-    let decimals = unit.precip_decimals();
-    format!("{:.decimals$} {}", unit.precip(total), unit.precip_label())
+    let total = aggregate(window, unit);
+    match total {
+        PrecipitationAggregate::Unavailable => "—".to_string(),
+        PrecipitationAggregate::Zero => {
+            format!("{:.*} {}", unit.precip_decimals(), 0.0, unit.precip_label())
+        }
+        PrecipitationAggregate::Trace(_) | PrecipitationAggregate::Measured(_) => total
+            .positive_text(unit, " ")
+            .expect("positive aggregate has text"),
+    }
 }
 
 fn wind_summary(hours: &[HourlyForecast], unit: Unit) -> String {
-    hours
-        .iter()
-        .filter_map(|hour| hour.wind_kph)
-        .reduce(f64::max)
-        .map_or_else(
-            || "—".to_string(),
-            |speed| format!("{:.0} {}", unit.speed(speed), unit.speed_label()),
-        )
+    let mut speeds = hours.iter().filter_map(|hour| hour.wind_kph);
+    let Some(first) = speeds.next() else {
+        return "—".to_string();
+    };
+    let (minimum, maximum) = speeds.fold((first, first), |(minimum, maximum), speed| {
+        (minimum.min(speed), maximum.max(speed))
+    });
+    format!(
+        "{:.0}–{:.0} {}",
+        unit.speed(minimum),
+        unit.speed(maximum),
+        unit.speed_label()
+    )
 }
 
 pub(super) fn weathergram_render(
@@ -174,6 +181,7 @@ pub(super) fn weathergram_render(
         Rect::new(plot_x, axis_y, plot_width, 1),
         visible.iter().map(|hour| hour.time.as_str()),
         window.cell_width,
+        1,
         palette,
     );
 
@@ -291,6 +299,43 @@ mod tests {
         assert_eq!(wind_symbol(Some(10.0), None), " ");
     }
 
+    #[test]
+    fn wind_summary_reports_the_visible_minimum_and_maximum() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.wind_kph = None;
+        }
+        weather.hourly[now].wind_kph = Some(5.0);
+        weather.hourly[now + 1].wind_kph = Some(15.0);
+        weather.hourly[now + 2].wind_kph = Some(10.0);
+        let visible = &weather.forecast_hours()[..3];
+
+        assert_eq!(wind_summary(visible, Unit::Metric), "5–15 km/h");
+        assert_eq!(wind_summary(visible, Unit::Imperial), "3–9 mph");
+    }
+
+    #[test]
+    fn wind_summary_keeps_a_flat_range_and_marks_all_missing() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.wind_kph = Some(10.0);
+        }
+        assert_eq!(
+            wind_summary(&weather.forecast_hours()[..12], Unit::Metric),
+            "10–10 km/h"
+        );
+
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.wind_kph = None;
+        }
+        assert_eq!(
+            wind_summary(&weather.forecast_hours()[..12], Unit::Metric),
+            "—"
+        );
+    }
+
     /// The selected hour and the current hour communicate with shapes as well
     /// as colours, so neither state disappears for a monochrome terminal.
     #[test]
@@ -313,6 +358,24 @@ mod tests {
                 text.contains('┬'),
                 "current-hour axis mark lost without colour:\n{text}"
             );
+        }
+    }
+
+    #[test]
+    fn current_marker_leaves_the_first_clock_anchor_readable() {
+        let weather = Weather::fixture(22, 14);
+
+        for (width, rows, compact) in [(34, COMPACT_ROWS, true), (80, FULL_ROWS, false)] {
+            let text = rendered(&weather, width, rows, 3, compact);
+            let axis = text
+                .lines()
+                .find(|line| line.contains('┬'))
+                .unwrap_or_else(|| panic!("current marker missing:\n{text}"));
+            assert!(
+                axis.contains("Sun") && axis.contains("12a"),
+                "first anchor was overwritten: {axis:?}"
+            );
+            assert!(text.contains('▲'), "selection marker missing:\n{text}");
         }
     }
 
@@ -458,6 +521,49 @@ mod tests {
         assert!(
             rain.contains('—'),
             "missing precipitation reads as dry:\n{text}"
+        );
+    }
+
+    #[test]
+    fn partial_precipitation_is_unavailable_in_the_summary() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now).take(24) {
+            hour.precip_mm = Some(0.0);
+        }
+        weather.hourly[now + 7].precip_mm = None;
+
+        assert_eq!(
+            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            "—"
+        );
+    }
+
+    #[test]
+    fn precipitation_summary_distinguishes_measured_zero_and_trace() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now).take(24) {
+            hour.precip_mm = Some(0.0);
+        }
+
+        assert_eq!(
+            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            "0.0 mm"
+        );
+        assert_eq!(
+            precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
+            "0.00 in"
+        );
+
+        weather.hourly[now].precip_mm = Some(0.01);
+        assert_eq!(
+            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            "<0.1 mm"
+        );
+        assert_eq!(
+            precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
+            "<0.01 in"
         );
     }
 
