@@ -103,8 +103,9 @@ xattr -dr com.apple.quarantine ./virga
 
 ### From source
 
-Building requires **Rust 1.88 or later**. Ratatui requires 1.88 even though the
-Rust 2024 edition itself supports earlier compilers.
+Building requires **Rust 1.89 or later** — Virga uses `File::lock`, which
+stabilized there, to keep concurrent state saves from losing each other's
+half.
 
 ```bash
 cargo install --git https://github.com/t-shahan/virga
@@ -117,10 +118,12 @@ slower to render.
 ### Updating and removing
 
 Virga checks for a newer release once per launch, in the background, and
-shows one muted line above the key bar when it finds one — the next keypress
-clears it, and news that arrived before you quit is printed on the way out
-instead. Set `VIRGA_UPDATE=off` to skip the check; a launch that cannot
-reach GitHub — or that quits before GitHub answers — simply shows no notice.
+shows one muted line above the key bar when it finds one. The next keypress
+on a screen that shows it clears it — letters typed into the city search
+leave it standing, because that screen never shows it — and news that
+arrived before you quit is printed on the way out instead. Set
+`VIRGA_UPDATE=off` to skip the check; a launch that cannot reach GitHub — or
+that quits before GitHub answers — simply shows no notice.
 
 `virga update` asks the same question on demand and, judging from where the
 running binary lives, says which row of this table applies to you. Neither
@@ -220,7 +223,7 @@ Coverage includes:
   response handling.
 
 GitHub Actions runs the locked suite on Linux, macOS, and Windows. Separate
-gates enforce rustfmt, Clippy with warnings denied, the Rust 1.88 minimum
+gates enforce rustfmt, Clippy with warnings denied, the Rust 1.89 minimum
 supported version, package-content completeness, and pinned dependency audits.
 
 ## Themes

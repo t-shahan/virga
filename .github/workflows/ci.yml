@@ -65,14 +65,14 @@ jobs:
       - run: cargo test --locked --all-targets
 
   msrv:
-    name: msrv (1.88.0)
+    name: msrv (1.89.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Exactly the declared minimum, not "something at least that new" — the
       # point is to catch a dependency or language feature quietly raising it.
-      - run: rustup toolchain install 1.88.0 --profile minimal
-      - run: cargo +1.88.0 test --locked --all-targets
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - run: cargo +1.89.0 test --locked --all-targets
 
   package:
     name: package

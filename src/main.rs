@@ -504,6 +504,20 @@ fn run(
                             dispatch(&request_tx, &mut app, request)?;
                         }
                         if app.should_quit {
+                            // A message already in the queue — above all the
+                            // update probe's one answer, which may have
+                            // landed between this frame's drain and the quit
+                            // key — must not die with the receiver. Applied
+                            // through the ordinary path, so a finished
+                            // weather load is remembered too; only the
+                            // chained request is pointless now.
+                            while let Ok(message) = message_rx.try_recv() {
+                                let message_warning = match state_path {
+                                    Some(path) => accept_message(&mut app, message, path).1,
+                                    None => app.on_message(message).warning,
+                                };
+                                retain_first_warning(warning, message_warning);
+                            }
                             // Quit left the notice standing exactly when no
                             // other key ever cleared it; hand it out for the
                             // ordinary screen.

@@ -126,37 +126,71 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     })
 }
 
+/// The one claim every version of the format has made and every future one
+/// must keep making. Parsed on its own so a document's age can be judged
+/// without asking its other fields to fit today's schema.
+#[derive(Deserialize)]
+struct VersionEnvelope {
+    version: u8,
+}
+
 /// The document on disk, if there is one this binary may replace.
 ///
-/// A missing or unparseable file reads as `None`: saving over corruption is
-/// the least bad option, since what could not be read is already lost. A
-/// document from a *newer* Virga is neither missing nor broken — this binary
-/// just cannot read it — and writing over it would destroy state the newer
-/// binary still wants, so that save is refused instead.
+/// Missing reads as `None`, and so does corruption — a body with no readable
+/// version claim, or one whose fields do not fit a version this binary
+/// knows. Saving over corruption is the least bad option, since what could
+/// not be read is already lost. Two cases are pointedly *not* corruption:
 ///
-/// The document is kept raw rather than parsed into [`Persisted`] so a save
-/// carries forward what it does not understand — above all a theme name from
-/// a newer Virga, which parsing would silently reduce to nothing.
-///
-/// Known gap, accepted for now: two processes saving at once — the TUI
-/// remembering a location while `virga theme` runs — each read, merge, and
-/// replace without a lock, so the later replace can drop the earlier half.
-/// The window is milliseconds, both writers belong to the same user, and the
-/// loss is one re-settable preference. Closing it wants `File::lock`, stable
-/// in Rust 1.89, above the current 1.88 minimum.
+/// - A file that exists but cannot be read — a permission error, a passing
+///   I/O failure — may be hiding a perfectly good document, so the error
+///   propagates and the save is refused rather than allowed to replace what
+///   it could not examine. Only `NotFound` means there is no document.
+/// - A version above what this binary knows is refused outright, and the
+///   version is judged from the envelope alone, *before* the full schema is
+///   attempted: a future version's fields owe today's schema nothing, and
+///   failing to deserialize them must read as "newer", never as "corrupt".
 fn surviving_document(path: &Path) -> Result<Option<StateDocument>> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Ok(None);
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    let Ok(document) = serde_json::from_slice::<StateDocument>(&bytes) else {
+    let Ok(envelope) = serde_json::from_slice::<VersionEnvelope>(&bytes) else {
         return Ok(None);
     };
     anyhow::ensure!(
-        document.version <= LOCATIONLESS_VERSION,
+        envelope.version <= LOCATIONLESS_VERSION,
         "the state file is version {}, written by a newer virga; refusing to overwrite it",
-        document.version
+        envelope.version
     );
-    Ok(Some(document))
+    Ok(serde_json::from_slice::<StateDocument>(&bytes).ok())
+}
+
+/// One writer at a time, across processes: the TUI remembering a location
+/// while `virga theme` runs must not each read the same old document and
+/// have the later replace drop the earlier's half. Held from the merge's
+/// read to its rename.
+///
+/// The lock lives on its own file, `state.json.lock`, because the state
+/// file itself is replaced by rename — a lock on an inode about to be
+/// renamed away serializes nothing. An OS lock rather than a lockfile
+/// protocol, because it cannot go stale: the OS releases it when the
+/// holding process exits, however it exits, and here when the returned
+/// handle drops. A platform that cannot lock (std returns unsupported on
+/// some) gets the unserialized behavior rather than losing saves entirely.
+fn exclusive(path: &Path) -> Result<std::fs::File> {
+    let parent = path.parent().context("state path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let lock = parent.join(format!(
+        "{}.lock",
+        path.file_name()
+            .context("state path has no file name")?
+            .to_string_lossy()
+    ));
+    let file =
+        std::fs::File::create(&lock).with_context(|| format!("create {}", lock.display()))?;
+    let _ = file.lock();
+    Ok(file)
 }
 
 pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> {
@@ -169,6 +203,7 @@ pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> 
         "the built-in fallback is not a remembered location"
     );
     validate(location)?;
+    let _held = exclusive(path)?;
     // The raw name, not the parsed theme: one this binary does not know
     // still belongs to somebody — a newer Virga, most likely — and
     // remembering a city must not erase it.
@@ -177,6 +212,7 @@ pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> 
 }
 
 pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
+    let _held = exclusive(path)?;
     // A location that no longer parses was unusable anyway; dropping it is
     // the one lossy merge here, and it loses nothing that worked.
     let remembered =
@@ -595,6 +631,105 @@ mod tests {
             body.as_bytes(),
             "the newer document was modified"
         );
+    }
+
+    /// A file that exists but cannot be read may be hiding a perfectly good
+    /// document — only `NotFound` means there is none — so the save must
+    /// refuse rather than replace what it could not examine.
+    #[test]
+    fn an_unreadable_state_file_blocks_saves_rather_than_replacing_it() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        // A directory at the state path: it exists, and reading it as a file
+        // fails with something that is not NotFound.
+        std::fs::create_dir(&path).unwrap();
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        assert!(save_theme(&path, Theme::Nord).is_err());
+        assert!(save_location(&path, &berlin).is_err());
+    }
+
+    /// The same refusal for the everyday spelling of unreadable: a
+    /// permission error.
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_denied_state_file_blocks_saves() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let body = r#"{"version":3,"theme":"nord"}"#;
+        write_raw(&path, body);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root, where mode bits do not bind; the directory
+            // case above still covers the guard.
+            return;
+        }
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        assert!(save_theme(&path, Theme::Nord).is_err());
+        assert!(save_location(&path, &berlin).is_err());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            body.as_bytes(),
+            "the hidden document was replaced"
+        );
+    }
+
+    /// A future version's fields owe today's schema nothing: even when they
+    /// no longer deserialize, the version claim alone must read as "newer",
+    /// never as "corrupt and free to overwrite".
+    #[test]
+    fn a_future_version_with_an_incompatible_shape_is_still_refused() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        // Version 4 might well turn `location` into a string and `theme`
+        // into a table; none of it parses as today's document.
+        let body = r#"{"version":4,"location":"berlin/de","theme":{"name":"nocturne"}}"#;
+        write_raw(&path, body);
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        assert!(save_theme(&path, Theme::Nord).is_err());
+        assert!(save_location(&path, &berlin).is_err());
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            body.as_bytes(),
+            "the newer document was modified"
+        );
+    }
+
+    /// Both halves survive a stampede: every save reads under the same
+    /// cross-process lock it writes under, so whatever interleaving the
+    /// scheduler picks, the last location save and the last theme save both
+    /// land. Without the lock this fails on some interleavings — each writer
+    /// reading the same old document and the later replace dropping the
+    /// earlier's half.
+    #[test]
+    fn concurrent_saves_do_not_lose_each_others_half() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..20 {
+                    save_location(&path, &berlin).unwrap();
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..20 {
+                    save_theme(&path, Theme::Nord).unwrap();
+                }
+            });
+        });
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
     }
 
     /// A corrupt file must not block saving over it — that is how corruption

@@ -147,10 +147,13 @@ update: virga 0.3.0 is available — run `virga update` for how
   centered box would also land *asynchronously*, whenever GitHub answers,
   which means it could appear under the user's fingers mid-search. A muted
   line in the `muted` role sits in the hierarchy labels already occupy.
-- **Dismissed by living.** The next keypress clears it, and that keypress
-  still does whatever it normally does — the notice must never eat an input.
-  Quitting without pressing anything else re-prints the line on the ordinary
-  screen through the existing exit-warning path, so it is not lost either.
+- **Dismissed by living.** The next keypress on a screen that renders it
+  clears it, and that keypress still does whatever it normally does — the
+  notice must never eat an input, and keys typed into the search screen,
+  which never renders it, must not delete news nobody was shown. At quit,
+  answers already queued are drained and an uncleared line is re-printed on
+  the ordinary screen through the existing exit path, so it is not lost
+  either.
 - **Never on the critical path.** The probe runs on its own one-shot thread,
   not the worker: the worker serves requests serially, and a slow GitHub
   response queued ahead of a city search would freeze search for its

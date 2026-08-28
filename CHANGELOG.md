@@ -27,10 +27,12 @@ refuse to publish a version this file does not describe.
 - **A startup update notice.** Each launch makes the same release check in
   the background — on its own thread, never delaying the first frame — and
   shows one muted line above the key bar when a newer release exists. The
-  next keypress clears it and still does its own job; news that arrived
-  before you quit is printed on the ordinary screen instead.
-  `VIRGA_UPDATE=off` skips the check, and a launch that cannot reach GitHub
-  — or that quits before GitHub answers — simply shows no notice.
+  next keypress on a screen that shows it clears it and still does its own
+  job — keys typed into the city search leave it standing, since that screen
+  never shows it; news that arrived before you quit is printed on the
+  ordinary screen instead. `VIRGA_UPDATE=off` skips the check, and a launch
+  that cannot reach GitHub — or that quits before GitHub answers — simply
+  shows no notice.
 - **`virga theme`**: list the colour themes and mark the startup default, or
   persist one — `virga theme tokyo night` — so every later launch starts in
   it. The choice is stored in `state.json` beside the remembered location;
@@ -40,6 +42,11 @@ refuse to publish a version this file does not describe.
 
 ### Changed
 
+- The minimum supported Rust version rises from 1.88 to 1.89, for
+  `File::lock`: state saves are now serialized across processes, so the app
+  remembering a location while `virga theme` runs can no longer drop one
+  side's change. A state file that cannot be read, or that was written by a
+  newer Virga, now blocks saves instead of being replaced.
 - An unusable `VIRGA_THEME` value now falls back to the persisted startup
   theme, when one is set, rather than to the built-in default.
 

@@ -23,7 +23,7 @@
 - Exit codes: 0 answered, 1 operational failure (network, unwritable state), 2 usage error. A typo never falls through into the full-screen application.
 - `virga update` sends nothing but the request itself, and bounds it with the same timeout the weather client uses. The startup probe is the same request under the same bound.
 - The startup probe never delays first paint, never rides the serial request queue, and fails silently — no network is the notice not appearing, not a warning.
-- The notice renders in the `muted` role, is cleared by the next action without consuming it, and is skipped below the minimum terminal size. `VIRGA_UPDATE=off` skips the probe, with `VIRGA_GEOIP`'s grammar and forgiveness.
+- The notice renders in the `muted` role, is cleared by the next action on a screen that renders it (search never does, so search keys leave it standing) without consuming the action, and is skipped below the minimum terminal size. `VIRGA_UPDATE=off` skips the probe, with `VIRGA_GEOIP`'s grammar and forgiveness.
 - Keep filesystem access out of `App`, networking out of `state`, and both out of `cli`.
 
 ## File structure
