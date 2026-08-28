@@ -118,6 +118,22 @@ tar -xzf "$work/$archive" -C "$work"
 binary=$(find "$work" -type f -name virga | head -n 1)
 [ -n "$binary" ] || die "The archive did not contain a virga binary."
 
+# The checksum above proves the download is intact; provenance proves who
+# built it. `gh attestation verify` needs an authenticated gh to reach the
+# API, so it runs when that is available and says so when it is not — a
+# quiet skip would look like a pass.
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if gh attestation verify "$binary" --repo "$REPO" >/dev/null 2>&1; then
+        say "build provenance verified"
+    else
+        die "Provenance verification failed: this binary does not carry an
+attestation from $REPO's release workflow. Nothing was installed."
+    fi
+else
+    say "provenance not verified (needs an authenticated gh). To check by hand:
+       gh attestation verify $INSTALL_DIR/virga --repo $REPO"
+fi
+
 mkdir -p "$INSTALL_DIR"
 
 # Stage beside the target and rename, rather than moving straight out of the
