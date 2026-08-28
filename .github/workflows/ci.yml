@@ -65,14 +65,14 @@ jobs:
       - run: cargo test --locked --all-targets
 
   msrv:
-    name: msrv (1.88.0)
+    name: msrv (1.89.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Exactly the declared minimum, not "something at least that new" — the
       # point is to catch a dependency or language feature quietly raising it.
-      - run: rustup toolchain install 1.88.0 --profile minimal
-      - run: cargo +1.88.0 test --locked --all-targets
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - run: cargo +1.89.0 test --locked --all-targets
 
   package:
     name: package
@@ -118,6 +118,42 @@ jobs:
       # codegen unit, which a debug build would leave unexercised.
       - run: cargo build --release --locked --target x86_64-unknown-linux-musl
 
+  changelog:
+    name: changelog
+    # The weekly run compares a commit with itself and would prove nothing.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The check reads the commits between the base and here, and a
+          # shallow clone cannot see them.
+          fetch-depth: 0
+      - name: what this change is measured against
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = pull_request ]; then
+            ref="origin/$BASE_REF"
+          else
+            # A branch's first push reports an all-zero base, and a force-push
+            # reports one that no longer exists. Either way the previous
+            # commit is the honest comparison.
+            ref="$BEFORE"
+            git rev-parse -q --verify "${ref}^{commit}" >/dev/null || ref=HEAD~1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      # Notes written into a section that has already shipped read as filed
+      # and reach nobody. This is the gate that says so in review, rather
+      # than leaving it to release.sh to refuse an empty section later.
+      - env:
+          BASE: ${{ steps.base.outputs.ref }}
+        run: ./scripts/check-changelog.sh "$BASE"
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
@@ -126,7 +162,7 @@ jobs:
       # install.sh is piped straight from the repository into strangers'
       # shells, which makes it the least appropriate file here to leave
       # unlinted. shellcheck ships preinstalled on the runner image.
-      - run: shellcheck install.sh scripts/release.sh
+      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh
 
   actionlint:
     name: actionlint

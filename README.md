@@ -16,6 +16,30 @@ also, most weeks, what the weathergram charts.
 
 <img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
+## Contents
+
+- [Hourly weathergram](#hourly-weathergram)
+- [Highlights](#highlights)
+- [Install](#install)
+  - [Homebrew](#homebrew)
+  - [Install script](#install-script)
+  - [Download it yourself](#download-it-yourself)
+  - [From source](#from-source)
+  - [Updating and removing](#updating-and-removing)
+- [Keys](#keys)
+- [Commands](#commands)
+- [Architecture](#architecture)
+- [Engineering Quality](#engineering-quality)
+- [Themes](#themes)
+- [Where it starts](#where-it-starts)
+- [Configuration](#configuration)
+- [Contributing](#contributing)
+  - [Cutting a release](#cutting-a-release)
+- [Limitations](#limitations)
+- [Data and Privacy](#data-and-privacy)
+  - [Attribution](#attribution)
+- [License](#license)
+
 ## Hourly weathergram
 
 Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
@@ -107,8 +131,9 @@ xattr -dr com.apple.quarantine ./virga
 
 ### From source
 
-Building requires **Rust 1.88 or later**. Ratatui requires 1.88 even though the
-Rust 2024 edition itself supports earlier compilers.
+Building requires **Rust 1.89 or later** — Virga uses `File::lock`, which
+stabilized there, to keep concurrent state saves from losing each other's
+half.
 
 ```bash
 cargo install --git https://github.com/t-shahan/virga
@@ -120,6 +145,18 @@ slower to render.
 
 ### Updating and removing
 
+Virga checks for a newer release once per launch, in the background, and
+shows one muted line above the key bar when it finds one. The next keypress
+on a screen that shows it clears it — letters typed into the city search
+leave it standing, because that screen never shows it — and news that
+arrived before you quit is printed on the way out instead. Set
+`VIRGA_UPDATE=off` to skip the check; a launch that cannot reach GitHub — or
+that quits before GitHub answers — simply shows no notice.
+
+`virga update` asks the same question on demand and, judging from where the
+running binary lives, says which row of this table applies to you. Neither
+ever replaces the binary itself:
+
 | Installed with | Update | Remove |
 |---|---|---|
 | Homebrew | `brew upgrade virga` | `brew uninstall virga` |
@@ -130,8 +167,9 @@ slower to render.
 Uninstalling from source takes the *package* name, `virga-tui`, not the binary
 name.
 
-Removing the binary leaves the one file Virga writes, a `state.json` holding the
-last location you chose. It lives in the platform's per-user state directory:
+Removing the binary leaves the one file Virga writes, a `state.json` holding
+the last location you chose and, if you set one, your startup theme. It lives
+in the platform's per-user state directory:
 
 | Platform | Path |
 |---|---|
@@ -161,6 +199,26 @@ rain-probability ramp makes chance comparable across the visible horizon.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
+
+## Commands
+
+No option changes how Virga runs, since the terminal is the whole interface.
+What the command line answers, it answers without starting up.
+
+| Command | What it does |
+|---|---|
+| `virga` | Start the application |
+| `virga theme` | List the themes, marking the startup default with `*` |
+| `virga theme NAME` | Persist a startup theme, e.g. `virga theme tokyo night`; multi-word names need no quotes |
+| `virga update` | Check whether a newer release exists and print how to get it |
+| `virga help` / `-h` / `--help` | Print the usage text |
+| `virga version` / `-V` / `--version` | Print the version |
+
+An unknown argument is an error rather than something to skip past. A typo
+would otherwise start the application while the question behind it went
+unanswered. Neither `virga update` nor the startup check replaces the binary; see
+[Updating and removing](#updating-and-removing) for the command that does, and
+[Configuration](#configuration) for the three environment variables.
 
 ## Architecture
 
@@ -210,8 +268,11 @@ Coverage includes:
   response handling.
 
 GitHub Actions runs the locked suite on Linux, macOS, and Windows. Separate
-gates enforce rustfmt, Clippy with warnings denied, the Rust 1.88 minimum
+gates enforce rustfmt, Clippy with warnings denied, the Rust 1.89 minimum
 supported version, package-content completeness, and pinned dependency audits.
+One more reads `CHANGELOG.md`: a section that has shipped may not be edited,
+and a change a user can observe must describe itself under the section that
+will carry it.
 
 ## Themes
 
@@ -240,17 +301,28 @@ The six non-default palettes use 24-bit colour. A terminal without truecolor
 may approximate or ignore them, which is why `default` is the default: the
 out-of-the-box appearance does not depend on truecolor support.
 
-Set `VIRGA_THEME` to start somewhere other than the default. Names are
-case-insensitive and forgiving about separators, so `tokyo night`,
-`tokyo-night`, and `Tokyo_Night` select the same theme:
+To make a theme the startup default, persist it:
+
+```bash
+virga theme tokyo night
+```
+
+`virga theme` alone lists the palettes and marks the one the next launch will
+use. Names are case-insensitive and forgiving about separators, so `tokyo
+night`, `tokyo-night`, and `Tokyo_Night` select the same theme, and multi-word
+names need no quotes.
+
+`VIRGA_THEME` still works and outranks the persisted theme for one launch:
 
 ```bash
 VIRGA_THEME=gruvbox-dark virga
 ```
 
-An unrecognized name prints the known themes and starts in `default` rather
-than refusing to run. The theme is not written to disk; like the unit toggle,
-it lasts for the current session.
+From weakest to strongest, the startup theme is the built-in `default`, the
+persisted theme, `VIRGA_THEME`, and whatever `t` lands on — which lasts for
+the session only, so cycling is a preview rather than a commitment. An
+unrecognized `VIRGA_THEME` prints the known themes and falls back to the
+persisted theme rather than refusing to run.
 
 ## Where it starts
 
@@ -278,13 +350,13 @@ value prints a warning and leaves detection on rather than refusing to run.
 
 ## Configuration
 
-`VIRGA_THEME` sets the startup palette and `VIRGA_GEOIP` turns location
-detection off, both as described above. Unit and theme changes made in the app
-last for the session.
+`virga theme` persists the startup palette, `VIRGA_THEME` overrides it for one
+launch, `VIRGA_GEOIP` turns location detection off, and `VIRGA_UPDATE` turns
+the startup release check off, all as described above. Unit and theme changes
+made in the app last for the session.
 
-Virga takes no options that change how it runs, since the terminal is the whole
-interface. It answers two questions without starting up: `virga --version` and
-`virga --help`.
+Nothing else is configurable. The command line takes no options at all, only
+the questions [Commands](#commands) lists.
 
 ## Contributing
 
@@ -327,8 +399,8 @@ still publishes and only the tap update is skipped, with a warning.
 ## Limitations
 
 - There is no general configuration file, and weather is never cached. Every
-  launch fetches fresh weather; only the startup theme and location detection
-  can be set through the environment.
+  launch fetches fresh weather; only the startup theme and location are
+  persisted, and units last for the session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
@@ -360,10 +432,18 @@ policy](https://ipapi.co/privacy/) for what they retain.
 That request is not made at all once you have chosen a city, or with
 `VIRGA_GEOIP=off` set.
 
+Checking for a newer release makes one request to GitHub's release-redirect
+endpoint at github.com, carrying nothing but the request itself: no version
+string, no identifier. The answer is read from a response header, and no
+release page or file is downloaded. The check runs once per launch in the
+background and whenever you run `virga update`; set `VIRGA_UPDATE=off` and
+the launch-time request is not made at all.
+
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
-chose it or it was detected. Your IP address is never written to disk — the
-resolved city is. It does not store weather responses, searches, or history.
+chose it or it was detected — and, if you set one with `virga theme`, the name
+of your startup theme. Your IP address is never written to disk — the resolved
+city is. It does not store weather responses, searches, or history.
 Weather and air-quality requests send the location coordinates to Open-Meteo;
 city searches submit their search text to its geocoder. Open-Meteo's
 free-service logs may retain IP addresses and coordinates for 90 days. See

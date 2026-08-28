@@ -84,7 +84,10 @@ fn rain_step(chance: Option<u8>) -> &'static str {
 
 fn wind_symbol(speed_kph: Option<f64>, direction: Option<f64>) -> &'static str {
     const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
-    if speed_kph.is_some_and(|speed| speed < 1.0) {
+    let Some(speed_kph) = speed_kph else {
+        return " ";
+    };
+    if speed_kph < 1.0 {
         return "·";
     }
     let Some(degrees) = direction else {
@@ -114,9 +117,7 @@ fn precipitation_summary(hours: &[HourlyForecast], selected: usize, unit: Unit) 
     let total = aggregate(window, unit);
     match total {
         PrecipitationAggregate::Unavailable => "—".to_string(),
-        PrecipitationAggregate::Zero => {
-            format!("{:.*} {}", unit.precip_decimals(), 0.0, unit.precip_label())
-        }
+        PrecipitationAggregate::Zero => format!("0 {}", unit.precip_label()),
         PrecipitationAggregate::Trace(_) | PrecipitationAggregate::Measured(_) => total
             .positive_text(unit, " ")
             .expect("positive aggregate has text"),
@@ -301,6 +302,11 @@ mod tests {
         assert_eq!(wind_symbol(Some(10.0), Some(337.5)), "↑");
         assert_eq!(wind_symbol(Some(10.0), Some(360.0)), "↑");
         assert_eq!(wind_symbol(Some(10.0), None), " ");
+    }
+
+    #[test]
+    fn wind_direction_without_speed_does_not_claim_a_reading() {
+        assert_eq!(wind_symbol(None, Some(90.0)), " ");
     }
 
     #[test]
@@ -649,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn precipitation_summary_distinguishes_measured_zero_and_trace() {
+    fn precipitation_summary_distinguishes_zero_and_trace() {
         let mut weather = Weather::fixture(22, 14);
         let now = weather.now_hour;
         for hour in weather.hourly.iter_mut().skip(now).take(24) {
@@ -658,11 +664,11 @@ mod tests {
 
         assert_eq!(
             precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
-            "0.0 mm"
+            "0 mm"
         );
         assert_eq!(
             precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
-            "0.00 in"
+            "0 in"
         );
 
         weather.hourly[now].precip_mm = Some(0.01);

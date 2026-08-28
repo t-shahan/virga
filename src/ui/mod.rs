@@ -98,12 +98,20 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         area
     };
 
+    // The release notice takes one muted row above the key bar — but not at
+    // the minimum height, where every row is already spoken for, and not on
+    // the search screen, which lays itself out over the whole area and where
+    // news can wait for the choosing to finish.
+    let notice_visible =
+        app.update_notice.is_some() && app.screen != Screen::Search && area.height > MIN_HEIGHT;
+
     // The legend is pinned to the bottom; everything else is laid out inside
     // what remains so panes can be sized to their content. It asks for its own
     // height, because a narrow terminal wraps it onto a second row rather than
     // clipping bindings mid-word.
-    let [content, legend_area] = Layout::vertical([
+    let [content, notice_area, legend_area] = Layout::vertical([
         Constraint::Fill(1),
+        Constraint::Length(u16::from(notice_visible)),
         Constraint::Length(legend_rows(app, page_area.width)),
     ])
     .areas(page_area);
@@ -181,6 +189,13 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             Fetch::Idle => {}
         },
         Screen::Search => search_render(frame, app, palette, area),
+    }
+    if notice_visible && let Some(notice) = &app.update_notice {
+        frame.render_widget(
+            Paragraph::new(truncate(notice, notice_area.width as usize))
+                .style(Style::default().fg(palette.muted)),
+            notice_area,
+        );
     }
     keybind_legend_render(frame, app, palette, legend_area);
 }
@@ -304,6 +319,15 @@ mod tests {
         app
     }
 
+    /// A newer release's news has arrived and nothing has been pressed since.
+    fn noticed(screen: Screen) -> App {
+        let mut app = ready(screen);
+        app.update_notice = Some(
+            "update: virga 9.9.9 is available (you have 0.2.0) — run `virga update`".to_string(),
+        );
+        app
+    }
+
     fn found() -> Vec<Location> {
         vec![
             Location {
@@ -344,6 +368,7 @@ mod tests {
                 states.push((format!("{screen:?}/{name}"), app));
             }
             states.push((format!("{screen:?}/locating"), locating(screen)));
+            states.push((format!("{screen:?}/update-notice"), noticed(screen)));
         }
 
         // The search box floats over a loaded screen, so the weather stays
@@ -704,6 +729,54 @@ mod tests {
                 assert!(text.contains(label), "lost {label}:\n{text}");
             }
         }
+    }
+
+    /// The notice is one muted line above the key bar — in the label role,
+    /// where information that is not a reading already lives.
+    #[test]
+    fn the_update_notice_sits_above_the_key_bar_in_muted() {
+        let (width, height) = (100, 20);
+        let buffer = drawn(&noticed(Screen::Weather), probe(), width, height);
+        let rows = symbols(&buffer, width, height);
+
+        let row = rows
+            .iter()
+            .position(|row| row.starts_with("update: virga 9.9.9"))
+            .expect("the notice was not drawn");
+
+        assert!(
+            row >= height as usize - 3,
+            "row {row} of {height} is not just above the key bar"
+        );
+        assert_eq!(
+            buffer[(0, row as u16)].style().fg,
+            Some(probe().muted),
+            "the notice is not in the muted role"
+        );
+    }
+
+    /// At the minimum height every row is already spoken for; news must not
+    /// cost the forecast a line.
+    #[test]
+    fn the_minimum_terminal_keeps_every_row_for_the_weather() {
+        let buffer = drawn(&noticed(Screen::Weather), probe(), MIN_WIDTH, MIN_HEIGHT);
+        let text = symbols(&buffer, MIN_WIDTH, MIN_HEIGHT).join("\n");
+
+        assert!(
+            !text.contains("update:"),
+            "the notice took a row it was not given"
+        );
+        assert!(text.contains("feels like"), "the weather still renders");
+    }
+
+    /// Search lays itself out over the whole area, and news can wait for the
+    /// choosing to finish.
+    #[test]
+    fn the_search_screen_is_left_alone_by_the_notice() {
+        let buffer = drawn(&noticed(Screen::Search), probe(), 100, 20);
+        let text = symbols(&buffer, 100, 20).join("\n");
+
+        assert!(!text.contains("update: virga"));
     }
 
     /// The complaint this replaced a role for: the bars in both charts were a

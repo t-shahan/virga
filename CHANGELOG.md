@@ -14,6 +14,66 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **An adaptive hourly weathergram.** Press `p` to inspect sky conditions,
+  temperature, precipitation, and wind on one shared 12- to 48-hour timeline,
+  with exact selected-hour details and the weekly precipitation strip retained
+  when the terminal is tall enough.
+
+### Changed
+
+- The default terminal theme uses normal gray for muted labels so they remain
+  legible in Terminal.app and Ghostty while staying quieter than readings.
+
+## [0.4.0] - 2026-08-28
+
+Two commands where Virga had none. It still takes no options that change how
+it runs, but the command line now answers two questions without starting up:
+which themes exist and which one the next launch will use, and whether this
+copy is the newest one. Virga volunteers the second answer too, once per
+launch, in a line above the key bar.
+
+### Added
+
+- **`virga theme`**: list the colour themes and mark the startup default, or
+  persist one — `virga theme tokyo night` — so every later launch starts in
+  it. The choice is stored in `state.json` beside the remembered location;
+  `VIRGA_THEME` still overrides it for a single launch, and `t` still cycles
+  themes for the session. `virga help` and `virga version` also now work as
+  word spellings of `-h` and `-V`.
+- **`virga update`**: check whether a newer release exists and print how to
+  get it, matched to how this copy was installed — Homebrew, Cargo, the
+  install script, or a download on Windows. One request to GitHub's release
+  redirect answers it; the binary is never replaced in place.
+- **A startup update notice.** Each launch makes the same release check in
+  the background — on its own thread, never delaying the first frame — and
+  shows one muted line above the key bar when a newer release exists. The
+  next keypress on a screen that shows it clears it and still does its own
+  job — keys typed into the city search leave it standing, since that screen
+  never shows it; news that arrived before you quit is printed on the
+  ordinary screen instead. `VIRGA_UPDATE=off` skips the check, and a launch
+  that cannot reach GitHub — or that quits before GitHub answers — simply
+  shows no notice.
+
+### Changed
+
+- The minimum supported Rust version rises from 1.88 to 1.89, for
+  `File::lock`: state saves are now serialized across processes, so the app
+  remembering a location while `virga theme` runs can no longer drop one
+  side's change. A state file that cannot be read, or that was written by a
+  newer Virga, now blocks saves instead of being replaced.
+- An unusable `VIRGA_THEME` value now falls back to the persisted startup
+  theme, when one is set, rather than to the built-in default.
+- `README.md` documents the command line in a `Commands` table, beside the
+  existing `Keys` table.
+
+## [0.3.0] - 2026-08-27
+
+Catppuccin comes back in two flavours, one of them the first palette Virga has
+shipped for a light terminal, and the precipitation screen stops rebuilding its
+week strip from scratch on every frame.
+
+### Added
+
 - **Catppuccin, in two flavours.** `catppuccin mocha` returns after being cut
   in 0.2.0, rebuilt around the mauve the scheme is actually known by — pastel
   purple bars, sky selection, yellow today — instead of the blue that vanished
@@ -95,6 +155,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/t-shahan/virga/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/t-shahan/virga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t-shahan/virga/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/t-shahan/virga/releases/tag/v0.1.0

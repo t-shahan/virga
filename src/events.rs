@@ -74,6 +74,34 @@ pub enum Message {
         id: RequestId,
         error: String,
     },
+    /// A newer release exists. Carries the finished notice text, composed in
+    /// the probe, so the app holds one string and never learns about paths,
+    /// versions, or the network. No id: nothing chains off it, nothing
+    /// supersedes it, and at most one is ever sent.
+    UpdateAvailable {
+        notice: String,
+    },
+}
+
+/// One release probe on its own one-shot thread — never the request queue,
+/// where the worker serves requests serially and a slow answer from GitHub
+/// would stall a city search behind it. Sends at most one message and ends.
+///
+/// The probe is injected so a test never opens a socket; `main` passes the
+/// real one. A probe with nothing to say returns `None`, and failure *is*
+/// nothing to say — the weather fetch complains about the network when the
+/// network deserves complaining about.
+pub fn spawn_update_check(
+    messages: Sender<Message>,
+    probe: impl FnOnce() -> Option<String> + Send + 'static,
+) {
+    thread::spawn(move || {
+        if let Some(notice) = probe() {
+            // A send after the app has quit is a dropped receiver, and
+            // ignoring that error is the whole shutdown story.
+            let _ = messages.send(Message::UpdateAvailable { notice });
+        }
+    });
 }
 
 pub fn spawn_worker(requests: Receiver<Request>, messages: Sender<Message>) {
@@ -116,4 +144,59 @@ pub fn spawn_worker(requests: Receiver<Request>, messages: Sender<Message>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// The check thread's whole contract: at most one message, and it ends
+    /// either way. Once the probe's sender is dropped the receiver reports
+    /// disconnection, which is how "sent nothing" is proved rather than
+    /// merely waited on.
+    #[test]
+    fn a_probe_with_news_sends_one_update_message() {
+        let (tx, rx) = mpsc::channel();
+
+        spawn_update_check(tx, || Some("update: virga 9.9.9 is available".to_string()));
+
+        let Ok(Message::UpdateAvailable { notice }) = rx.recv_timeout(Duration::from_secs(5))
+        else {
+            panic!("the probe's news never arrived");
+        };
+        assert!(notice.contains("9.9.9"));
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_err(),
+            "one probe must not send twice"
+        );
+    }
+
+    #[test]
+    fn a_probe_with_nothing_to_say_sends_nothing() {
+        let (tx, rx) = mpsc::channel();
+
+        spawn_update_check(tx, || None);
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_secs(5)),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "the thread should end without sending, not linger"
+        );
+    }
+
+    /// The app quitting drops the receiver; a probe answering afterwards must
+    /// die quietly rather than panic the detached thread.
+    #[test]
+    fn an_answer_after_quit_is_dropped_without_complaint() {
+        let (tx, rx) = mpsc::channel::<Message>();
+        drop(rx);
+
+        spawn_update_check(tx, || Some("too late".to_string()));
+        // Nothing to assert beyond "no panic": the thread is detached, and
+        // the send error is swallowed by design.
+    }
 }
