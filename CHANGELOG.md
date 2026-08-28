@@ -12,7 +12,7 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.4.0]
+## [0.4.0] - 2026-08-28
 
 Two commands where Virga had none. It still takes no options that change how
 it runs, but the command line now answers two questions without starting up:
