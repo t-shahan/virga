@@ -111,10 +111,19 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
                 // Table and chart are separate boxes now. Side by side buys
                 // rows at the cost of chart width, so it is a fallback for
                 // short windows rather than a reward for wide ones.
-                let table_rows = w.daily.len().saturating_sub(w.today_index) as u16 + 1;
-                let table_box = table_rows + 2;
+                // Clamped to the area before the cast, and saturating after
+                // it: the count is the server's word, the DTO cap
+                // notwithstanding, and a table can never be taller than the
+                // space it draws in anyway.
+                let days = w
+                    .daily
+                    .len()
+                    .saturating_sub(w.today_index)
+                    .min(rest.height as usize) as u16;
+                let table_rows = days.saturating_add(1);
+                let table_box = table_rows.saturating_add(2);
                 let side_by_side = rest.width >= SIDE_BY_SIDE_MIN
-                    && rest.height < table_box + chart::MIN_HEIGHT + 2;
+                    && rest.height < table_box.saturating_add(chart::MIN_HEIGHT + 2);
 
                 let (forecast_area, chart_area) = if side_by_side {
                     let [left, _gutter, right] = Layout::horizontal([
@@ -605,6 +614,18 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol())
             .collect();
         assert!(text.contains("feels like"), "the minimum should be usable");
+    }
+
+    /// The daily count is the server's word, and 65 535 of them is the exact
+    /// count whose `as u16` cast lands on the edge that `+ 1` walks off.
+    /// Before the clamp this overflowed the table-height arithmetic — a
+    /// panic in a debug build, a degenerate layout in a release one.
+    #[test]
+    fn a_daily_series_the_size_of_a_u16_does_not_overflow_the_layout() {
+        let mut app = ready(Screen::Weather);
+        app.weather = Fetch::Ready(Weather::fixture(usize::from(u16::MAX), 0));
+
+        drawn(&app, probe(), 80, 24);
     }
 
     /// The notice is one muted line above the key bar — in the label role,
