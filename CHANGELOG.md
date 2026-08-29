@@ -21,6 +21,14 @@ refuse to publish a version this file does not describe.
   new frame is positioned absolutely instead of trusting glyph-advance
   arithmetic across long unbroken runs.
 
+### Changed
+
+- The weather screens now render inside one centered 120-column canvas. The
+  daily and precipitation screens previously stretched their tables and
+  charts across any terminal width; past the point where the widest content
+  fits, surplus width becomes symmetric margin instead of ever-broader
+  boxes. The search screen still uses the whole terminal.
+
 ### Added
 
 - **`virga now [CITY]`**: print current conditions and today's outlook, then
