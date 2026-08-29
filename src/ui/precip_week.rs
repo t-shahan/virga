@@ -105,6 +105,8 @@ const DAY_WIDTH: u16 = 1 + TODAY.len() as u16 + 1;
 const TODAY: &str = "Today";
 /// Columns the per-day total takes, e.g. "0.08 in".
 const TOTAL_WIDTH: u16 = 8;
+/// Breathing room between the shared hour grid and its optional total.
+const TOTAL_GAP: u16 = 1;
 /// The row of hour labels above the grid.
 const AXIS_ROWS: u16 = 1;
 /// Past three columns an hour the grid reads as blocks rather than a pattern.
@@ -142,7 +144,11 @@ pub(super) fn precip_week_render(
         .border_style(Style::new().fg(palette.border))
         // Right, opposite the chart's title above it, and phrased as one
         // clause so it needs no separator to hold two halves apart.
-        .title_top(Line::from(TITLE).fg(palette.muted).right_aligned());
+        .title_top(
+            Line::from(format!("{TITLE} "))
+                .fg(palette.muted)
+                .right_aligned(),
+        );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -155,9 +161,18 @@ pub(super) fn precip_week_render(
     // Wider cells where there is room. One column an hour is legible but
     // cramped — a single wet hour reads as a speck — and past three the grid
     // is blocks rather than a pattern.
-    let totals = inner.width >= MIN_WIDTH + TOTAL_WIDTH + HOURS_IN_A_DAY as u16;
-    let gutters = DAY_WIDTH + if totals { TOTAL_WIDTH + 1 } else { 0 };
-    let cell = ((inner.width - gutters) / HOURS_IN_A_DAY as u16).clamp(1, MAX_CELL);
+    let hours = HOURS_IN_A_DAY as u16;
+    let cell_without_totals = ((inner.width - DAY_WIDTH) / hours).clamp(1, MAX_CELL);
+    let total_gutters = DAY_WIDTH + TOTAL_GAP + TOTAL_WIDTH;
+    let cell_with_totals = (inner.width >= total_gutters + hours)
+        .then(|| ((inner.width - total_gutters) / hours).clamp(1, MAX_CELL));
+    let totals = cell_with_totals == Some(cell_without_totals);
+    let gutters = if totals { total_gutters } else { DAY_WIDTH };
+    let cell = if totals {
+        cell_with_totals.expect("a visible total has a measured cell width")
+    } else {
+        cell_without_totals
+    };
 
     // Centred on what it measures, like both charts. Pinned left, a 48-column
     // grid in a 118-column box reads as a chart that failed to load the rest.
@@ -222,7 +237,7 @@ pub(super) fn precip_week_render(
             let total = day_total(day, unit);
             put_right(
                 frame,
-                grid_x + grid_width + 1,
+                grid_x + grid_width + TOTAL_GAP,
                 y,
                 TOTAL_WIDTH,
                 &total,
@@ -252,7 +267,7 @@ fn hour_axis_render(frame: &mut Frame, y: u16, grid_x: u16, cell: u16, palette: 
 /// up with every row beneath it.
 ///
 /// The hours are borrowed rather than cloned. The grouping runs on every frame
-/// of the precipitation screen, and cloning put nearly two hundred heap
+/// of the hourly screen, and cloning put nearly two hundred heap
 /// allocations into each one for series the caller already holds.
 pub(super) struct Day<'a> {
     name: String,
@@ -364,6 +379,11 @@ mod tests {
                     chance: Some(10),
                     code: Some(0),
                     temp_c: Some(20.0),
+                    feels_like_c: Some(19.0),
+                    humidity_pct: Some(55),
+                    wind_kph: Some(10.0),
+                    gust_kph: Some(18.0),
+                    wind_dir_deg: Some(225.0),
                 }
             })
             .collect()
@@ -497,6 +517,11 @@ mod tests {
             .join("\n")
     }
 
+    fn column_of(line: &str, needle: &str) -> usize {
+        let byte = line.find(needle).expect("needle should be rendered");
+        line[..byte].chars().count()
+    }
+
     /// The first row is the day you are standing in, and naming it costs the
     /// reader nothing to decode. Every row below it keeps its weekday.
     #[test]
@@ -534,6 +559,75 @@ mod tests {
             assert!(text.contains(label), "no {label} on the axis:\n{text}");
         }
         assert!(text.contains("Sat"), "no day names:\n{text}");
+    }
+
+    /// At the narrow end of the full hourly screen, a wider hour cell is more
+    /// useful than the optional amount column. Totals must not squeeze the
+    /// shared grid down to two columns per hour when all 24 hours fit at three.
+    #[test]
+    fn an_87_column_pane_keeps_three_column_hours_instead_of_totals() {
+        let text = rendered(87, 11, 3);
+        let axis = text
+            .lines()
+            .find(|line| line.contains("12a") && line.contains("6a"))
+            .expect("the hour axis should be visible");
+        let midnight = column_of(axis, "12a");
+        let six_am = column_of(axis, "6a");
+
+        assert_eq!(
+            six_am - midnight,
+            6 * 3,
+            "hour cells were squeezed:\n{text}"
+        );
+        assert!(
+            !text.contains("0.02 in"),
+            "the optional totals displaced grid width:\n{text}"
+        );
+    }
+
+    /// Hiding the amount is only worthwhile when its columns buy a wider
+    /// hourly grid. At this size either layout has two-column hours, so the
+    /// useful daily total should remain visible.
+    #[test]
+    fn totals_remain_when_hiding_them_would_not_widen_the_grid() {
+        let text = rendered(68, 11, 3);
+        let axis = text
+            .lines()
+            .find(|line| line.contains("12a") && line.contains("6a"))
+            .expect("the hour axis should be visible");
+        let midnight = column_of(axis, "12a");
+        let six_am = column_of(axis, "6a");
+
+        assert_eq!(six_am - midnight, 6 * 2, "unexpected cell width:\n{text}");
+        assert!(
+            text.contains("0.02 in"),
+            "useful totals disappeared:\n{text}"
+        );
+    }
+
+    /// The 120-column canvas is the wide-screen ceiling for the parent view.
+    /// Its measured strip should stay centred rather than inheriting the
+    /// viewport's former left- or right-heavy whitespace.
+    #[test]
+    fn the_strip_is_balanced_inside_the_120_column_canvas() {
+        let text = rendered(120, 11, 3);
+        let axis = text
+            .lines()
+            .find(|line| line.contains("12a") && line.contains("6a"))
+            .expect("the hour axis should be visible");
+        let grid_x = column_of(axis, "12a");
+        let selected_x = text
+            .lines()
+            .find(|line| line.contains(SELECTED_DAY))
+            .map(|line| column_of(line, SELECTED_DAY))
+            .expect("the selected row should expose the measured left edge");
+
+        assert_eq!(grid_x - selected_x, DAY_WIDTH as usize);
+        assert_eq!(
+            selected_x, 16,
+            "the measured strip drifted off centre:\n{text}"
+        );
+        assert!(text.contains("0.02 in"), "wide canvas lost totals:\n{text}");
     }
 
     /// The strip is a navigator, so it has to show which row the arrows are on

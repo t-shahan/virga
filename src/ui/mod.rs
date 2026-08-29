@@ -1,4 +1,4 @@
-use crate::app::{App, Fetch, Screen};
+use crate::app::{App, Fetch, HourlyView, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -9,18 +9,23 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 mod axis;
 mod bars;
 mod chart;
+mod condition_symbol;
 mod current;
 mod digits;
 mod forecast;
+mod hourly;
 mod legend;
 mod precip;
 mod precip_chart;
 mod precip_week;
+mod precipitation;
 mod search;
+mod weathergram;
 
 use chart::chart_area_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
+use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
 use precip::precip_render;
 use search::search_render;
@@ -63,6 +68,13 @@ const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 /// set this from the *comfortable* layout and rejected an ordinary 100x20.
 const MIN_WIDTH: u16 = 34;
 const MIN_HEIGHT: u16 = 12;
+/// The canvas the weather screens render inside. Past the width where the
+/// widest content fits — the 48-hour weathergram, the forecast table beside
+/// its chart — broader boxes only detach titles and controls from the
+/// information they describe, so surplus width becomes symmetric margin
+/// instead. The search screen keeps the whole area: it is a picker laid over
+/// the app, not a dashboard.
+const CANVAS_WIDTH: u16 = 120;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     render_with(frame, app, app.theme.palette());
@@ -82,6 +94,17 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         return;
     }
 
+    let page_area = if app.screen == Screen::Search {
+        area
+    } else {
+        let width = area.width.min(CANVAS_WIDTH);
+        Rect {
+            x: area.x + (area.width - width) / 2,
+            width,
+            ..area
+        }
+    };
+
     // The release notice takes one muted row above the key bar — but not at
     // the minimum height, where every row is already spoken for, and not on
     // the search screen, which lays itself out over the whole area and where
@@ -96,9 +119,9 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     let [content, notice_area, legend_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(u16::from(notice_visible)),
-        Constraint::Length(legend_rows(app, area.width)),
+        Constraint::Length(legend_rows(app, page_area.width)),
     ])
-    .areas(area);
+    .areas(page_area);
 
     match app.screen {
         Screen::Weather => match &app.weather {
@@ -169,16 +192,19 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
         },
-        Screen::Precipitation => match &app.weather {
-            Fetch::Ready(_) => precip_render(frame, app, palette, content),
+        Screen::Hourly => match &app.weather {
+            Fetch::Ready(_) => match app.hourly_view {
+                HourlyView::Weathergram => hourly_render(frame, app, palette, content),
+                HourlyView::Classic => precip_render(frame, app, palette, content),
+            },
             Fetch::Loading => popup_render(
                 frame,
-                area,
+                page_area,
                 palette,
                 loading_title(app),
                 &format!("{} {}", spinner(app.tick), loading_verb(app)),
             ),
-            Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
+            Fetch::Failed(msg) => popup_render(frame, page_area, palette, "Error", msg),
             Fetch::Idle => {}
         },
         Screen::Search => search_render(frame, app, palette, area),
@@ -274,6 +300,7 @@ fn spinner(tick: usize) -> &'static str {
 mod tests {
     use super::*;
     use crate::theme::Theme;
+    use crate::units::Unit;
     use crate::weather::model::{Location, Weather};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -291,6 +318,43 @@ mod tests {
         (MIN_WIDTH, MIN_HEIGHT),
         (20, 8),
     ];
+
+    /// The weather screens are measured dashboards, not wallpaper. Panels
+    /// and controls stop growing once the widest content fits, while a
+    /// narrower terminal still receives every available column. The search
+    /// screen is exempt: it lays its picker over the whole area.
+    #[test]
+    fn weather_screens_share_one_centered_120_column_canvas() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let app = ready(screen);
+            for width in [87, 122, 169] {
+                let height = 34;
+                let buffer = drawn(&app, Theme::default().palette(), width, height);
+                let canvas_width = width.min(120);
+                let left = (width - canvas_width) / 2;
+                let right = left + canvas_width - 1;
+
+                let painted: Vec<u16> = (0..width)
+                    .filter(|x| (0..height).any(|y| !buffer[(*x, y)].symbol().trim().is_empty()))
+                    .collect();
+
+                assert_eq!(
+                    painted.first().copied(),
+                    Some(left),
+                    "{screen:?} at width {width}"
+                );
+                assert_eq!(
+                    painted.last().copied(),
+                    Some(right),
+                    "{screen:?} at width {width}"
+                );
+                assert!(
+                    painted.iter().all(|x| (left..=right).contains(x)),
+                    "{screen:?} at width {width} painted beyond {left}..={right}"
+                );
+            }
+        }
+    }
 
     fn ready(screen: Screen) -> App {
         let mut app = App::new();
@@ -348,7 +412,7 @@ mod tests {
     fn states() -> Vec<(String, App)> {
         let mut states = Vec::new();
 
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             for name in ["ready", "loading", "failed", "idle"] {
                 let mut app = ready(screen);
                 app.weather = match name {
@@ -392,7 +456,7 @@ mod tests {
     /// look like a forecast taking suspiciously long.
     #[test]
     fn the_first_step_says_it_is_locating_rather_than_fetching() {
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             let locating = drawn(&locating(screen), probe(), 60, 24);
             let text = symbols(&locating, 60, 24).join("");
             assert!(text.contains("locating"), "{screen:?}: {text}");
@@ -628,6 +692,111 @@ mod tests {
         drawn(&app, probe(), 80, 24);
     }
 
+    /// `v` flips the hourly screen between its two renderings. Both must
+    /// actually draw: the choice belongs to the user, not the release.
+    #[test]
+    fn the_hourly_screen_offers_both_views() {
+        let mut app = ready(Screen::Hourly);
+        let weathergram =
+            symbols(&drawn(&app, Theme::default().palette(), 100, 24), 100, 24).join("\n");
+        assert!(
+            weathergram.contains("Hourly weather · next"),
+            "default view lost the weathergram:\n{weathergram}"
+        );
+
+        app.hourly_view = HourlyView::Classic;
+        let classic =
+            symbols(&drawn(&app, Theme::default().palette(), 100, 24), 100, 24).join("\n");
+        assert!(
+            classic.contains("Precipitation · next"),
+            "classic view lost its chart:\n{classic}"
+        );
+        assert!(
+            !classic.contains("Hourly weather"),
+            "classic view still drew the weathergram:\n{classic}"
+        );
+    }
+
+    #[test]
+    fn hourly_screen_is_usable_at_the_declared_minimum() {
+        let app = ready(Screen::Hourly);
+        let buffer = drawn(&app, Theme::default().palette(), MIN_WIDTH, MIN_HEIGHT);
+        let text = symbols(&buffer, MIN_WIDTH, MIN_HEIGHT).join("\n");
+
+        for label in ["sky", "temp", "rain", "wind"] {
+            assert!(text.contains(label), "minimum lost {label}:\n{text}");
+        }
+        assert!(!text.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn minimum_hourly_inspector_keeps_extreme_facts_in_both_units() {
+        let mut app = ready(Screen::Hourly);
+        app.location.label = "A location name far longer than the minimum terminal".to_string();
+        let Fetch::Ready(weather) = &mut app.weather else {
+            panic!("ready weather")
+        };
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now).take(24) {
+            hour.chance = Some(100);
+            hour.code = Some(99);
+            hour.precip_mm = Some(120.5);
+            hour.snow_cm = Some(0.0);
+            hour.wind_kph = Some(200.0);
+            hour.gust_kph = Some(300.0);
+            hour.wind_dir_deg = Some(225.0);
+        }
+
+        for (unit, facts) in [
+            (Unit::Metric, ["100%", "120.5mm", "SW200g300", "24h2892mm"]),
+            (
+                Unit::Imperial,
+                ["100%", "4.74in", "SW124g186", "24h113.86in"],
+            ),
+        ] {
+            app.unit = unit;
+            let rows = symbols(
+                &drawn(&app, Theme::default().palette(), MIN_WIDTH, MIN_HEIGHT),
+                MIN_WIDTH,
+                MIN_HEIGHT,
+            );
+            let text = rows.join("\n");
+            assert!(
+                text.contains("Thunderstorm, heavy hail"),
+                "minimum lost its spelled-out condition in {unit:?}:\n{text}"
+            );
+            let detail = rows
+                .iter()
+                .find(|row| row.contains("100%"))
+                .unwrap_or_else(|| panic!("compact detail missing in {unit:?}:\n{text}"));
+            for fact in facts {
+                assert!(
+                    detail.contains(fact),
+                    "minimum clipped {fact:?} in {unit:?}: {detail:?}"
+                );
+            }
+            assert!(
+                detail.starts_with('│') && detail.ends_with('│'),
+                "compact detail overwrote its border in {unit:?}: {detail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hourly_height_tiers_drop_week_before_core_tracks() {
+        let app = ready(Screen::Hourly);
+        let short = symbols(&drawn(&app, Theme::default().palette(), 80, 12), 80, 12).join("\n");
+        let tall = symbols(&drawn(&app, Theme::default().palette(), 100, 30), 100, 30).join("\n");
+
+        assert!(!short.contains("this week"));
+        assert!(tall.contains("this week"));
+        for text in [&short, &tall] {
+            for label in ["sky", "temp", "rain", "wind"] {
+                assert!(text.contains(label), "lost {label}:\n{text}");
+            }
+        }
+    }
+
     /// The notice is one muted line above the key bar — in the label role,
     /// where information that is not a reading already lives.
     #[test]
@@ -675,6 +844,7 @@ mod tests {
 
         assert!(!text.contains("update: virga"));
     }
+
     /// The complaint this replaced a role for: the bars in both charts were a
     /// colour of their own, so the hero digits and the columns below them read
     /// as two unrelated things rather than one reading at two sizes. They share
@@ -692,7 +862,7 @@ mod tests {
         let probe = probe();
         let allowed = [probe.accent, probe.selection, probe.now];
 
-        for screen in [Screen::Weather, Screen::Precipitation] {
+        for screen in [Screen::Weather, Screen::Hourly] {
             let app = ready(screen);
             let buffer = drawn(&app, probe, 120, 40);
             let mut saw_accent = false;

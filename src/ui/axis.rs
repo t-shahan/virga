@@ -1,19 +1,13 @@
-//! Cell-level drawing and the shared hour axis.
-//!
-//! Both precipitation charts write cells themselves rather than going through a
-//! ratatui widget, and both hang the same hour ticks under their plot. Neither
-//! is interesting on its own; keeping them here is what stops the two charts
-//! from growing separate ideas of what "6a" looks like or how far a label may
-//! run before it collides with its neighbour.
+//! Cell-level drawing and the shared hour axis used by the weathergram and the
+//! weekly precipitation strip. Keeping them here gives both views one idea of
+//! what "6a" looks like and how far a label may run before colliding with its
+//! neighbour.
 
 use crate::theme::Palette;
 use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-
-/// Rows a row of hour ticks takes.
-pub(super) const TICK_ROWS: u16 = 1;
 
 /// Columns kept clear between one tick and the next.
 const TICK_GAP: u16 = 1;
@@ -63,12 +57,16 @@ pub(super) fn put_right(frame: &mut Frame, x: u16, y: u16, width: u16, text: &st
 ///
 /// The leading tick is what places the plot in the week. Without it a chart
 /// whose first six-hour mark is five columns in reads as starting there, which
-/// is the mistake an axis exists to prevent.
+/// is the mistake an axis exists to prevent. `leading_offset` keeps
+/// caller-owned content clear of that label without shifting later ticks off
+/// their hours; `leading_colour` lets the opening anchor carry a distinct role.
 pub(super) fn hour_ticks_render<'a>(
     frame: &mut Frame,
     row: Rect,
     times: impl Iterator<Item = &'a str>,
     stride: u16,
+    leading_offset: u16,
+    leading_colour: Color,
     palette: Palette,
 ) {
     // Columns already spoken for. The leading tick is wider than the rest and a
@@ -80,13 +78,18 @@ pub(super) fn hour_ticks_render<'a>(
         let label = if i == 0 { anchor(time) } else { tick(time) };
         let Some(label) = label else { continue };
 
-        let x = row.x + i as u16 * stride;
+        let x = row.x + i as u16 * stride + if i == 0 { leading_offset } else { 0 };
         let width = label.chars().count() as u16;
         if x < taken || x + width > row.right() {
             continue;
         }
 
-        put_text(frame, x, row.y, &label, palette.muted);
+        let colour = if i == 0 {
+            leading_colour
+        } else {
+            palette.muted
+        };
+        put_text(frame, x, row.y, &label, colour);
         taken = x + width + TICK_GAP;
     }
 }

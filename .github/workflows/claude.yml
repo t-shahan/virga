@@ -1,0 +1,59 @@
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # This is an optional setting that allows Claude to read CI results on PRs
+          additional_permissions: |
+            actions: read
+
+          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
+          # prompt: 'Update the pull request description to include a summary of changes.'
+
+          # Claude answers questions about this repository, and an answer it
+          # cannot check is a guess. These are the same gates ci.yml runs, so
+          # a claim made in a comment is one the pull request has to survive.
+          # ubuntu-latest ships a Rust toolchain, which is why ci.yml calls
+          # cargo without installing one; keep that in mind before moving this
+          # job to a runner that does not.
+          #
+          # Read-only by construction: everything here inspects or verifies.
+          # Nothing publishes, and the job's `contents: read` permission means
+          # nothing can be pushed even if it tried.
+          claude_args: >-
+            --allowedTools
+            "Bash(cargo fmt:*),Bash(cargo clippy:*),Bash(cargo test:*),Bash(cargo check:*),Bash(cargo build:*),Bash(cargo package:*),Bash(cargo tree:*),Bash(shellcheck:*),Bash(./scripts/check-changelog.sh:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh run view:*)"
+

@@ -12,7 +12,65 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.4.1]
+## [0.5.0]
+
+The hourly screen becomes a weathergram. Temperature stands as a filled
+silhouette, the chance of rain rises in a band beneath it, weather emoji
+mark the sky every three hours, and the precipitation view it replaces
+stays one keypress away. Around it, `virga now` answers from the command
+line without opening the interface, every screen settles onto one centered
+canvas, and the hardening from a security audit ships.
+
+### Added
+
+- **An adaptive hourly weathergram.** Press `p` to inspect sky conditions,
+  temperature, precipitation, and wind on one shared 12- to 48-hour timeline.
+  Temperature draws as a filled silhouette above a rain band, a weather emoji
+  marks the sky every three hours, the wind row carries an arrow every second
+  hour, and exact selected-hour details and the weekly precipitation strip
+  remain when the terminal is tall enough.
+- **A choice of hourly views.** `v` flips the hourly screen between the
+  weathergram and the classic precipitation screen it evolved from, with its
+  mirrored chance-and-amount chart. The weathergram is the default and the
+  choice lasts for the session.
+- **`virga now [CITY]`**: print current conditions and today's outlook, then
+  exit — for a glance, a script, or a status bar. Alone it asks about the
+  same city the app would open with: the remembered one, or a fresh
+  detection when nothing is remembered, falling back to New York when the
+  network will not say. What detection finds is remembered, so a status bar
+  polling by the minute asks the location provider once, not once per poll.
+  With a city — `virga now paris`; multi-word names need no quotes — it asks
+  Open-Meteo's geocoder and reports the best match without touching the
+  remembered city. Every reading in the report is optional and a missing one
+  vanishes rather than printing a dash.
+- **`VIRGA_UNITS`**: choose `metric` or `imperial` — `celsius`/`c` and
+  `fahrenheit`/`f` also answer — for the `now` report and the app's first
+  frame alike, so nobody metric has to press `u` every launch. Imperial when
+  unset, which is what the app has always started in; `u` still toggles for
+  the session, and an unusable value warns and stays imperial rather than
+  refusing to run.
+
+### Changed
+
+- The weather screens now render inside one centered 120-column canvas. The
+  daily and precipitation screens previously stretched their tables and
+  charts across any terminal width; past the point where the widest content
+  fits, surplus width becomes symmetric margin instead of ever-broader
+  boxes. The search screen still uses the whole terminal.
+- The hourly screen splits surplus height evenly above and below its panels,
+  so a tall terminal frames the stack rather than pooling every spare row
+  beneath the week strip.
+- The default terminal theme uses normal gray for muted labels so they remain
+  legible in Terminal.app and Ghostty while staying quieter than readings.
+
+### Fixed
+
+- Misaligned borders after the loading popup gave way to the weather, and
+  after switching screens, on terminals whose emoji advance disagrees with
+  the width tables. A wholesale change of what is on screen now repaints
+  from a clean slate, the way a resize already did, so every fragment of the
+  new frame is positioned absolutely instead of trusting glyph-advance
+  arithmetic across long unbroken runs.
 
 ### Security
 
@@ -163,8 +221,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.4.1...HEAD
-[0.4.1]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.4.1
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t-shahan/virga/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t-shahan/virga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t-shahan/virga/compare/v0.1.0...v0.2.0

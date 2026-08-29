@@ -69,6 +69,11 @@ pub struct HourlyForecast {
     pub chance: Option<u8>,
     pub code: Option<u8>,
     pub temp_c: Option<f64>,
+    pub feels_like_c: Option<f64>,
+    pub humidity_pct: Option<u8>,
+    pub wind_kph: Option<f64>,
+    pub gust_kph: Option<f64>,
+    pub wind_dir_deg: Option<f64>,
 }
 
 impl HourlyForecast {
@@ -102,7 +107,7 @@ pub struct Weather {
 
 impl Weather {
     /// The hourly forecast from this hour onward. The request carries two weeks
-    /// of history for the daily chart's benefit; the precipitation screen looks
+    /// of history for the daily chart's benefit; the hourly screen looks
     /// only forward, so it slices here rather than every caller doing its own
     /// arithmetic on `now_hour`.
     pub fn forecast_hours(&self) -> &[HourlyForecast] {
@@ -167,6 +172,11 @@ impl Weather {
                     chance: Some(((i * 7) % 101) as u8),
                     code: Some(if i % 17 == 0 { 61 } else { 0 }),
                     temp_c: Some(15.0 + (i % 12) as f64),
+                    feels_like_c: Some(14.0 + (i % 12) as f64),
+                    humidity_pct: Some(55 + (i % 20) as u8),
+                    wind_kph: Some(8.0 + (i % 10) as f64),
+                    gust_kph: Some(15.0 + (i % 12) as f64),
+                    wind_dir_deg: Some(((i * 45) % 360) as f64),
                 })
                 .collect(),
             now_hour: PAST_HOURS,

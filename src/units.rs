@@ -5,6 +5,25 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// The system a name asks for, if it names one. Both systems answer to
+    /// their proper name, their temperature scale, and that scale's initial —
+    /// `VIRGA_UNITS=c` is what someone in a hurry will type, and refusing it
+    /// over a spelling rule would help nobody.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "metric" | "celsius" | "c" => Some(Unit::Metric),
+            "imperial" | "fahrenheit" | "f" => Some(Unit::Imperial),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Unit::Metric => "metric",
+            Unit::Imperial => "imperial",
+        }
+    }
+
     pub fn toggle(self) -> Self {
         match self {
             Unit::Metric => Unit::Imperial,
@@ -93,6 +112,30 @@ pub fn kph_to_mph(kph: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_accepted_spelling_names_its_system() {
+        for name in ["metric", "celsius", "c", " Metric ", "CELSIUS"] {
+            assert_eq!(Unit::from_name(name), Some(Unit::Metric), "{name:?}");
+        }
+        for name in ["imperial", "fahrenheit", "f", " Imperial ", "F"] {
+            assert_eq!(Unit::from_name(name), Some(Unit::Imperial), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_neither_system_is_refused() {
+        for name in ["", "  ", "kelvin", "k", "si", "us", "both"] {
+            assert_eq!(Unit::from_name(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn names_round_trip_through_parsing() {
+        for unit in [Unit::Metric, Unit::Imperial] {
+            assert_eq!(Unit::from_name(unit.name()), Some(unit));
+        }
+    }
 
     #[test]
     fn celsius_to_fahrenheit_at_known_points() {

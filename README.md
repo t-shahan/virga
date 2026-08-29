@@ -4,21 +4,21 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Virga is a responsive Rust terminal weather application for current conditions,
-multi-day forecasts, historical context, and hourly precipitation
-visualization. It is powered by Open-Meteo and requires no account or API key.
+multi-day forecasts, historical context, and hourly conditions visualization.
+It is powered by Open-Meteo and requires no account or API key.
 
 > **Project status: actively developed.** Virga works and is worth installing
 > today. Features and fixes still land, so expect the occasional release.
 > Contributions are welcome.
 
 *Virga* is precipitation that evaporates before it reaches the ground. It is
-also, most weeks, what the precipitation chart draws.
+also, most weeks, what the weathergram charts.
 
 <img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
 ## Contents
 
-- [Hourly precipitation](#hourly-precipitation)
+- [Hourly weathergram](#hourly-weathergram)
 - [Highlights](#highlights)
 - [Install](#install)
   - [Homebrew](#homebrew)
@@ -40,14 +40,27 @@ also, most weeks, what the precipitation chart draws.
   - [Attribution](#attribution)
 - [License](#license)
 
-## Hourly precipitation
+## Hourly weathergram
 
-Press `p` for the hourly precipitation view. Probability rises above the
-centre rule while forecast amount hangs below it — a tall spike with nothing
-beneath it means “might drizzle”; tall above *and* below means take the
-umbrella.
+<img width="2000" height="1609" alt="percip_screen_demo" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
 
-<img width="2000" height="1285" alt="CleanShot2026-08-12at19 38 47-ezgif com-optimize" src="https://github.com/user-attachments/assets/9f61e32f-d342-4794-b64b-7d1e6efb0a97" />
+Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
+share one clock, so a change in the forecast reads down a column instead of
+across four separate tables. Temperature stands as a filled silhouette four
+rows tall, the chance of rain rises in a band beneath it, a weather emoji
+marks the sky every three hours, and the wind row carries an arrow every
+second hour. The selected-hour pane gives the exact feels-like temperature,
+humidity, rain or snow amount, wind and gusts, and the following 24-hour
+precipitation total.
+
+The visible horizon adapts through 12-, 24-, 36-, and 48-hour tiers as the
+terminal widens. Arrow keys still browse the full eight-day hourly forecast,
+and tall terminals retain the week-long precipitation strip below the
+weathergram.
+
+Prefer the earlier precipitation-centred screen? `v` flips the hourly view to
+the classic mirrored chart — chance rising, amount hanging below — and back.
+The weathergram is the default; the choice lasts for the session.
 
 ## Highlights
 
@@ -57,14 +70,16 @@ umbrella.
   sunset.
 - **Three weeks of context** — fourteen days of historical highs followed by
   the current forecast, so today does not sit alone.
-- **Hourly precipitation** — mirrored chance and amount, a next-rain countdown,
-  a 24-hour running total, and separate snowfall reporting.
+- **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
+  an adaptive horizon, and an optional weekly precipitation strip.
 - **Fast navigation** — browse days or hours with the arrow keys, jump back to
   now, and inspect the selected period in detail.
 - **Starts where you are** — the opening forecast is for the city your IP
   address resolves to, and a city you pick yourself replaces it permanently.
 - **City search and live units** — search Open-Meteo's geocoder and switch
   between metric and imperial measurements without restarting.
+- **A one-shot report** — `virga now` prints current conditions and today's
+  outlook to stdout and exits, for a glance, a script, or a status bar.
 - **Terminal-native presentation** — seven foreground-only themes, including
   one for light backgrounds, and responsive behavior down to a 34×12 terminal.
 
@@ -179,21 +194,20 @@ in the platform's per-user state directory:
 
 | Key | Action |
 |---|---|
-| `←` `→` | Previous / next day — or hour, on the precipitation screen; wraps |
-| `↑` `↓` | Precipitation screen: back / forward a day, keeping the time of day |
+| `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
+| `↑` `↓` | Hourly screen: back / forward a day, keeping the time of day |
 | `n` / `Home` | Jump back to now |
-| `p` | Hourly precipitation — `b`, `Enter` or `Esc` to go back |
+| `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
+| `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
-The precipitation chart's centre rule marks the current hour (`┬`), the
-selected one (`═`), and midnight (`┼`), so the three stay apart without relying
-on colour. Its two halves show probability and precipitation amount on
-different scales, so their heights are not comparable; the box title carries
-the amount scale.
+The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
+hour, a weather emoji marks the sky every three hours, and wind arrows every
+second hour carry their speed on the six-hour ticks.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
@@ -206,17 +220,38 @@ What the command line answers, it answers without starting up.
 | Command | What it does |
 |---|---|
 | `virga` | Start the application |
+| `virga now` | Print current conditions and today's outlook for the remembered city |
+| `virga now CITY` | The same for a searched city, e.g. `virga now paris`; multi-word names need no quotes |
 | `virga theme` | List the themes, marking the startup default with `*` |
 | `virga theme NAME` | Persist a startup theme, e.g. `virga theme tokyo night`; multi-word names need no quotes |
 | `virga update` | Check whether a newer release exists and print how to get it |
 | `virga help` / `-h` / `--help` | Print the usage text |
 | `virga version` / `-V` / `--version` | Print the version |
 
+`virga now` is the whole forecast reduced to a glance — the same sources, the
+same city the app would open with, and none of the terminal:
+
+```
+$ virga now
+Frederick, Maryland, United States · Partly cloudy
+75°F, feels like 78°F · wind 7 mph · AQI 42 Good
+Today: 84°F / 63°F · rain 20% · UV 6 · sun 06:24–20:07
+```
+
+Plain lines on stdout, so a script or a status bar reads it as easily as a
+person does; a reading the provider did not report simply does not appear.
+Set `VIRGA_UNITS=metric` to change what a degree is, here and on the app's
+first frame. Asking about a named city is a question, not a move — the
+remembered city stays whatever it was. And when nothing is remembered yet,
+the one location lookup `virga now` makes is remembered afterwards, so a
+status bar polling by the minute asks the location provider once, not once
+per poll.
+
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went
 unanswered. Neither `virga update` nor the startup check replaces the binary; see
 [Updating and removing](#updating-and-removing) for the command that does, and
-[Configuration](#configuration) for the three environment variables.
+[Configuration](#configuration) for the four environment variables.
 
 ## Architecture
 
@@ -252,8 +287,9 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **301 deterministic tests**; three
-provider-dependent live Open-Meteo tests are ignored during normal runs.
+Virga's default locked test suite passes **481 deterministic tests**; four
+provider-dependent live tests — three against Open-Meteo, one against
+GitHub's release redirect — are ignored during normal runs.
 Coverage includes:
 
 - deterministic rendering checks built with Ratatui's `TestBackend`, including
@@ -351,8 +387,11 @@ value prints a warning and leaves detection on rather than refusing to run.
 
 `virga theme` persists the startup palette, `VIRGA_THEME` overrides it for one
 launch, `VIRGA_GEOIP` turns location detection off, and `VIRGA_UPDATE` turns
-the startup release check off, all as described above. Unit and theme changes
-made in the app last for the session.
+the startup release check off, all as described above. `VIRGA_UNITS` picks
+`metric` or `imperial` — `celsius`/`c` and `fahrenheit`/`f` also answer — for
+the `virga now` report and the app's first frame alike; imperial when unset,
+which is what the app has always started in. Unit and theme changes made in
+the app last for the session.
 
 Nothing else is configurable. The command line takes no options at all, only
 the questions [Commands](#commands) lists.
@@ -372,6 +411,13 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked --all-targets
 cargo package --locked
 ```
+
+Opening a pull request fills in a template. Keep its `Review focus for
+@claude` section and say where the review should look hardest, because that
+is the part a reviewer cannot reconstruct from the diff. Claude reviews every
+pull request either way, against the requirements in
+[`CLAUDE.md`](CLAUDE.md), so the section directs the review rather than
+triggering it.
 
 Notable changes belong in [`CHANGELOG.md`](CHANGELOG.md) under `Unreleased`.
 That is not bookkeeping for its own sake: release notes are generated from that
@@ -399,7 +445,8 @@ still publishes and only the tap update is skipped, with a warning.
 
 - There is no general configuration file, and weather is never cached. Every
   launch fetches fresh weather; only the startup theme and location are
-  persisted, and units last for the session.
+  persisted, and units follow `VIRGA_UNITS` at startup and last for the
+  session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
@@ -407,8 +454,7 @@ still publishes and only the tap update is skipped, with a warning.
 - Terminals below 34×12 show a size warning instead of the interface.
 - “Today” is distinguished by colour alone in the daily chart. The selection
   is not: every screen marks it by shape as well — a `>` in the forecast
-  table's gutter, a `^` under the selected bar, and the precipitation chart's
-  centre rule.
+  table's gutter and a `▲` in the hourly weathergram.
 - Ghostty and Apple's Terminal app have been tested manually on macOS.
 - Automated tests run on Linux, macOS, and Windows. They do not validate
   real-terminal rendering, font fallback, or held-key behavior.
@@ -419,6 +465,9 @@ Weather, air quality, and geocoding all come from
 [Open-Meteo](https://open-meteo.com), which needs no API key. Its free tier is
 **for non-commercial use only** and is rate limited to 10,000 calls per day.
 Each weather load makes two requests, and each submitted search makes a third.
+`virga now` asks the same questions the same way — two requests per report,
+one more for a named city, and the location lookup only on a first run where
+nothing is remembered.
 
 Location detection is the one thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to

@@ -1,7 +1,10 @@
-use crate::app::{ActiveLocation, App, Fetch, LocationSource, Remembered, Screen, Startup};
+use crate::app::{
+    ActiveLocation, App, Fetch, HourlyView, LocationSource, Remembered, Screen, Startup,
+};
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
 use crate::theme::Theme;
+use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event;
@@ -15,6 +18,7 @@ mod app;
 mod cli;
 mod events;
 mod input;
+mod now;
 mod state;
 mod theme;
 mod ui;
@@ -69,6 +73,66 @@ fn main() -> Result<()> {
                 }
                 Err(error) => {
                     eprintln!("virga: could not save the startup theme: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // The one command that fetches weather without the interface. It
+        // speaks the same sources' answers in the same order of preference
+        // the app opens with, so `virga now` and a launch agree about where
+        // "here" is.
+        Invocation::Now(city) => {
+            let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            // A named city is looked up fresh, and nothing else combines
+            // with it — not the state file, not detection. Asking about
+            // somewhere is a question, not a move: the remembered city
+            // stays whatever it was.
+            let (location, freshly_detected) = match &city {
+                Some(query) => match weather::client::search_locations(query) {
+                    // The geocoder answered and knows no such place: the
+                    // argument is wrong, which is `theme`'s unknown-name
+                    // treatment. A lookup that failed to happen is the
+                    // environment's fault instead, and exits like `update`'s.
+                    Ok(found) => match found.first() {
+                        Some(first) => (ActiveLocation::from(first), false),
+                        None => {
+                            eprintln!("virga: no city matched {query:?}.");
+                            std::process::exit(2);
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("virga: could not search for {query:?}: {error:#}");
+                        std::process::exit(1);
+                    }
+                },
+                None => asked_location(),
+            };
+            match weather::client::fetch_forecast(location.lat, location.lon) {
+                Ok(weather) => {
+                    // The app's rule, kept here too: a detection is written
+                    // down only once weather has actually loaded for it. And
+                    // written down it must be — remembering the answer is
+                    // what lets a status bar poll `virga now` all day without
+                    // asking the location provider anything after the first.
+                    if freshly_detected {
+                        let remembered = Remembered {
+                            location: location.clone(),
+                            source: LocationSource::Detected,
+                        };
+                        if let Err(error) =
+                            state::path().and_then(|path| state::save_location(&path, &remembered))
+                        {
+                            eprintln!("virga: could not remember location: {error:#}");
+                        }
+                    }
+                    println!("{}", now::report(&location.label, &weather, unit));
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("virga: could not fetch the weather: {error:#}");
                     std::process::exit(1);
                 }
             }
@@ -132,14 +196,21 @@ fn main() -> Result<()> {
         std::env::var("VIRGA_THEME").ok().as_deref(),
         persisted_theme,
     );
+    let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
 
     let terminal = ratatui::init();
     let mut warning = None;
     let mut notice = None;
     let result = run(
         terminal,
-        startup,
-        theme,
+        Opening {
+            startup,
+            theme,
+            unit,
+        },
         state_path.as_deref(),
         check_updates,
         &mut warning,
@@ -305,6 +376,72 @@ fn startup_theme(requested: Option<&str>, persisted: Option<Theme>) -> Theme {
     })
 }
 
+/// Where a bare `virga now` asks about: the remembered city, a fresh
+/// detection when nothing is remembered and `VIRGA_GEOIP` allows one, and
+/// the compiled-in fallback when the network will not say — a worse guess is
+/// not a reason to withhold the forecast, and the stderr note says which
+/// guess it was. The second value reports whether the place came from a
+/// detection made just now, which is the caller's cue to remember it.
+fn asked_location() -> (ActiveLocation, bool) {
+    let (detect, warning) = detection_enabled(std::env::var("VIRGA_GEOIP").ok().as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    let remembered = match state::path() {
+        Ok(path) => {
+            let (persisted, warning) = load_persisted(&path);
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            persisted.remembered
+        }
+        // Nowhere to remember a location is not a reason to stop working
+        // out where the user is — the app's judgement, applied here too.
+        Err(error) => {
+            eprintln!("virga: could not determine where location is remembered: {error:#}");
+            None
+        }
+    };
+    match now::where_to_ask(remembered, detect) {
+        now::Ask::Location(location) => (location, false),
+        now::Ask::Detect { fallback } => match weather::client::detect_location() {
+            Ok(found) => (ActiveLocation::from(&found), true),
+            Err(error) => {
+                eprintln!(
+                    "virga: could not work out where you are: {error:#}; asking about {}.",
+                    fallback.label
+                );
+                (fallback, false)
+            }
+        },
+    }
+}
+
+/// The measurement system to speak in, given whatever `VIRGA_UNITS` was set
+/// to — for the `now` report and for the app's first frame alike, so the two
+/// never disagree about what a degree is. Imperial when unset, which is the
+/// system the interface has always started in; `u` still toggles it inside
+/// the app for the session. `VIRGA_GEOIP`'s forgiveness for a value naming
+/// neither system: a typo in a shell profile must not stop the weather.
+fn startup_unit(requested: Option<&str>) -> (Unit, Option<String>) {
+    let Some(name) = requested else {
+        return (Unit::Imperial, None);
+    };
+    match Unit::from_name(name) {
+        Some(unit) => (unit, None),
+        None => {
+            let fallback = Unit::Imperial;
+            (
+                fallback,
+                Some(format!(
+                    "virga: VIRGA_UNITS={name:?} is neither metric nor imperial; using {}.",
+                    fallback.name()
+                )),
+            )
+        }
+    }
+}
+
 /// The `virga theme` listing: every theme, its character, and a marker on the
 /// one the next launch will start in.
 fn theme_listing(persisted: Option<Theme>) -> String {
@@ -372,6 +509,20 @@ fn unknown_theme_complaint(name: &str) -> String {
 /// drawing and stop reading keys until the network answered. `try_send` keeps
 /// the loop turning and hands the refusal back to `App`, which owns what the
 /// user is told.
+/// What the frame is fundamentally showing: the screen, the hourly screen's
+/// view, and which of the weather states composes it. When this changes, the
+/// next frame replaces the previous one wholesale rather than editing it,
+/// and the draw loop clears first so the repaint is positioned absolutely.
+fn composition(app: &App) -> (Screen, HourlyView, u8) {
+    let weather = match &app.weather {
+        Fetch::Idle => 0,
+        Fetch::Loading => 1,
+        Fetch::Ready(_) => 2,
+        Fetch::Failed(_) => 3,
+    };
+    (app.screen, app.hourly_view, weather)
+}
+
 fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
     match tx.try_send(request) {
         Ok(()) => Ok(()),
@@ -395,10 +546,17 @@ fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result
 /// the app. Every state transition lives in `App` and every decision about what
 /// a key means lives in `input`, so what remains here is the part that
 /// genuinely needs a terminal and a channel.
-fn run(
-    mut terminal: DefaultTerminal,
+/// Everything the environment and the state file settled before the terminal
+/// was taken over: where to open, and in which palette and units.
+struct Opening {
     startup: Startup,
     theme: Theme,
+    unit: Unit,
+}
+
+fn run(
+    mut terminal: DefaultTerminal,
+    opening: Opening,
     state_path: Option<&Path>,
     check_updates: bool,
     warning: &mut Option<String>,
@@ -422,15 +580,33 @@ fn run(
     }
     events::spawn_worker(request_rx, message_tx);
 
-    let mut app = App::with_startup(startup);
-    app.theme = theme;
+    let mut app = App::with_startup(opening.startup);
+    app.theme = opening.theme;
+    app.unit = opening.unit;
     let initial = app.startup_request();
     dispatch(&request_tx, &mut app, initial)?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
+    let mut last_composition = composition(&app);
 
     loop {
+        // A wholesale change of what is on screen repaints from a clean
+        // slate, the way a resize already does. An ordinary diff after one —
+        // the loading popup giving way to the weather, or one screen
+        // replacing another — writes long contiguous runs that trust the
+        // terminal to advance exactly as far per glyph as the width tables
+        // say. Terminals disagree about emoji carrying a variation selector,
+        // and inside a long run that one-cell disagreement displaces
+        // everything after the glyph, borders included, until the next
+        // explicit cursor move. Clearing first makes every blank a run
+        // break, so each fragment of the new frame is positioned absolutely.
+        let now_showing = composition(&app);
+        if now_showing != last_composition {
+            last_composition = now_showing;
+            terminal.clear()?;
+            dirty = true;
+        }
         // Belt and braces against the class of bug that made resize freeze the
         // app: ratatui only reconciles its buffer inside draw(), so if the size
         // changes and nothing marks the frame dirty, a stale layout persists
@@ -539,6 +715,45 @@ mod tests {
     use crate::app::ActiveLocation;
     use crate::events::Message;
     use crate::weather::model::Weather;
+
+    /// The clean-repaint trigger: composition moves when the screen or the
+    /// weather's state changes, and holds still through the edits a diff
+    /// handles fine — a different selection, another theme, new readings
+    /// inside the same Ready screen.
+    #[test]
+    fn composition_tracks_the_screen_and_weather_state_only() {
+        let mut app = App::new();
+        let loading = composition(&app);
+
+        app.weather = Fetch::Ready(Weather::fixture(8, 0));
+        let ready = composition(&app);
+        assert_ne!(loading, ready, "loading giving way to weather must clear");
+
+        app.selected_day = 3;
+        app.theme = app.theme.next();
+        assert_eq!(composition(&app), ready, "ordinary edits must keep diffing");
+
+        app.weather = Fetch::Ready(Weather::fixture(8, 1));
+        assert_eq!(
+            composition(&app),
+            ready,
+            "new readings on the same screen must keep diffing"
+        );
+
+        app.screen = Screen::Hourly;
+        let hourly = composition(&app);
+        assert_ne!(
+            hourly, ready,
+            "a screen change replaces the frame wholesale"
+        );
+
+        app.hourly_view = app.hourly_view.toggle();
+        assert_ne!(
+            composition(&app),
+            hourly,
+            "flipping the hourly view replaces the frame wholesale"
+        );
+    }
 
     fn berlin() -> ActiveLocation {
         ActiveLocation {
@@ -889,6 +1104,27 @@ mod tests {
             startup_theme(Some("solarized"), Some(Theme::Nord)),
             Theme::Nord
         );
+    }
+
+    /// Imperial is what the interface has always started in; the variable
+    /// exists so nobody metric has to press `u` every launch.
+    #[test]
+    fn units_default_to_imperial_and_the_variable_switches_them() {
+        assert_eq!(startup_unit(None), (Unit::Imperial, None));
+        assert_eq!(startup_unit(Some("metric")), (Unit::Metric, None));
+        assert_eq!(startup_unit(Some("imperial")), (Unit::Imperial, None));
+    }
+
+    /// A typo in a shell profile must not stop the weather: the default and
+    /// a warning, never an exit.
+    #[test]
+    fn an_unusable_units_value_warns_and_stays_imperial() {
+        for value in ["", "  ", "kelvin", "both"] {
+            let (unit, warning) = startup_unit(Some(value));
+
+            assert_eq!(unit, Unit::Imperial, "{value:?}");
+            assert!(warning.unwrap().contains("VIRGA_UNITS"), "{value:?}");
+        }
     }
 
     #[test]

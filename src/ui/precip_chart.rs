@@ -11,7 +11,7 @@
 //! vertical bars, not up versus down. So this writes cells itself.
 
 use crate::theme::Palette;
-use crate::ui::axis::{TICK_ROWS, hour_ticks_render, put, put_right};
+use crate::ui::axis::{hour_ticks_render, put, put_right};
 use crate::ui::bars::{Columns, GAP, window_start};
 use crate::units::Unit;
 use crate::weather::model::{HourlyForecast, Weather};
@@ -50,6 +50,10 @@ const RULE: &str = "─";
 /// The selected hour, distinguished by shape as well as colour — the daily
 /// chart encodes its selection in colour alone, which this should not repeat.
 const RULE_SELECTED: &str = "═";
+/// Rows the hour-tick axis takes below the plot. Was a shared `axis` const
+/// until the weathergram rework absorbed it; this chart is its last user.
+const TICK_ROWS: u16 = 1;
+
 const RULE_NOW: &str = "┬";
 /// Midnight, so the days are legible without spending a row on labels.
 const RULE_MIDNIGHT: &str = "┼";
@@ -187,6 +191,8 @@ pub(super) fn precip_chart_render(
             row,
             visible.iter().map(|h| h.time.as_str()),
             columns.stride,
+            0,
+            palette.muted,
             palette,
         );
     }
