@@ -12,6 +12,8 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.4.1]
+
 ### Security
 
 Hardening from a security audit of 0.4.0, all of it against inputs that
@@ -161,7 +163,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/t-shahan/virga/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t-shahan/virga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t-shahan/virga/compare/v0.1.0...v0.2.0
