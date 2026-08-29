@@ -12,27 +12,14 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-### Fixed
+## [0.5.0]
 
-- Misaligned borders after the loading popup gave way to the weather, and
-  after switching screens, on terminals whose emoji advance disagrees with
-  the width tables. A wholesale change of what is on screen now repaints
-  from a clean slate, the way a resize already did, so every fragment of the
-  new frame is positioned absolutely instead of trusting glyph-advance
-  arithmetic across long unbroken runs.
-
-### Changed
-
-- The weather screens now render inside one centered 120-column canvas. The
-  daily and precipitation screens previously stretched their tables and
-  charts across any terminal width; past the point where the widest content
-  fits, surplus width becomes symmetric margin instead of ever-broader
-  boxes. The search screen still uses the whole terminal.
-- The hourly screen splits surplus height evenly above and below its panels,
-  so a tall terminal frames the stack rather than pooling every spare row
-  beneath the week strip.
-- The default terminal theme uses normal gray for muted labels so they remain
-  legible in Terminal.app and Ghostty while staying quieter than readings.
+The hourly screen becomes a weathergram. Temperature stands as a filled
+silhouette, the chance of rain rises in a band beneath it, weather emoji
+mark the sky every three hours, and the precipitation view it replaces
+stays one keypress away. Around it, `virga now` answers from the command
+line without opening the interface, every screen settles onto one centered
+canvas, and the hardening from a security audit ships.
 
 ### Added
 
@@ -62,6 +49,28 @@ refuse to publish a version this file does not describe.
   unset, which is what the app has always started in; `u` still toggles for
   the session, and an unusable value warns and stays imperial rather than
   refusing to run.
+
+### Changed
+
+- The weather screens now render inside one centered 120-column canvas. The
+  daily and precipitation screens previously stretched their tables and
+  charts across any terminal width; past the point where the widest content
+  fits, surplus width becomes symmetric margin instead of ever-broader
+  boxes. The search screen still uses the whole terminal.
+- The hourly screen splits surplus height evenly above and below its panels,
+  so a tall terminal frames the stack rather than pooling every spare row
+  beneath the week strip.
+- The default terminal theme uses normal gray for muted labels so they remain
+  legible in Terminal.app and Ghostty while staying quieter than readings.
+
+### Fixed
+
+- Misaligned borders after the loading popup gave way to the weather, and
+  after switching screens, on terminals whose emoji advance disagrees with
+  the width tables. A wholesale change of what is on screen now repaints
+  from a clean slate, the way a resize already did, so every fragment of the
+  new frame is positioned absolutely instead of trusting glyph-advance
+  arithmetic across long unbroken runs.
 
 ### Security
 
@@ -212,7 +221,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t-shahan/virga/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t-shahan/virga/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t-shahan/virga/compare/v0.1.0...v0.2.0
