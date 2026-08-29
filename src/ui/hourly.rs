@@ -27,7 +27,6 @@ const FULL_INSPECTOR_ROWS: u16 = DIGIT_ROWS as u16 + 2;
 const COMPACT_INSPECTOR_ROWS: u16 = 4;
 const FULL_PAIR_ROWS: u16 = FULL_INSPECTOR_ROWS + weathergram::FULL_ROWS;
 const COMPACT_PAIR_ROWS: u16 = COMPACT_INSPECTOR_ROWS + weathergram::COMPACT_ROWS;
-const TOP_PADDING_ROWS: u16 = 1;
 const PANEL_GAP_ROWS: u16 = 1;
 
 /// Three temperature characters (including a possible minus sign), plus the
@@ -77,35 +76,39 @@ pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area
     } else {
         0
     };
-    let top_padding = if !compact && spare_rows >= PANEL_GAP_ROWS + TOP_PADDING_ROWS {
-        TOP_PADDING_ROWS
-    } else {
-        0
-    };
-    let pair_rows = top_padding + inspector_rows + pair_gap + gram_rows;
+    let pair_rows = inspector_rows + pair_gap + gram_rows;
     let week = (!compact)
         .then(|| week_strip(hours, area, pair_rows + PANEL_GAP_ROWS))
         .flatten();
     let week_gap = if week.is_some() { PANEL_GAP_ROWS } else { 0 };
+    let week_box = week
+        .as_ref()
+        .map_or(0, |(_, rows)| precip_week::box_rows(*rows));
+
+    // Whatever height the panels decline splits evenly around the stack, the
+    // same move the canvas already makes with surplus width. The stack is
+    // content-sized on purpose; margins that frame it read as composition,
+    // while the same rows pooled under the last panel read as a screen that
+    // ran out of things to say. The odd row goes below, where a floor
+    // carries more weight than a ceiling.
+    let used_rows = pair_rows + week_gap + week_box;
+    let top_margin = area.height.saturating_sub(used_rows) / 2;
 
     let [
-        _top_padding,
+        _top_margin,
         inspector,
         _pair_gap,
         gram,
         _week_gap,
         week_area,
-        _margin,
+        _bottom_margin,
     ] = Layout::vertical([
-        Constraint::Length(top_padding),
+        Constraint::Length(top_margin),
         Constraint::Length(inspector_rows),
         Constraint::Length(pair_gap),
         Constraint::Length(gram_rows),
         Constraint::Length(week_gap),
-        Constraint::Length(
-            week.as_ref()
-                .map_or(0, |(_, rows)| precip_week::box_rows(*rows)),
-        ),
+        Constraint::Length(week_box),
         Constraint::Fill(1),
     ])
     .areas(area);
@@ -1456,24 +1459,32 @@ mod tests {
         assert!(text.contains("this week"), "weekly strip missing:\n{text}");
     }
 
-    /// At ordinary desktop heights the stack needs breathing room around and
-    /// between its three independent frames. Tight layouts still use every
-    /// row; the padding is only for a pane that can afford it.
+    /// Surplus height splits evenly around the stack, so a tall terminal
+    /// frames the panels instead of pooling every spare row under the last
+    /// one. An exactly-fitting height still spends every row on content.
     #[test]
-    fn tall_layout_pads_and_separates_each_panel() {
+    fn surplus_rows_frame_the_stack_symmetrically() {
         let app = app_showing(dry_hours(192), 0);
-        let buffer = rendered_buffer(100, 30, &app);
-        let panel_tops: Vec<u16> = (0..30)
+
+        // 36 rows: the full pair and an eight-day strip use 32, and the four
+        // spare rows split two above, two below.
+        let buffer = rendered_buffer(100, 36, &app);
+        let panel_tops: Vec<u16> = (0..36)
             .filter(|y| buffer[(0, *y)].symbol() == "┌")
             .collect();
-
-        assert_eq!(panel_tops, [1, 9, 22]);
-        for y in [0, 8, 21] {
+        assert_eq!(panel_tops, [2, 10, 23]);
+        for y in [0, 1, 9, 22, 34, 35] {
             assert!(
                 row_text(&buffer, 100, y).trim().is_empty(),
-                "row {y} should be breathing room"
+                "row {y} should be margin or gap"
             );
         }
+
+        // 30 rows fit the stack exactly: no margin above, none below, and the
+        // week strip takes the rows the margins would otherwise get.
+        let exact = rendered_buffer(100, 30, &app);
+        let tops: Vec<u16> = (0..30).filter(|y| exact[(0, *y)].symbol() == "┌").collect();
+        assert_eq!(tops, [0, 8, 21]);
     }
 
     /// One spare row cannot provide both outer padding and a panel gap. The
@@ -1504,9 +1515,14 @@ mod tests {
         let app = app_showing(dry_hours(192), 0);
         let buffer = rendered_buffer(100, 30, &app);
 
-        assert_eq!(buffer[(1, 1)].symbol(), " ", "inspector title inset");
-        assert_eq!(buffer[(1, 9)].symbol(), " ", "weathergram title inset");
-        assert_eq!(buffer[(98, 22)].symbol(), " ", "weekly title inset");
+        // The 30-row layout fits exactly, so the panel borders sit at rows
+        // 0, 8, and 21; the cell beside each corner is the title's inset.
+        assert_eq!(buffer[(0, 0)].symbol(), "┌", "inspector border moved");
+        assert_eq!(buffer[(1, 0)].symbol(), " ", "inspector title inset");
+        assert_eq!(buffer[(0, 8)].symbol(), "┌", "weathergram border moved");
+        assert_eq!(buffer[(1, 8)].symbol(), " ", "weathergram title inset");
+        assert_eq!(buffer[(0, 21)].symbol(), "┌", "weekly border moved");
+        assert_eq!(buffer[(98, 21)].symbol(), " ", "weekly title inset");
     }
 
     #[test]
@@ -1597,22 +1613,22 @@ mod tests {
                     }
                     "one hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(36, 19)],
+                        [(36, 20)],
                         "the single hour is not centered in its visible cell:\n{text}"
                     ),
                     "first hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(12, 19)],
+                        [(12, 20)],
                         "{case} selection is not on the first visible hour:\n{text}"
                     ),
                     "page edge" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(12, 19)],
+                        [(12, 20)],
                         "the next page did not begin at its selected hour:\n{text}"
                     ),
                     "last hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(58, 19)],
+                        [(58, 20)],
                         "the final page did not keep the last hour selected:\n{text}"
                     ),
                     "all optional readings missing" => {

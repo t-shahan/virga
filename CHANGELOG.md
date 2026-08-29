@@ -43,6 +43,13 @@ refuse to publish a version this file does not describe.
 
 ### Changed
 
+- Both weather screens now render inside one centered 120-column canvas. The
+  daily screen previously stretched its table and chart across any terminal
+  width; past the point where the widest content fits, surplus width becomes
+  symmetric margin on both screens instead of ever-broader boxes.
+- The hourly screen splits surplus height evenly above and below its panels,
+  so a tall terminal frames the stack rather than pooling every spare row
+  beneath the week strip.
 - The default terminal theme uses normal gray for muted labels so they remain
   legible in Terminal.app and Ghostty while staying quieter than readings.
 
