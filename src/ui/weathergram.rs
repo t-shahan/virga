@@ -3,12 +3,12 @@
 //! The full layout is a skyline. Temperature gets four rows of filled
 //! silhouette, so a day has a shape rather than a row of five block heights,
 //! and rain gets a two-row band under it on the same floor. Ink is reserved
-//! for information: the sky row draws a symbol only where the condition
-//! becomes something new, the wind row draws an arrow every second hour with
-//! its speed on the six-hour ticks, and a dry hour in the rain band draws
-//! nothing at all. An earlier draft gave every hour one centred glyph per
-//! track, which spent most of the plot restating that nothing was changing
-//! and read as noise at 48 columns.
+//! for information: the sky row is a faint rail carrying a symbol only where
+//! the condition becomes something new, the wind row draws an arrow every
+//! second hour with its speed on the six-hour ticks, and a dry hour in the
+//! rain band draws nothing at all. An earlier draft gave every hour one
+//! centred glyph per track, which spent most of the plot restating that
+//! nothing was changing and read as noise at 48 columns.
 //!
 //! The compact layout keeps the one-row-per-track form: below nineteen rows
 //! there is no height for a silhouette, and a single glyph per hour is the
@@ -350,6 +350,7 @@ fn full_tracks_render(
     }
 
     let range = temperature_range(visible);
+    let rail = Style::new().fg(palette.muted).add_modifier(Modifier::DIM);
 
     for (offset, hour) in visible.iter().enumerate() {
         let index = window.start + offset;
@@ -357,14 +358,21 @@ fn full_tracks_render(
         let centre = x0 + (window.cell_width - 1) / 2;
         let state = state_colour(palette, index, selected);
 
-        // Sky: a symbol only where the condition arrives. What the reader
-        // scans for is the change, and the inspector always spells out the
-        // selected hour, so an unchanged sky needs no ink of its own.
+        // Sky: a faint rail across every known hour, with a symbol where the
+        // condition arrives. The rail is what keeps the sparse glyphs from
+        // reading as leftovers: the line says the condition holds, the symbol
+        // says it changed here, and a gap says the provider made no claim,
+        // which a bare change-only row could not distinguish from calm.
         let symbol = condition_symbol::symbol(hour.code);
         let arrived =
             offset == 0 || index == 0 || condition_symbol::symbol(hours[index - 1].code) != symbol;
-        if arrived {
-            put(frame, centre, sky_y, symbol, state.unwrap_or(palette.text));
+        for column in 0..window.cell_width {
+            let x = x0 + column;
+            if arrived && x == centre {
+                put(frame, x, sky_y, symbol, state.unwrap_or(palette.text));
+            } else if symbol != " " {
+                put_styled(frame, x, sky_y, "─", rail);
+            }
         }
 
         // Temperature: every cell of the hour inked, so the silhouette is
@@ -672,10 +680,12 @@ mod tests {
         );
     }
 
-    /// The sky row annotates arrivals. A constant sky is one symbol at the
-    /// window edge, not one per hour.
+    /// The sky row is a rail with symbols where the condition changes. A
+    /// constant sky is one symbol at the window edge on a quiet line, an
+    /// unchanged hour carries the rail, and a missing code leaves a gap
+    /// rather than pretending the sky held.
     #[test]
-    fn the_sky_row_marks_changes_rather_than_every_hour() {
+    fn the_sky_row_rails_known_hours_and_marks_changes() {
         let mut weather = Weather::fixture(22, 14);
         let now = weather.now_hour;
         for hour in weather.hourly.iter_mut().skip(now) {
@@ -683,6 +693,9 @@ mod tests {
         }
         for hour in weather.hourly.iter_mut().skip(now + 5).take(3) {
             hour.code = Some(61);
+        }
+        for hour in weather.hourly.iter_mut().skip(now + 10).take(2) {
+            hour.code = None;
         }
 
         let buffer = rendered_buffer_in(
@@ -709,9 +722,24 @@ mod tests {
                 (12, "○".to_string()),
                 (22, "│".to_string()),
                 (28, "○".to_string()),
+                (36, "○".to_string()),
             ],
-            "sky ink should mark only the window edge and the two changes"
+            "sky symbols should mark only the window edge and the changes"
         );
+        for x in [13, 21, 27, 31, 58] {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                "─",
+                "an unchanged known hour should carry the rail at {x}"
+            );
+        }
+        for x in 32..=35 {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                " ",
+                "a missing code should leave a gap in the rail at {x}"
+            );
+        }
     }
 
     /// Every visible hour with a reading inks every cell of its column, so the
