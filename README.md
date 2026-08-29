@@ -4,21 +4,21 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Virga is a responsive Rust terminal weather application for current conditions,
-multi-day forecasts, historical context, and hourly precipitation
-visualization. It is powered by Open-Meteo and requires no account or API key.
+multi-day forecasts, historical context, and hourly conditions visualization.
+It is powered by Open-Meteo and requires no account or API key.
 
 > **Project status: actively developed.** Virga works and is worth installing
 > today. Features and fixes still land, so expect the occasional release.
 > Contributions are welcome.
 
 *Virga* is precipitation that evaporates before it reaches the ground. It is
-also, most weeks, what the precipitation chart draws.
+also, most weeks, what the weathergram charts.
 
 <img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
 
 ## Contents
 
-- [Hourly precipitation](#hourly-precipitation)
+- [Hourly weathergram](#hourly-weathergram)
 - [Highlights](#highlights)
 - [Install](#install)
   - [Homebrew](#homebrew)
@@ -40,14 +40,25 @@ also, most weeks, what the precipitation chart draws.
   - [Attribution](#attribution)
 - [License](#license)
 
-## Hourly precipitation
+## Hourly weathergram
 
-Press `p` for the hourly precipitation view. Probability rises above the
-centre rule while forecast amount hangs below it — a tall spike with nothing
-beneath it means “might drizzle”; tall above *and* below means take the
-umbrella.
+Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
+share one clock, so a change in the forecast reads down a column instead of
+across four separate tables. Temperature stands as a filled silhouette four
+rows tall, the chance of rain rises in a band beneath it, a weather emoji
+marks the sky every three hours, and the wind row carries an arrow every
+second hour. The selected-hour pane gives the exact feels-like temperature,
+humidity, rain or snow amount, wind and gusts, and the following 24-hour
+precipitation total.
 
-<img width="2000" height="1285" alt="CleanShot2026-08-12at19 38 47-ezgif com-optimize" src="https://github.com/user-attachments/assets/9f61e32f-d342-4794-b64b-7d1e6efb0a97" />
+The visible horizon adapts through 12-, 24-, 36-, and 48-hour tiers as the
+terminal widens. Arrow keys still browse the full eight-day hourly forecast,
+and tall terminals retain the week-long precipitation strip below the
+weathergram.
+
+Prefer the earlier precipitation-centred screen? `v` flips the hourly view to
+the classic mirrored chart — chance rising, amount hanging below — and back.
+The weathergram is the default; the choice lasts for the session.
 
 ## Highlights
 
@@ -57,8 +68,8 @@ umbrella.
   sunset.
 - **Three weeks of context** — fourteen days of historical highs followed by
   the current forecast, so today does not sit alone.
-- **Hourly precipitation** — mirrored chance and amount, a next-rain countdown,
-  a 24-hour running total, and separate snowfall reporting.
+- **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
+  an adaptive horizon, and an optional weekly precipitation strip.
 - **Fast navigation** — browse days or hours with the arrow keys, jump back to
   now, and inspect the selected period in detail.
 - **Starts where you are** — the opening forecast is for the city your IP
@@ -181,21 +192,20 @@ in the platform's per-user state directory:
 
 | Key | Action |
 |---|---|
-| `←` `→` | Previous / next day — or hour, on the precipitation screen; wraps |
-| `↑` `↓` | Precipitation screen: back / forward a day, keeping the time of day |
+| `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
+| `↑` `↓` | Hourly screen: back / forward a day, keeping the time of day |
 | `n` / `Home` | Jump back to now |
-| `p` | Hourly precipitation — `b`, `Enter` or `Esc` to go back |
+| `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
+| `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
-The precipitation chart's centre rule marks the current hour (`┬`), the
-selected one (`═`), and midnight (`┼`), so the three stay apart without relying
-on colour. Its two halves show probability and precipitation amount on
-different scales, so their heights are not comparable; the box title carries
-the amount scale.
+The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
+hour, a weather emoji marks the sky every three hours, and wind arrows every
+second hour carry their speed on the six-hour ticks.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.
@@ -275,7 +285,7 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **387 deterministic tests**; four
+Virga's default locked test suite passes **481 deterministic tests**; four
 provider-dependent live tests — three against Open-Meteo, one against
 GitHub's release redirect — are ignored during normal runs.
 Coverage includes:
@@ -442,8 +452,7 @@ still publishes and only the tap update is skipped, with a warning.
 - Terminals below 34×12 show a size warning instead of the interface.
 - “Today” is distinguished by colour alone in the daily chart. The selection
   is not: every screen marks it by shape as well — a `>` in the forecast
-  table's gutter, a `^` under the selected bar, and the precipitation chart's
-  centre rule.
+  table's gutter and a `▲` in the hourly weathergram.
 - Ghostty and Apple's Terminal app have been tested manually on macOS.
 - Automated tests run on Linux, macOS, and Windows. They do not validate
   real-terminal rendering, font fallback, or held-key behavior.

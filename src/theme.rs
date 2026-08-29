@@ -118,7 +118,7 @@ impl Theme {
             Theme::Default => Palette {
                 accent: Color::Blue,
                 text: Color::White,
-                muted: Color::DarkGray,
+                muted: Color::Gray,
                 selection: Color::Yellow,
                 now: Color::LightBlue,
                 error: Color::Red,
@@ -247,15 +247,19 @@ mod tests {
         assert_eq!(Theme::default(), Theme::Default);
     }
 
-    /// The regression guard for the look the app already had. Every one of
-    /// these was a literal at a call site before there were themes.
+    /// The default palette stays within the terminal's sixteen ANSI colours,
+    /// while labels use normal gray rather than dark gray. Some terminal
+    /// schemes render dark gray almost indistinguishably from the background;
+    /// normal gray remains subdued beside bright-white readings without
+    /// disappearing.
     #[test]
-    fn the_terminal_theme_keeps_todays_colours() {
+    fn the_terminal_theme_uses_readable_ansi_colours() {
         let p = Theme::Default.palette();
 
         assert_eq!(p.accent, Color::Blue);
         assert_eq!(p.text, Color::White);
-        assert_eq!(p.muted, Color::DarkGray);
+        assert_eq!(p.muted, Color::Gray);
+        assert_ne!(p.muted, p.text, "labels must remain quieter than readings");
         assert_eq!(p.selection, Color::Yellow);
         assert_eq!(p.now, Color::LightBlue);
         assert_eq!(p.error, Color::Red);

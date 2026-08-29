@@ -51,7 +51,7 @@ fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("q", "quit"),
             ("←→", "day"),
             ("n", "now"),
-            ("p", "precip"),
+            ("p", "hourly"),
             ("r", "refresh"),
             ("u", "units"),
             ("l", "location"),
@@ -59,12 +59,13 @@ fn bindings(app: &App) -> Vec<(&'static str, String)> {
         ]),
         // Quit and back lead, as they do on the weather screen: if anything is
         // going to be dropped, those are the two worth keeping.
-        Screen::Precipitation => owned(vec![
+        Screen::Hourly => owned(vec![
             ("q", "quit"),
             ("b", "back"),
             ("←→", "hour"),
             ("↑↓", "day"),
             ("n", "now"),
+            ("v", "view"),
             ("r", "refresh"),
             ("u", "units"),
             ("t", &theme_label(app)),
@@ -190,20 +191,20 @@ mod tests {
     /// Nothing else on the weather screen mentions that `p` exists, so the
     /// legend is the only thing making the screen discoverable at all.
     #[test]
-    fn the_weather_legend_advertises_the_precipitation_screen() {
+    fn the_weather_legend_advertises_the_hourly_screen() {
         let legend = legend_at(120, Screen::Weather).join("\n");
-        assert!(legend.contains("[p]"), "{legend:?}");
-        assert!(legend.contains("precip"), "{legend:?}");
+        assert!(legend.contains("[p] hourly"), "{legend:?}");
     }
 
-    /// The precipitation screen rebinds the arrows and takes `b` for back, so
+    /// The hourly screen rebinds the arrows and takes `b` for back, so
     /// its legend must not still describe the weather screen's bindings.
     #[test]
-    fn the_precipitation_legend_describes_its_own_keys() {
-        let legend = legend_at(120, Screen::Precipitation).join("\n");
+    fn the_hourly_legend_describes_its_own_keys() {
+        let legend = legend_at(120, Screen::Hourly).join("\n");
 
         assert!(legend.contains("[b] back"), "{legend:?}");
         assert!(legend.contains("hour"), "{legend:?}");
+        assert!(legend.contains("[v] view"), "{legend:?}");
         assert!(
             !legend.contains("location"),
             "l returns to search: {legend:?}"
@@ -309,7 +310,7 @@ mod tests {
     #[test]
     fn narrowing_never_cuts_a_binding_in_half() {
         for theme in Theme::ALL {
-            for screen in [Screen::Weather, Screen::Precipitation, Screen::Search] {
+            for screen in [Screen::Weather, Screen::Hourly, Screen::Search] {
                 for width in 8u16..=160 {
                     let mut app = app_on(screen);
                     // Press first, then force the palette: the press is what
@@ -355,10 +356,10 @@ mod tests {
     /// otherwise have clipped off the end.
     #[test]
     fn a_narrow_terminal_wraps_rather_than_dropping_the_tail() {
-        let app = app_on(Screen::Precipitation);
+        let app = app_on(Screen::Hourly);
         assert_eq!(legend_rows(&app, 120), 1, "one row is plenty at 120");
 
-        let narrow = legend_at(50, Screen::Precipitation);
+        let narrow = legend_at(50, Screen::Hourly);
         assert_eq!(narrow.len(), 2, "50 columns needs two rows: {narrow:?}");
 
         let shown = narrow.join(" ");
@@ -367,12 +368,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hourly_legend_keeps_exit_keys_within_the_minimum_height_budget() {
+        let app = app_on(Screen::Hourly);
+        assert_eq!(legend_rows(&app, 34), MAX_ROWS);
+
+        let legend = legend_at(34, Screen::Hourly).join(" ");
+        for key in ["[q]", "[b]"] {
+            assert!(
+                legend.contains(key),
+                "minimum-width legend lost {key}: {legend:?}"
+            );
+        }
+    }
+
     /// Two rows is the ceiling however little room there is, or the legend
     /// would start taking rows the chart needs more.
     #[test]
     fn the_legend_never_takes_more_than_its_share() {
         for width in 1u16..=200 {
-            for screen in [Screen::Weather, Screen::Precipitation] {
+            for screen in [Screen::Weather, Screen::Hourly] {
                 let rows = legend_rows(&app_on(screen), width);
                 assert!((1..=MAX_ROWS).contains(&rows), "width {width}: {rows} rows");
             }
@@ -382,7 +397,7 @@ mod tests {
     /// Whatever gets dropped, the two keys that get you out come first.
     #[test]
     fn quitting_and_leaving_survive_a_very_narrow_terminal() {
-        let legend = legend_at(20, Screen::Precipitation).join(" ");
+        let legend = legend_at(20, Screen::Hourly).join(" ");
         assert!(legend.contains("[q]"), "{legend:?}");
         assert!(legend.contains("[b]"), "{legend:?}");
     }

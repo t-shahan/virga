@@ -1,4 +1,6 @@
-use crate::app::{ActiveLocation, App, Fetch, LocationSource, Remembered, Screen, Startup};
+use crate::app::{
+    ActiveLocation, App, Fetch, HourlyView, LocationSource, Remembered, Screen, Startup,
+};
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
 use crate::theme::Theme;
@@ -507,18 +509,18 @@ fn unknown_theme_complaint(name: &str) -> String {
 /// drawing and stop reading keys until the network answered. `try_send` keeps
 /// the loop turning and hands the refusal back to `App`, which owns what the
 /// user is told.
-/// What the frame is fundamentally showing: the screen, and which of the
-/// weather states composes it. When this changes, the next frame replaces
-/// the previous one wholesale rather than editing it, and the draw loop
-/// clears first so the repaint is positioned absolutely.
-fn composition(app: &App) -> (Screen, u8) {
+/// What the frame is fundamentally showing: the screen, the hourly screen's
+/// view, and which of the weather states composes it. When this changes, the
+/// next frame replaces the previous one wholesale rather than editing it,
+/// and the draw loop clears first so the repaint is positioned absolutely.
+fn composition(app: &App) -> (Screen, HourlyView, u8) {
     let weather = match &app.weather {
         Fetch::Idle => 0,
         Fetch::Loading => 1,
         Fetch::Ready(_) => 2,
         Fetch::Failed(_) => 3,
     };
-    (app.screen, weather)
+    (app.screen, app.hourly_view, weather)
 }
 
 fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
@@ -738,11 +740,18 @@ mod tests {
             "new readings on the same screen must keep diffing"
         );
 
-        app.screen = Screen::Precipitation;
+        app.screen = Screen::Hourly;
+        let hourly = composition(&app);
+        assert_ne!(
+            hourly, ready,
+            "a screen change replaces the frame wholesale"
+        );
+
+        app.hourly_view = app.hourly_view.toggle();
         assert_ne!(
             composition(&app),
-            ready,
-            "a screen change replaces the frame wholesale"
+            hourly,
+            "flipping the hourly view replaces the frame wholesale"
         );
     }
 

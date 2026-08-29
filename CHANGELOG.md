@@ -28,9 +28,24 @@ refuse to publish a version this file does not describe.
   charts across any terminal width; past the point where the widest content
   fits, surplus width becomes symmetric margin instead of ever-broader
   boxes. The search screen still uses the whole terminal.
+- The hourly screen splits surplus height evenly above and below its panels,
+  so a tall terminal frames the stack rather than pooling every spare row
+  beneath the week strip.
+- The default terminal theme uses normal gray for muted labels so they remain
+  legible in Terminal.app and Ghostty while staying quieter than readings.
 
 ### Added
 
+- **An adaptive hourly weathergram.** Press `p` to inspect sky conditions,
+  temperature, precipitation, and wind on one shared 12- to 48-hour timeline.
+  Temperature draws as a filled silhouette above a rain band, a weather emoji
+  marks the sky every three hours, the wind row carries an arrow every second
+  hour, and exact selected-hour details and the weekly precipitation strip
+  remain when the terminal is tall enough.
+- **A choice of hourly views.** `v` flips the hourly screen between the
+  weathergram and the classic precipitation screen it evolved from, with its
+  mirrored chance-and-amount chart. The weathergram is the default and the
+  choice lasts for the session.
 - **`virga now [CITY]`**: print current conditions and today's outlook, then
   exit — for a glance, a script, or a status bar. Alone it asks about the
   same city the app would open with: the remembered one, or a fresh

@@ -21,6 +21,7 @@ const TIMEOUT_GLOBAL: Duration = Duration::from_secs(15);
 /// Reaching an unreachable host should not burn the whole global budget before
 /// saying so.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
+const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m";
 
 /// Detection sits in front of the first frame of weather, so its budget is
 /// tighter than the forecast's. A provider having a bad day should cost a
@@ -147,10 +148,7 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
         // Rides the existing request rather than taking its own. ~15 KB more on
         // an already-warm pooled connection beats a second round trip with its
         // own loading state and its own failure mode.
-        .query(
-            "hourly",
-            "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m",
-        )
+        .query("hourly", HOURLY_FIELDS)
         .query("timezone", "auto")
         .query("forecast_days", "8")
         .query("past_days", "14")
@@ -220,6 +218,25 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn hourly_request_names_every_weathergram_field() {
+        assert_eq!(
+            HOURLY_FIELDS.split(',').collect::<Vec<_>>(),
+            vec![
+                "precipitation",
+                "precipitation_probability",
+                "snowfall",
+                "weather_code",
+                "temperature_2m",
+                "apparent_temperature",
+                "relative_humidity_2m",
+                "wind_speed_10m",
+                "wind_gusts_10m",
+                "wind_direction_10m",
+            ]
+        );
+    }
     use std::time::Instant;
 
     /// A loopback server that answers every request with the same canned
@@ -578,7 +595,7 @@ mod live {
     }
 
     /// The hourly block rides the forecast request, so a schema change or a
-    /// dropped parameter would silently empty the precipitation screen rather
+    /// dropped parameter would silently empty the hourly screen rather
     /// than fail anything. An operational smoke test, not a contract.
     #[test]
     #[ignore]
@@ -611,6 +628,26 @@ mod live {
         assert!(
             forward.iter().any(|h| h.precip_mm.is_some()),
             "amount should be present even when it is zero"
+        );
+        assert!(
+            forward.iter().any(|h| h.feels_like_c.is_some()),
+            "apparent temperature should be present"
+        );
+        assert!(
+            forward.iter().any(|h| h.humidity_pct.is_some()),
+            "humidity should be present"
+        );
+        assert!(
+            forward.iter().any(|h| h.wind_kph.is_some()),
+            "wind speed should be present"
+        );
+        assert!(
+            forward.iter().any(|h| h.gust_kph.is_some()),
+            "wind gusts should be present"
+        );
+        assert!(
+            forward.iter().any(|h| h.wind_dir_deg.is_some()),
+            "wind direction should be present"
         );
     }
 }
