@@ -507,6 +507,20 @@ fn unknown_theme_complaint(name: &str) -> String {
 /// drawing and stop reading keys until the network answered. `try_send` keeps
 /// the loop turning and hands the refusal back to `App`, which owns what the
 /// user is told.
+/// What the frame is fundamentally showing: the screen, and which of the
+/// weather states composes it. When this changes, the next frame replaces
+/// the previous one wholesale rather than editing it, and the draw loop
+/// clears first so the repaint is positioned absolutely.
+fn composition(app: &App) -> (Screen, u8) {
+    let weather = match &app.weather {
+        Fetch::Idle => 0,
+        Fetch::Loading => 1,
+        Fetch::Ready(_) => 2,
+        Fetch::Failed(_) => 3,
+    };
+    (app.screen, weather)
+}
+
 fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
     match tx.try_send(request) {
         Ok(()) => Ok(()),
@@ -572,8 +586,25 @@ fn run(
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
+    let mut last_composition = composition(&app);
 
     loop {
+        // A wholesale change of what is on screen repaints from a clean
+        // slate, the way a resize already does. An ordinary diff after one —
+        // the loading popup giving way to the weather, or one screen
+        // replacing another — writes long contiguous runs that trust the
+        // terminal to advance exactly as far per glyph as the width tables
+        // say. Terminals disagree about emoji carrying a variation selector,
+        // and inside a long run that one-cell disagreement displaces
+        // everything after the glyph, borders included, until the next
+        // explicit cursor move. Clearing first makes every blank a run
+        // break, so each fragment of the new frame is positioned absolutely.
+        let now_showing = composition(&app);
+        if now_showing != last_composition {
+            last_composition = now_showing;
+            terminal.clear()?;
+            dirty = true;
+        }
         // Belt and braces against the class of bug that made resize freeze the
         // app: ratatui only reconciles its buffer inside draw(), so if the size
         // changes and nothing marks the frame dirty, a stale layout persists
@@ -682,6 +713,38 @@ mod tests {
     use crate::app::ActiveLocation;
     use crate::events::Message;
     use crate::weather::model::Weather;
+
+    /// The clean-repaint trigger: composition moves when the screen or the
+    /// weather's state changes, and holds still through the edits a diff
+    /// handles fine — a different selection, another theme, new readings
+    /// inside the same Ready screen.
+    #[test]
+    fn composition_tracks_the_screen_and_weather_state_only() {
+        let mut app = App::new();
+        let loading = composition(&app);
+
+        app.weather = Fetch::Ready(Weather::fixture(8, 0));
+        let ready = composition(&app);
+        assert_ne!(loading, ready, "loading giving way to weather must clear");
+
+        app.selected_day = 3;
+        app.theme = app.theme.next();
+        assert_eq!(composition(&app), ready, "ordinary edits must keep diffing");
+
+        app.weather = Fetch::Ready(Weather::fixture(8, 1));
+        assert_eq!(
+            composition(&app),
+            ready,
+            "new readings on the same screen must keep diffing"
+        );
+
+        app.screen = Screen::Precipitation;
+        assert_ne!(
+            composition(&app),
+            ready,
+            "a screen change replaces the frame wholesale"
+        );
+    }
 
     fn berlin() -> ActiveLocation {
         ActiveLocation {
