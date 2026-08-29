@@ -42,6 +42,8 @@ also, most weeks, what the weathergram charts.
 
 ## Hourly weathergram
 
+<img width="2000" height="1609" alt="percip_screen_demo" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
+
 Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
 share one clock, so a change in the forecast reads down a column instead of
 across four separate tables. Temperature stands as a filled silhouette four
