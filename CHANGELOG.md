@@ -12,6 +12,15 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- Misaligned borders after the loading popup gave way to the weather, and
+  after switching screens, on terminals whose emoji advance disagrees with
+  the width tables. A wholesale change of what is on screen now repaints
+  from a clean slate, the way a resize already did, so every fragment of the
+  new frame is positioned absolutely instead of trusting glyph-advance
+  arithmetic across long unbroken runs.
+
 ### Added
 
 - **`virga now [CITY]`**: print current conditions and today's outlook, then
