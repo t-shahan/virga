@@ -1,4 +1,4 @@
-use crate::app::{App, Fetch, Screen};
+use crate::app::{App, Fetch, HourlyView, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -15,6 +15,8 @@ mod digits;
 mod forecast;
 mod hourly;
 mod legend;
+mod precip;
+mod precip_chart;
 mod precip_week;
 mod precipitation;
 mod search;
@@ -25,6 +27,7 @@ use current::current_area_render;
 use forecast::forecast_area_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
+use precip::precip_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
@@ -186,7 +189,10 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             Fetch::Idle => {}
         },
         Screen::Hourly => match &app.weather {
-            Fetch::Ready(_) => hourly_render(frame, app, palette, content),
+            Fetch::Ready(_) => match app.hourly_view {
+                HourlyView::Weathergram => hourly_render(frame, app, palette, content),
+                HourlyView::Classic => precip_render(frame, app, palette, content),
+            },
             Fetch::Loading => popup_render(
                 frame,
                 page_area,
@@ -643,6 +649,31 @@ mod tests {
         app.weather = Fetch::Ready(Weather::fixture(usize::from(u16::MAX), 0));
 
         drawn(&app, probe(), 80, 24);
+    }
+
+    /// `v` flips the hourly screen between its two renderings. Both must
+    /// actually draw: the choice belongs to the user, not the release.
+    #[test]
+    fn the_hourly_screen_offers_both_views() {
+        let mut app = ready(Screen::Hourly);
+        let weathergram =
+            symbols(&drawn(&app, Theme::default().palette(), 100, 24), 100, 24).join("\n");
+        assert!(
+            weathergram.contains("Hourly weather · next"),
+            "default view lost the weathergram:\n{weathergram}"
+        );
+
+        app.hourly_view = HourlyView::Classic;
+        let classic =
+            symbols(&drawn(&app, Theme::default().palette(), 100, 24), 100, 24).join("\n");
+        assert!(
+            classic.contains("Precipitation · next"),
+            "classic view lost its chart:\n{classic}"
+        );
+        assert!(
+            !classic.contains("Hourly weather"),
+            "classic view still drew the weathergram:\n{classic}"
+        );
     }
 
     #[test]

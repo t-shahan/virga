@@ -20,6 +20,27 @@ pub enum Screen {
     Hourly,
 }
 
+/// Which rendering the hourly screen uses. The weathergram is the default;
+/// the classic view is the precipitation-centred screen it replaced, kept so
+/// the choice belongs to the user rather than to the release. Session-scoped
+/// deliberately: a view is a way of looking, not a setting, and the toggle is
+/// one keypress away.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HourlyView {
+    #[default]
+    Weathergram,
+    Classic,
+}
+
+impl HourlyView {
+    pub fn toggle(self) -> Self {
+        match self {
+            HourlyView::Weathergram => HourlyView::Classic,
+            HourlyView::Classic => HourlyView::Weathergram,
+        }
+    }
+}
+
 /// How far the vertical arrows jump. Eight days is a long way at one press
 /// per hour.
 const HOURS_PER_DAY: usize = 24;
@@ -143,6 +164,8 @@ pub struct App {
     /// Index into `Weather::forecast_hours()` — the hourly series from now
     /// onward, so zero is always the current hour.
     pub selected_hour: usize,
+    /// Which rendering the hourly screen uses, toggled with `v`.
+    pub hourly_view: HourlyView,
     /// The place the displayed weather actually describes. Only a successful
     /// load moves it, so the label can never get ahead of the measurements.
     pub location: ActiveLocation,
@@ -220,6 +243,7 @@ impl App {
             selected: 0,
             selected_day: 0,
             selected_hour: 0,
+            hourly_view: HourlyView::default(),
             location,
             location_source: source,
             detect_at_startup: detect,
@@ -285,6 +309,7 @@ impl App {
             Action::PrevHourDay => self.select_prev_hour_day(),
             Action::NextHourDay => self.select_next_hour_day(),
             Action::Now => self.select_now(),
+            Action::ToggleHourlyView => self.hourly_view = self.hourly_view.toggle(),
             Action::Insert(c) => {
                 self.query.push(c);
                 self.invalidate_results();
@@ -766,6 +791,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hourly_view_toggles_between_weathergram_and_classic() {
+        let mut app = App::new();
+        assert_eq!(app.hourly_view, HourlyView::Weathergram);
+        app.on_action(Action::ToggleHourlyView);
+        assert_eq!(app.hourly_view, HourlyView::Classic);
+        app.on_action(Action::ToggleHourlyView);
+        assert_eq!(app.hourly_view, HourlyView::Weathergram);
+    }
 
     fn app_with(days: usize, today: usize) -> App {
         let mut app = App::new();

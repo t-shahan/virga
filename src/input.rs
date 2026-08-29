@@ -29,6 +29,9 @@ pub enum Action {
     PrevHourDay,
     NextHourDay,
     Now,
+    /// Flip the hourly screen between the weathergram and the classic
+    /// precipitation view.
+    ToggleHourlyView,
     Insert(char),
     Backspace,
     Submit,
@@ -122,6 +125,7 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Up => Some(Action::PrevHourDay),
             KeyCode::Down => Some(Action::NextHourDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
+            KeyCode::Char('v') => Some(Action::ToggleHourlyView),
             _ => None,
         },
         // Every printable key is text here, so none of the command letters
@@ -141,6 +145,21 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `v` flips the hourly view, and only there: on the weather screen it is
+    /// unbound, and in search it types a letter like any other.
+    #[test]
+    fn v_toggles_the_hourly_view_only_on_the_hourly_screen() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('v')), Screen::Hourly),
+            Some(Action::ToggleHourlyView)
+        );
+        assert_eq!(action_for(press(KeyCode::Char('v')), Screen::Weather), None);
+        assert_eq!(
+            action_for(press(KeyCode::Char('v')), Screen::Search),
+            Some(Action::Insert('v'))
+        );
+    }
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

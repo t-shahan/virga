@@ -20,6 +20,10 @@ refuse to publish a version this file does not describe.
   marks the sky every three hours, the wind row carries an arrow every second
   hour, and exact selected-hour details and the weekly precipitation strip
   remain when the terminal is tall enough.
+- **A choice of hourly views.** `v` flips the hourly screen between the
+  weathergram and the classic precipitation screen it evolved from, with its
+  mirrored chance-and-amount chart. The weathergram is the default and the
+  choice lasts for the session.
 - **`virga now [CITY]`**: print current conditions and today's outlook, then
   exit — for a glance, a script, or a status bar. Alone it asks about the
   same city the app would open with: the remembered one, or a fresh

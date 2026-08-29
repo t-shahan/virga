@@ -56,6 +56,10 @@ terminal widens. Arrow keys still browse the full eight-day hourly forecast,
 and tall terminals retain the week-long precipitation strip below the
 weathergram.
 
+Prefer the earlier precipitation-centred screen? `v` flips the hourly view to
+the classic mirrored chart — chance rising, amount hanging below — and back.
+The weathergram is the default; the choice lasts for the session.
+
 ## Highlights
 
 - **Current conditions** — temperature, feels-like, wind with gusts and
@@ -192,6 +196,7 @@ in the platform's per-user state directory:
 | `↑` `↓` | Hourly screen: back / forward a day, keeping the time of day |
 | `n` / `Home` | Jump back to now |
 | `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
+| `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
@@ -280,7 +285,7 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **387 deterministic tests**; four
+Virga's default locked test suite passes **481 deterministic tests**; four
 provider-dependent live tests — three against Open-Meteo, one against
 GitHub's release redirect — are ignored during normal runs.
 Coverage includes:

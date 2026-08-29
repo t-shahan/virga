@@ -65,6 +65,7 @@ fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("←→", "hour"),
             ("↑↓", "day"),
             ("n", "now"),
+            ("v", "view"),
             ("r", "refresh"),
             ("u", "units"),
             ("t", &theme_label(app)),
@@ -203,6 +204,7 @@ mod tests {
 
         assert!(legend.contains("[b] back"), "{legend:?}");
         assert!(legend.contains("hour"), "{legend:?}");
+        assert!(legend.contains("[v] view"), "{legend:?}");
         assert!(
             !legend.contains("location"),
             "l returns to search: {legend:?}"
