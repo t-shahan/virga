@@ -68,9 +68,13 @@ const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 /// set this from the *comfortable* layout and rejected an ordinary 100x20.
 const MIN_WIDTH: u16 = 34;
 const MIN_HEIGHT: u16 = 12;
-/// Once the full 48-hour weathergram fits, wider borders only detach titles
-/// and controls from the information they describe.
-const HOURLY_MAX_WIDTH: u16 = 120;
+/// The canvas the weather screens render inside. Past the width where the
+/// widest content fits — the 48-hour weathergram, the forecast table beside
+/// its chart — broader boxes only detach titles and controls from the
+/// information they describe, so surplus width becomes symmetric margin
+/// instead. The search screen keeps the whole area: it is a picker laid over
+/// the app, not a dashboard.
+const CANVAS_WIDTH: u16 = 120;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
     render_with(frame, app, app.theme.palette());
@@ -90,15 +94,15 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         return;
     }
 
-    let page_area = if app.screen == Screen::Hourly {
-        let width = area.width.min(HOURLY_MAX_WIDTH);
+    let page_area = if app.screen == Screen::Search {
+        area
+    } else {
+        let width = area.width.min(CANVAS_WIDTH);
         Rect {
             x: area.x + (area.width - width) / 2,
             width,
             ..area
         }
-    } else {
-        area
     };
 
     // The release notice takes one muted row above the key bar — but not at
@@ -314,6 +318,43 @@ mod tests {
         (MIN_WIDTH, MIN_HEIGHT),
         (20, 8),
     ];
+
+    /// The weather screens are measured dashboards, not wallpaper. Panels
+    /// and controls stop growing once the widest content fits, while a
+    /// narrower terminal still receives every available column. The search
+    /// screen is exempt: it lays its picker over the whole area.
+    #[test]
+    fn weather_screens_share_one_centered_120_column_canvas() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let app = ready(screen);
+            for width in [87, 122, 169] {
+                let height = 34;
+                let buffer = drawn(&app, Theme::default().palette(), width, height);
+                let canvas_width = width.min(120);
+                let left = (width - canvas_width) / 2;
+                let right = left + canvas_width - 1;
+
+                let painted: Vec<u16> = (0..width)
+                    .filter(|x| (0..height).any(|y| !buffer[(*x, y)].symbol().trim().is_empty()))
+                    .collect();
+
+                assert_eq!(
+                    painted.first().copied(),
+                    Some(left),
+                    "{screen:?} at width {width}"
+                );
+                assert_eq!(
+                    painted.last().copied(),
+                    Some(right),
+                    "{screen:?} at width {width}"
+                );
+                assert!(
+                    painted.iter().all(|x| (left..=right).contains(x)),
+                    "{screen:?} at width {width} painted beyond {left}..={right}"
+                );
+            }
+        }
+    }
 
     fn ready(screen: Screen) -> App {
         let mut app = App::new();
@@ -686,44 +727,6 @@ mod tests {
             assert!(text.contains(label), "minimum lost {label}:\n{text}");
         }
         assert!(!text.contains("Terminal too small"));
-    }
-
-    /// The hourly screen is a measured dashboard, not wallpaper. Its panels
-    /// and controls should stop growing once the 48-hour tier fits, while a
-    /// narrower terminal still receives every available column.
-    #[test]
-    fn hourly_screen_uses_one_centered_120_column_canvas() {
-        let app = ready(Screen::Hourly);
-
-        for width in [87, 122, 169] {
-            let height = 34;
-            let buffer = drawn(&app, Theme::default().palette(), width, height);
-            let canvas_width = width.min(120);
-            let left = (width - canvas_width) / 2;
-            let right = left + canvas_width - 1;
-
-            let painted: Vec<u16> = (0..width)
-                .filter(|x| (0..height).any(|y| !buffer[(*x, y)].symbol().trim().is_empty()))
-                .collect();
-
-            assert_eq!(
-                painted.first().copied(),
-                Some(left),
-                "{:?} at width {width}",
-                app.screen
-            );
-            assert_eq!(
-                painted.last().copied(),
-                Some(right),
-                "{:?} at width {width}",
-                app.screen
-            );
-            assert!(
-                painted.iter().all(|x| (left..=right).contains(x)),
-                "{:?} at width {width} painted beyond {left}..={right}",
-                app.screen
-            );
-        }
     }
 
     #[test]

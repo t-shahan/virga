@@ -43,8 +43,17 @@ jobs:
           # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
           # prompt: 'Update the pull request description to include a summary of changes.'
 
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          # claude_args: '--allowed-tools Bash(gh pr *)'
+          # Claude answers questions about this repository, and an answer it
+          # cannot check is a guess. These are the same gates ci.yml runs, so
+          # a claim made in a comment is one the pull request has to survive.
+          # ubuntu-latest ships a Rust toolchain, which is why ci.yml calls
+          # cargo without installing one; keep that in mind before moving this
+          # job to a runner that does not.
+          #
+          # Read-only by construction: everything here inspects or verifies.
+          # Nothing publishes, and the job's `contents: read` permission means
+          # nothing can be pushed even if it tried.
+          claude_args: >-
+            --allowedTools
+            "Bash(cargo fmt:*),Bash(cargo clippy:*),Bash(cargo test:*),Bash(cargo check:*),Bash(cargo build:*),Bash(cargo package:*),Bash(cargo tree:*),Bash(shellcheck:*),Bash(./scripts/check-changelog.sh:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh run view:*)"
 

@@ -410,6 +410,13 @@ cargo test --locked --all-targets
 cargo package --locked
 ```
 
+Opening a pull request fills in a template. Keep its `Review focus for
+@claude` section and say where the review should look hardest, because that
+is the part a reviewer cannot reconstruct from the diff. Claude reviews every
+pull request either way, against the requirements in
+[`CLAUDE.md`](CLAUDE.md), so the section directs the review rather than
+triggering it.
+
 Notable changes belong in [`CHANGELOG.md`](CHANGELOG.md) under `Unreleased`.
 That is not bookkeeping for its own sake: release notes are generated from that
 file, and both the release script and CI refuse to publish a version it does not

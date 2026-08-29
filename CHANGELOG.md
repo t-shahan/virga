@@ -12,6 +12,19 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Changed
+
+- The weather screens now render inside one centered 120-column canvas. The
+  daily and precipitation screens previously stretched their tables and
+  charts across any terminal width; past the point where the widest content
+  fits, surplus width becomes symmetric margin instead of ever-broader
+  boxes. The search screen still uses the whole terminal.
+- The hourly screen splits surplus height evenly above and below its panels,
+  so a tall terminal frames the stack rather than pooling every spare row
+  beneath the week strip.
+- The default terminal theme uses normal gray for muted labels so they remain
+  legible in Terminal.app and Ghostty while staying quieter than readings.
+
 ### Added
 
 - **An adaptive hourly weathergram.** Press `p` to inspect sky conditions,
@@ -40,14 +53,6 @@ refuse to publish a version this file does not describe.
   unset, which is what the app has always started in; `u` still toggles for
   the session, and an unusable value warns and stays imperial rather than
   refusing to run.
-
-### Changed
-
-- The hourly screen splits surplus height evenly above and below its panels,
-  so a tall terminal frames the stack rather than pooling every spare row
-  beneath the week strip.
-- The default terminal theme uses normal gray for muted labels so they remain
-  legible in Terminal.app and Ghostty while staying quieter than readings.
 
 ### Security
 
