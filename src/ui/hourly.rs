@@ -1424,8 +1424,11 @@ mod tests {
             hour.code = Some(61);
         }
         let app = app_showing(hours, 0);
-        let text = rendered(100, 16, &app);
-        let top = text.lines().next().expect("a top border");
+        let text = rendered(100, 24, &app);
+        let top = text
+            .lines()
+            .find(|line| line.contains('┌'))
+            .expect("a top border");
 
         assert!(
             top.contains("rain"),
@@ -1464,8 +1467,8 @@ mod tests {
             .filter(|y| buffer[(0, *y)].symbol() == "┌")
             .collect();
 
-        assert_eq!(panel_tops, [1, 9, 18]);
-        for y in [0, 8, 17] {
+        assert_eq!(panel_tops, [1, 9, 22]);
+        for y in [0, 8, 21] {
             assert!(
                 row_text(&buffer, 100, y).trim().is_empty(),
                 "row {y} should be breathing room"
@@ -1503,7 +1506,7 @@ mod tests {
 
         assert_eq!(buffer[(1, 1)].symbol(), " ", "inspector title inset");
         assert_eq!(buffer[(1, 9)].symbol(), " ", "weathergram title inset");
-        assert_eq!(buffer[(98, 18)].symbol(), " ", "weekly title inset");
+        assert_eq!(buffer[(98, 22)].symbol(), " ", "weekly title inset");
     }
 
     #[test]
@@ -1594,22 +1597,22 @@ mod tests {
                     }
                     "one hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(36, 15)],
+                        [(36, 19)],
                         "the single hour is not centered in its visible cell:\n{text}"
                     ),
                     "first hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(12, 15)],
+                        [(12, 19)],
                         "{case} selection is not on the first visible hour:\n{text}"
                     ),
                     "page edge" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(12, 15)],
+                        [(12, 19)],
                         "the next page did not begin at its selected hour:\n{text}"
                     ),
                     "last hour" => assert_eq!(
                         marker_coordinates(&buffer, width, height, "▲"),
-                        [(58, 15)],
+                        [(58, 19)],
                         "the final page did not keep the last hour selected:\n{text}"
                     ),
                     "all optional readings missing" => {
@@ -1636,55 +1639,49 @@ mod tests {
                             track_text(&buffer, width, height, "temp").contains("-5–-5°C"),
                             "flat below-zero range changed meaning:\n{text}"
                         );
-                        assert_eq!(
-                            track_glyph_coordinates(&buffer, width, height, "temp", &["▄"]),
-                            vec![
-                                (12, "▄".to_string()),
-                                (14, "▄".to_string()),
-                                (16, "▄".to_string()),
-                                (18, "▄".to_string()),
-                                (20, "▄".to_string()),
-                                (22, "▄".to_string()),
-                                (24, "▄".to_string()),
-                                (26, "▄".to_string()),
-                                (28, "▄".to_string()),
-                                (30, "▄".to_string()),
-                                (32, "▄".to_string()),
-                                (34, "▄".to_string()),
-                                (36, "▄".to_string()),
-                                (38, "▄".to_string()),
-                                (40, "▄".to_string()),
-                                (42, "▄".to_string()),
-                                (44, "▄".to_string()),
-                                (46, "▄".to_string()),
-                                (48, "▄".to_string()),
-                                (50, "▄".to_string()),
-                                (52, "▄".to_string()),
-                                (54, "▄".to_string()),
-                                (56, "▄".to_string()),
-                                (58, "▄".to_string()),
-                            ],
-                            "flat temperatures did not keep their middle glyphs in every cell:\n{text}"
+                        let flat = track_glyph_coordinates(
+                            &buffer,
+                            width,
+                            height,
+                            "temp",
+                            &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"],
                         );
+                        assert_eq!(
+                            flat.len(),
+                            48,
+                            "a flat window should ink every plot cell:\n{text}"
+                        );
+                        assert!(
+                            flat.iter().all(|(_, glyph)| glyph == "█"),
+                            "a flat window should stand at its half-height rows:\n{text}"
+                        );
+                        assert_eq!(flat.first(), Some(&(12, "█".to_string())));
+                        assert_eq!(flat.last(), Some(&(59, "█".to_string())));
                         assert_eq!(
                             track_glyph_coordinates(
                                 &buffer,
                                 width,
                                 height,
                                 "rain",
-                                &["·", "▂", "▄", "▆", "█"]
+                                &["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
                             ),
                             vec![
-                                (12, "·".to_string()),
                                 (14, "▂".to_string()),
-                                (16, "▂".to_string()),
-                                (18, "▄".to_string()),
-                                (20, "▄".to_string()),
-                                (22, "▆".to_string()),
-                                (24, "▆".to_string()),
+                                (15, "▂".to_string()),
+                                (16, "▅".to_string()),
+                                (17, "▅".to_string()),
+                                (18, "▅".to_string()),
+                                (19, "▅".to_string()),
+                                (20, "█".to_string()),
+                                (21, "█".to_string()),
+                                (22, "█".to_string()),
+                                (23, "█".to_string()),
+                                (24, "█".to_string()),
+                                (25, "█".to_string()),
                                 (26, "█".to_string()),
+                                (27, "█".to_string()),
                             ],
-                            "rain thresholds no longer render their visible ramp:\n{text}"
+                            "rain heights no longer render their visible band:\n{text}"
                         );
                         assert_eq!(
                             track_glyph_coordinates(
@@ -1694,13 +1691,8 @@ mod tests {
                                 "wind",
                                 &["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
                             ),
-                            vec![
-                                (12, "↖".to_string()),
-                                (14, "↑".to_string()),
-                                (16, "↑".to_string()),
-                                (18, "↑".to_string()),
-                            ],
-                            "wind sectors no longer render at their forecast hours:\n{text}"
+                            vec![(12, "↖".to_string()), (16, "↑".to_string())],
+                            "wind sectors no longer render on their cadence:\n{text}"
                         );
                     }
                     _ => unreachable!("unknown boundary case: {case}"),
@@ -1750,7 +1742,7 @@ mod tests {
     #[test]
     fn the_selected_hour_is_named_on_the_border() {
         let app = app_showing(dry_hours(48), 14);
-        let text = rendered(100, 16, &app);
+        let text = rendered(100, 24, &app);
 
         assert!(
             text.contains("2:00 PM"),

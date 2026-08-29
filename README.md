@@ -44,9 +44,11 @@ also, most weeks, what the weathergram charts.
 
 Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
 share one clock, so a change in the forecast reads down a column instead of
-across four separate tables. The selected-hour pane gives the exact feels-like
-temperature, humidity, rain or snow amount, wind and gusts, and the following
-24-hour precipitation total.
+across four separate tables. Temperature stands as a filled silhouette four
+rows tall, the chance of rain rises in a band beneath it, and the sky and wind
+rows annotate changes rather than repeating a glyph for every hour. The
+selected-hour pane gives the exact feels-like temperature, humidity, rain or
+snow amount, wind and gusts, and the following 24-hour precipitation total.
 
 The visible horizon adapts through 12-, 24-, 36-, and 48-hour tiers as the
 terminal widens. Arrow keys still browse the full eight-day hourly forecast,
@@ -194,8 +196,8 @@ in the platform's per-user state directory:
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
 The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
-hour, compact condition symbols keep columns readable, and a fixed
-rain-probability ramp makes chance comparable across the visible horizon.
+hour, a condition symbol appears where the sky becomes something new, and wind
+arrows every second hour carry their speed on the six-hour ticks.
 
 Choosing a city — or cancelling — returns to whichever screen the search was
 opened from.

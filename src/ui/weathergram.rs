@@ -1,17 +1,48 @@
+//! The weathergram: four tracks of the coming hours on one clock.
+//!
+//! The full layout is a skyline. Temperature gets four rows of filled
+//! silhouette, so a day has a shape rather than a row of five block heights,
+//! and rain gets a two-row band under it on the same floor. Ink is reserved
+//! for information: the sky row draws a symbol only where the condition
+//! becomes something new, the wind row draws an arrow every second hour with
+//! its speed on the six-hour ticks, and a dry hour in the rain band draws
+//! nothing at all. An earlier draft gave every hour one centred glyph per
+//! track, which spent most of the plot restating that nothing was changing
+//! and read as noise at 48 columns.
+//!
+//! The compact layout keeps the one-row-per-track form: below nineteen rows
+//! there is no height for a silhouette, and a single glyph per hour is the
+//! densest honest rendering left.
+
 use crate::theme::Palette;
-use crate::ui::axis::{hour_ticks_render, put, put_right, put_text};
+use crate::ui::axis::{hour_ticks_render, put, put_right, put_styled, put_text};
 use crate::ui::bars::window_start;
 use crate::ui::condition_symbol;
 use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
 use crate::units::Unit;
 use crate::weather::model::HourlyForecast;
+use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 
-pub(super) const FULL_ROWS: u16 = 8;
+/// Rows the temperature silhouette stands in.
+const TEMP_ROWS: u16 = 4;
+/// Rows the rain band stands in.
+const RAIN_ROWS: u16 = 2;
+
+/// The full interior, top to bottom: sky, the temperature silhouette, the
+/// rain band, wind, the clock axis, and the selection marker.
+const SKY_ROW: u16 = 0;
+const TEMP_ROW: u16 = 1;
+const RAIN_ROW: u16 = TEMP_ROW + TEMP_ROWS;
+const WIND_ROW: u16 = RAIN_ROW + RAIN_ROWS;
+const AXIS_ROW: u16 = WIND_ROW + 1;
+const MARKER_ROW: u16 = AXIS_ROW + 1;
+
+pub(super) const FULL_ROWS: u16 = MARKER_ROW + 1 + 2;
 pub(super) const COMPACT_ROWS: u16 = 6;
 
 const BORDER_COLS: u16 = 2;
@@ -21,6 +52,15 @@ const SUMMARY_WIDTH: u16 = 12;
 const HORIZONS: [usize; 3] = [48, 36, 24];
 const COMPACT_HORIZON: usize = 12;
 const MAX_CELL_WIDTH: u16 = 3;
+
+/// Every eighth from a floor line to a full block: the vertical resolution
+/// both bands draw with.
+const RAMP: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/// Below this chance the rain band draws dimmed, matching the week strip's
+/// faint low steps: present, but not competing with hours that would change a
+/// plan.
+const FAINT_BELOW: u8 = 30;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Window {
@@ -57,6 +97,57 @@ fn temperature_range(hours: &[HourlyForecast]) -> Option<(f64, f64)> {
     }))
 }
 
+/// Column height in eighths for the silhouette, `1..=32` between the visible
+/// extremes. The coldest visible hour keeps one line of ink, so a present
+/// reading is never confused with a missing one, and a flat window stands at
+/// half height rather than vanishing or filling the band.
+fn temperature_eighths(value: Option<f64>, range: Option<(f64, f64)>) -> Option<u16> {
+    let levels = TEMP_ROWS * 8;
+    let (Some(value), Some((min, max))) = (value, range) else {
+        return None;
+    };
+    if min == max {
+        return Some(levels / 2);
+    }
+
+    let scaled = ((value - min) / (max - min)).clamp(0.0, 1.0) * f64::from(levels - 1);
+    Some(1 + scaled.round() as u16)
+}
+
+/// Band height in sixteenths for the chance of rain, or `None` where the band
+/// stays dark. Below ten percent is deliberately no ink at all: the old ramp
+/// drew a dot for every dry hour, and a dry week became a dotted line saying
+/// nothing 48 times. The cost is that a forecast of "under 10%" and no
+/// forecast at all look alike here; the summary still tells them apart, and
+/// the inspector states the selected hour exactly.
+fn rain_sixteenths(chance: Option<u8>) -> Option<u16> {
+    let chance = chance.filter(|chance| *chance >= 10)?;
+    Some(
+        ((f64::from(chance) / 100.0) * f64::from(RAIN_ROWS * 8))
+            .round()
+            .max(1.0) as u16,
+    )
+}
+
+/// The glyph one band row shows for a column `height` eighths tall: full
+/// blocks below the surface, a partial at the surface, nothing above it.
+fn band_glyph(height: u16, rows_above_floor: u16) -> Option<&'static str> {
+    let filled = height.saturating_sub(rows_above_floor * 8).min(8);
+    (filled > 0).then(|| RAMP[filled as usize - 1])
+}
+
+/// One bottom-anchored column of a band.
+fn band_render(frame: &mut Frame, x: u16, top_y: u16, rows: u16, height: u16, style: Style) {
+    for above_floor in 0..rows {
+        let Some(glyph) = band_glyph(height, above_floor) else {
+            continue;
+        };
+        put_styled(frame, x, top_y + (rows - 1 - above_floor), glyph, style);
+    }
+}
+
+/// The five-step silhouette the compact layout keeps: one row leaves no room
+/// for a band, so height quantised to the glyph is the whole vocabulary.
 fn temperature_step(value: Option<f64>, range: Option<(f64, f64)>) -> &'static str {
     const STEPS: [&str; 5] = ["▁", "▂", "▄", "▆", "█"];
 
@@ -95,6 +186,15 @@ fn wind_symbol(speed_kph: Option<f64>, direction: Option<f64>) -> &'static str {
     };
     let normalized = degrees.rem_euclid(360.0);
     ARROWS[((normalized / 45.0).round() as usize) % ARROWS.len()]
+}
+
+/// The clock hour of a forecast timestamp, for the wind row's cadence. An
+/// unparseable stamp reports `None` and the row falls back to drawing every
+/// hour rather than hiding data behind a broken clock.
+fn clock_hour(time: &str) -> Option<u32> {
+    NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M")
+        .ok()
+        .map(|at| at.hour())
 }
 
 fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
@@ -140,6 +240,28 @@ fn wind_summary(hours: &[HourlyForecast], unit: Unit) -> String {
     )
 }
 
+/// Everything a track needs to place itself: the visible window and the
+/// measured columns the frame gave it.
+struct Plot {
+    window: Window,
+    content_x: u16,
+    plot_x: u16,
+    plot_width: u16,
+    summary_x: u16,
+}
+
+/// The colour a column's state demands, or `None` for an ordinary hour that
+/// takes its track's own colour.
+fn state_colour(palette: Palette, index: usize, selected: usize) -> Option<ratatui::style::Color> {
+    if index == selected {
+        Some(palette.selection)
+    } else if index == 0 {
+        Some(palette.now)
+    } else {
+        None
+    }
+}
+
 pub(super) fn weathergram_render(
     frame: &mut Frame,
     hours: &[HourlyForecast],
@@ -166,25 +288,180 @@ pub(super) fn weathergram_render(
     let plot_width = window.hours as u16 * window.cell_width;
     let used_width = LABEL_WIDTH + plot_width + SUMMARY_GAP + SUMMARY_WIDTH;
     let content_x = inner.x + inner.width.saturating_sub(used_width) / 2;
-    let plot_x = content_x + LABEL_WIDTH;
-    let summary_x = plot_x + plot_width + SUMMARY_GAP;
-    let axis_y = if compact { area.y } else { inner.y };
-    let first_track_y = if compact { inner.y } else { inner.y + 1 };
-    let marker_y = if compact {
-        area.bottom().saturating_sub(1)
-    } else {
-        inner.bottom().saturating_sub(1)
+    let plot = Plot {
+        window,
+        content_x,
+        plot_x: content_x + LABEL_WIDTH,
+        plot_width,
+        summary_x: content_x + LABEL_WIDTH + plot_width + SUMMARY_GAP,
     };
 
     if compact {
-        put_text(frame, area.x + 1, area.y, "Hourly", palette.muted);
+        compact_tracks_render(
+            frame, hours, visible, palette, unit, selected, &plot, area, inner,
+        );
+    } else {
+        full_tracks_render(frame, hours, visible, palette, unit, selected, &plot, inner);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn full_tracks_render(
+    frame: &mut Frame,
+    hours: &[HourlyForecast],
+    visible: &[HourlyForecast],
+    palette: Palette,
+    unit: Unit,
+    selected: usize,
+    plot: &Plot,
+    inner: Rect,
+) {
+    let window = plot.window;
+    let sky_y = inner.y + SKY_ROW;
+    let temp_y = inner.y + TEMP_ROW;
+    let rain_y = inner.y + RAIN_ROW;
+    let wind_y = inner.y + WIND_ROW;
+    let axis_y = inner.y + AXIS_ROW;
+    let marker_y = inner.y + MARKER_ROW;
+
+    // A band's label and summary sit low in the band, where its ink gathers.
+    let temp_label_y = temp_y + TEMP_ROWS / 2;
+    let rain_label_y = rain_y + RAIN_ROWS - 1;
+
+    for (label, summary, y) in [
+        ("sky", String::new(), sky_y),
+        ("temp", temperature_summary(visible, unit), temp_label_y),
+        (
+            "rain",
+            precipitation_summary(hours, selected, unit),
+            rain_label_y,
+        ),
+        ("wind", wind_summary(visible, unit), wind_y),
+    ] {
+        put_text(frame, plot.content_x, y, label, palette.muted);
+        put_right(
+            frame,
+            plot.summary_x,
+            y,
+            SUMMARY_WIDTH,
+            &summary,
+            palette.muted,
+        );
+    }
+
+    let range = temperature_range(visible);
+
+    for (offset, hour) in visible.iter().enumerate() {
+        let index = window.start + offset;
+        let x0 = plot.plot_x + offset as u16 * window.cell_width;
+        let centre = x0 + (window.cell_width - 1) / 2;
+        let state = state_colour(palette, index, selected);
+
+        // Sky: a symbol only where the condition arrives. What the reader
+        // scans for is the change, and the inspector always spells out the
+        // selected hour, so an unchanged sky needs no ink of its own.
+        let symbol = condition_symbol::symbol(hour.code);
+        let arrived =
+            offset == 0 || index == 0 || condition_symbol::symbol(hours[index - 1].code) != symbol;
+        if arrived {
+            put(frame, centre, sky_y, symbol, state.unwrap_or(palette.text));
+        }
+
+        // Temperature: every cell of the hour inked, so the silhouette is
+        // continuous rather than a picket fence of centred glyphs.
+        if let Some(height) = temperature_eighths(hour.temp_c, range) {
+            let style = Style::new().fg(state.unwrap_or(palette.accent));
+            for column in 0..window.cell_width {
+                band_render(frame, x0 + column, temp_y, TEMP_ROWS, height, style);
+            }
+        }
+
+        // Rain: the same floor. Dim below the week strip's faint threshold,
+        // except for the selection and the current hour, which are states
+        // rather than readings and draw at full strength.
+        if let Some(height) = rain_sixteenths(hour.chance) {
+            let mut style = Style::new().fg(state.unwrap_or(palette.accent));
+            if state.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            for column in 0..window.cell_width {
+                band_render(frame, x0 + column, rain_y, RAIN_ROWS, height, style);
+            }
+        }
+
+        // Wind: an arrow every second hour, its speed on the six-hour ticks.
+        // Hour after hour of near-identical arrows says less than a sparse
+        // row the eye can actually compare; the selected hour always draws so
+        // the marker below never points at a blank.
+        let clock = clock_hour(&hour.time);
+        if clock.is_none_or(|hour| hour % 2 == 0) || index == selected {
+            let arrow = wind_symbol(hour.wind_kph, hour.wind_dir_deg);
+            put(frame, centre, wind_y, arrow, state.unwrap_or(palette.text));
+
+            // Not beside the selection: the selected hour's off-cadence arrow
+            // would overprint the tick's digits, and the inspector already
+            // carries that hour's exact speed.
+            if arrow != " "
+                && clock.is_some_and(|hour| hour % 6 == 0)
+                && selected.abs_diff(index) > 1
+                && let Some(speed) = hour.wind_kph
+            {
+                let text = format!("{:.0}", unit.speed(speed));
+                if centre + 1 + text.chars().count() as u16 <= plot.plot_x + plot.plot_width {
+                    put_text(frame, centre + 1, wind_y, &text, palette.muted);
+                }
+            }
+        }
+    }
+
+    // The clock reads at the bottom, under the columns it measures, where a
+    // meteogram keeps it.
     hour_ticks_render(
         frame,
-        Rect::new(plot_x, axis_y, plot_width, 1),
+        Rect::new(plot.plot_x, axis_y, plot.plot_width, 1),
         visible.iter().map(|hour| hour.time.as_str()),
         window.cell_width,
-        u16::from(compact),
+        0,
+        if window.start == 0 {
+            palette.now
+        } else {
+            palette.muted
+        },
+        palette,
+    );
+
+    let end = window.start + visible.len();
+    if selected >= window.start && selected < end {
+        let offset = selected - window.start;
+        let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
+        put(frame, x, marker_y, "▲", palette.selection);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_tracks_render(
+    frame: &mut Frame,
+    hours: &[HourlyForecast],
+    visible: &[HourlyForecast],
+    palette: Palette,
+    unit: Unit,
+    selected: usize,
+    plot: &Plot,
+    area: Rect,
+    inner: Rect,
+) {
+    let window = plot.window;
+    let axis_y = area.y;
+    let first_track_y = inner.y;
+    let marker_y = area.bottom().saturating_sub(1);
+
+    put_text(frame, area.x + 1, area.y, "Hourly", palette.muted);
+    hour_ticks_render(
+        frame,
+        Rect::new(plot.plot_x, axis_y, plot.plot_width, 1),
+        visible.iter().map(|hour| hour.time.as_str()),
+        window.cell_width,
+        1,
         if window.start == 0 {
             palette.now
         } else {
@@ -207,8 +484,15 @@ pub(super) fn weathergram_render(
         .enumerate()
     {
         let y = first_track_y + row as u16;
-        put_text(frame, content_x, y, label, palette.muted);
-        put_right(frame, summary_x, y, SUMMARY_WIDTH, &summary, palette.muted);
+        put_text(frame, plot.content_x, y, label, palette.muted);
+        put_right(
+            frame,
+            plot.summary_x,
+            y,
+            SUMMARY_WIDTH,
+            &summary,
+            palette.muted,
+        );
 
         for (offset, hour) in visible.iter().enumerate() {
             let index = window.start + offset;
@@ -218,23 +502,21 @@ pub(super) fn weathergram_render(
                 2 => rain_step(hour.chance),
                 _ => wind_symbol(hour.wind_kph, hour.wind_dir_deg),
             };
-            let colour = if index == selected {
-                palette.selection
-            } else if index == 0 {
-                palette.now
-            } else if matches!(row, 1 | 2) {
-                palette.accent
-            } else {
-                palette.text
-            };
-            let x = plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
+            let colour =
+                state_colour(palette, index, selected).unwrap_or(if matches!(row, 1 | 2) {
+                    palette.accent
+                } else {
+                    palette.text
+                });
+            let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
             put(frame, x, y, symbol, colour);
         }
     }
 
+    let end = window.start + visible.len();
     if selected >= window.start && selected < end {
         let offset = selected - window.start;
-        let x = plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
+        let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
         put(frame, x, marker_y, "▲", palette.selection);
     }
 }
@@ -248,6 +530,13 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
+
+    /// Buffer rows the full layout's tracks land on, borders included.
+    const FULL_SKY_Y: u16 = 1 + SKY_ROW;
+    const FULL_TEMP_LABEL_Y: u16 = 1 + TEMP_ROW + TEMP_ROWS / 2;
+    const FULL_TEMP_FLOOR_Y: u16 = 1 + TEMP_ROW + TEMP_ROWS - 1;
+    const FULL_WIND_Y: u16 = 1 + WIND_ROW;
+    const FULL_AXIS_Y: u16 = 1 + AXIS_ROW;
 
     #[test]
     fn horizons_are_quantized_from_measured_plot_width() {
@@ -264,6 +553,43 @@ mod tests {
         }
         assert_eq!(window_for(80, 24, 192).start, 24);
         assert_eq!(window_for(80, 191, 192).start, 168);
+    }
+
+    #[test]
+    fn the_silhouette_scales_between_the_visible_extremes() {
+        let range = Some((10.0, 20.0));
+        assert_eq!(temperature_eighths(Some(10.0), range), Some(1));
+        assert_eq!(temperature_eighths(Some(20.0), range), Some(32));
+        assert_eq!(temperature_eighths(Some(15.0), range), Some(17));
+        assert_eq!(
+            temperature_eighths(Some(12.0), Some((12.0, 12.0))),
+            Some(16)
+        );
+        assert_eq!(temperature_eighths(None, range), None);
+        assert_eq!(temperature_eighths(Some(10.0), None), None);
+    }
+
+    #[test]
+    fn the_rain_band_inks_nothing_below_ten_percent() {
+        assert_eq!(rain_sixteenths(None), None);
+        assert_eq!(rain_sixteenths(Some(0)), None);
+        assert_eq!(rain_sixteenths(Some(9)), None);
+        assert_eq!(rain_sixteenths(Some(10)), Some(2));
+        assert_eq!(rain_sixteenths(Some(29)), Some(5));
+        assert_eq!(rain_sixteenths(Some(50)), Some(8));
+        assert_eq!(rain_sixteenths(Some(69)), Some(11));
+        assert_eq!(rain_sixteenths(Some(100)), Some(16));
+    }
+
+    #[test]
+    fn band_rows_fill_from_the_floor() {
+        assert_eq!(band_glyph(16, 0), Some("█"));
+        assert_eq!(band_glyph(16, 1), Some("█"));
+        assert_eq!(band_glyph(16, 2), None);
+        assert_eq!(band_glyph(3, 0), Some("▃"));
+        assert_eq!(band_glyph(3, 1), None);
+        assert_eq!(band_glyph(11, 1), Some("▃"));
+        assert_eq!(band_glyph(0, 0), None);
     }
 
     #[test]
@@ -346,6 +672,102 @@ mod tests {
         );
     }
 
+    /// The sky row annotates arrivals. A constant sky is one symbol at the
+    /// window edge, not one per hour.
+    #[test]
+    fn the_sky_row_marks_changes_rather_than_every_hour() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.code = Some(0);
+        }
+        for hour in weather.hourly.iter_mut().skip(now + 5).take(3) {
+            hour.code = Some(61);
+        }
+
+        let buffer = rendered_buffer_in(
+            &weather,
+            80,
+            FULL_ROWS,
+            0,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+        let glyphs: Vec<(u16, String)> = (1..79)
+            .filter_map(|x| {
+                let symbol = buffer[(x, FULL_SKY_Y)].symbol();
+                ["○", "◐", "●", "≡", "┆", "│", "*", "ϟ", "?"]
+                    .contains(&symbol)
+                    .then(|| (x, symbol.to_string()))
+            })
+            .collect();
+
+        assert_eq!(
+            glyphs,
+            vec![
+                (12, "○".to_string()),
+                (22, "│".to_string()),
+                (28, "○".to_string()),
+            ],
+            "sky ink should mark only the window edge and the two changes"
+        );
+    }
+
+    /// Every visible hour with a reading inks every cell of its column, so the
+    /// silhouette reads as one shape instead of a picket fence.
+    #[test]
+    fn the_silhouette_floor_is_continuous() {
+        let weather = Weather::fixture(22, 14);
+        let buffer = rendered_buffer_in(
+            &weather,
+            80,
+            FULL_ROWS,
+            0,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+        for x in 12..60 {
+            assert!(
+                RAMP.contains(&buffer[(x, FULL_TEMP_FLOOR_Y)].symbol()),
+                "column {x} broke the silhouette floor"
+            );
+        }
+    }
+
+    /// Wind draws every second hour with speeds on the six-hour ticks, and
+    /// keeps the digits away from the selection's own arrow.
+    #[test]
+    fn the_wind_row_keeps_a_sparse_cadence_with_speeds_on_the_ticks() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.wind_kph = Some(20.0);
+            hour.wind_dir_deg = Some(0.0);
+        }
+        let palette = Theme::default().palette();
+
+        let buffer = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
+        let arrows: Vec<u16> = (0..80)
+            .filter(|x| buffer[(*x, FULL_WIND_Y)].symbol() == "↑")
+            .collect();
+        assert_eq!(
+            arrows,
+            vec![12, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56],
+            "even clock hours plus the selected hour"
+        );
+        assert_eq!(buffer[(13, FULL_WIND_Y)].symbol(), "2", "tick speed digits");
+        assert_eq!(buffer[(14, FULL_WIND_Y)].symbol(), "0", "tick speed digits");
+
+        let beside = rendered_buffer_in(&weather, 80, FULL_ROWS, 1, false, palette, Unit::Metric);
+        assert_eq!(
+            beside[(13, FULL_WIND_Y)].symbol(),
+            " ",
+            "digits beside the selection would collide with its arrow"
+        );
+    }
+
     /// The selection keeps its shape in monochrome, while the opening label
     /// still states the current day and time without a separate marker.
     #[test]
@@ -394,7 +816,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let axis_y = if compact { 0 } else { 1 };
+            let axis_y = if compact { 0 } else { FULL_AXIS_Y };
             let anchor_x = (1..width - 1)
                 .find(|x| buffer[(*x, axis_y)].symbol() == "S")
                 .expect("current time anchor");
@@ -412,12 +834,11 @@ mod tests {
             assert!(text.contains('▲'), "selection marker missing:\n{text}");
 
             if !compact {
-                let sky_y = 2;
                 let label_x = (1..width - 3)
                     .find(|x| {
-                        buffer[(*x, sky_y)].symbol() == "s"
-                            && buffer[(*x + 1, sky_y)].symbol() == "k"
-                            && buffer[(*x + 2, sky_y)].symbol() == "y"
+                        buffer[(*x, FULL_SKY_Y)].symbol() == "s"
+                            && buffer[(*x + 1, FULL_SKY_Y)].symbol() == "k"
+                            && buffer[(*x + 2, FULL_SKY_Y)].symbol() == "y"
                     })
                     .expect("sky label");
                 assert_eq!(anchor_x, label_x + LABEL_WIDTH);
@@ -441,23 +862,21 @@ mod tests {
             Theme::default().palette(),
             Unit::Metric,
         );
-        let axis_y = 1;
-        let sky_y = 2;
         let label_x = (1..width - 3)
             .find(|x| {
-                buffer[(*x, sky_y)].symbol() == "s"
-                    && buffer[(*x + 1, sky_y)].symbol() == "k"
-                    && buffer[(*x + 2, sky_y)].symbol() == "y"
+                buffer[(*x, FULL_SKY_Y)].symbol() == "s"
+                    && buffer[(*x + 1, FULL_SKY_Y)].symbol() == "k"
+                    && buffer[(*x + 2, FULL_SKY_Y)].symbol() == "y"
             })
             .expect("sky label");
         let plot_x = label_x + LABEL_WIDTH;
         let first_axis_x = (1..width - 1)
-            .find(|x| !buffer[(*x, axis_y)].symbol().trim().is_empty())
+            .find(|x| !buffer[(*x, FULL_AXIS_Y)].symbol().trim().is_empty())
             .expect("leading axis anchor");
 
         assert_eq!(first_axis_x, plot_x);
         assert_eq!(
-            buffer[(first_axis_x, axis_y)].fg,
+            buffer[(first_axis_x, FULL_AXIS_Y)].fg,
             Theme::default().palette().muted,
             "a later page presented its anchor as the current time"
         );
@@ -483,9 +902,8 @@ mod tests {
             Theme::default().palette(),
             Unit::Metric,
         );
-        let temp_y = 3;
         let occupied: Vec<u16> = (1..width - 1)
-            .filter(|x| !buffer[(*x, temp_y)].symbol().trim().is_empty())
+            .filter(|x| !buffer[(*x, FULL_TEMP_LABEL_Y)].symbol().trim().is_empty())
             .collect();
         let first = *occupied.first().expect("temperature row content");
         let last = *occupied.last().expect("temperature row content");
@@ -512,7 +930,7 @@ mod tests {
         );
         let selected = marker_coordinates(&baseline, 80, FULL_ROWS, "▲");
         let anchor_x = (1..79)
-            .find(|x| baseline[(*x, 1)].symbol() == "S")
+            .find(|x| baseline[(*x, FULL_AXIS_Y)].symbol() == "S")
             .expect("current time anchor");
 
         for theme in Theme::ALL {
@@ -526,7 +944,7 @@ mod tests {
                 theme.name()
             );
             assert_eq!(
-                buffer[(anchor_x, 1)].fg,
+                buffer[(anchor_x, FULL_AXIS_Y)].fg,
                 palette.now,
                 "{} did not style the current time anchor",
                 theme.name()
