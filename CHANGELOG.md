@@ -31,6 +31,24 @@ refuse to publish a version this file does not describe.
   the session, and an unusable value warns and stays imperial rather than
   refusing to run.
 
+### Security
+
+Hardening from a security audit of 0.4.0, all of it against inputs that
+arrive over the network claiming to be something they are not:
+
+- Release tags now reject pre-release markers outside semver's `0-9A-Za-z.-`
+  alphabet, so a hostile redirect cannot put a terminal escape sequence in
+  the update notice.
+- Place names from the geocoding and location services are stripped of
+  control characters and bidi overrides before they are kept or shown;
+  joiners survive, so Persian and Indic names still spell correctly.
+- Forecast series are capped at 64 days rather than believed, and the
+  forecast table's layout arithmetic saturates, so an oversized response
+  cannot overflow it.
+- The install script verifies the binary's build provenance with
+  `gh attestation verify` when an authenticated `gh` is available, and says
+  when it could not.
+
 ## [0.4.0] - 2026-08-28
 
 Two commands where Virga had none. It still takes no options that change how
