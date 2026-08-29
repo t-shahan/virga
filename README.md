@@ -72,6 +72,8 @@ weathergram.
   address resolves to, and a city you pick yourself replaces it permanently.
 - **City search and live units** — search Open-Meteo's geocoder and switch
   between metric and imperial measurements without restarting.
+- **A one-shot report** — `virga now` prints current conditions and today's
+  outlook to stdout and exits, for a glance, a script, or a status bar.
 - **Terminal-native presentation** — seven foreground-only themes, including
   one for light backgrounds, and responsive behavior down to a 34×12 terminal.
 
@@ -211,17 +213,38 @@ What the command line answers, it answers without starting up.
 | Command | What it does |
 |---|---|
 | `virga` | Start the application |
+| `virga now` | Print current conditions and today's outlook for the remembered city |
+| `virga now CITY` | The same for a searched city, e.g. `virga now paris`; multi-word names need no quotes |
 | `virga theme` | List the themes, marking the startup default with `*` |
 | `virga theme NAME` | Persist a startup theme, e.g. `virga theme tokyo night`; multi-word names need no quotes |
 | `virga update` | Check whether a newer release exists and print how to get it |
 | `virga help` / `-h` / `--help` | Print the usage text |
 | `virga version` / `-V` / `--version` | Print the version |
 
+`virga now` is the whole forecast reduced to a glance — the same sources, the
+same city the app would open with, and none of the terminal:
+
+```
+$ virga now
+Frederick, Maryland, United States · Partly cloudy
+75°F, feels like 78°F · wind 7 mph · AQI 42 Good
+Today: 84°F / 63°F · rain 20% · UV 6 · sun 06:24–20:07
+```
+
+Plain lines on stdout, so a script or a status bar reads it as easily as a
+person does; a reading the provider did not report simply does not appear.
+Set `VIRGA_UNITS=metric` to change what a degree is, here and on the app's
+first frame. Asking about a named city is a question, not a move — the
+remembered city stays whatever it was. And when nothing is remembered yet,
+the one location lookup `virga now` makes is remembered afterwards, so a
+status bar polling by the minute asks the location provider once, not once
+per poll.
+
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went
 unanswered. Neither `virga update` nor the startup check replaces the binary; see
 [Updating and removing](#updating-and-removing) for the command that does, and
-[Configuration](#configuration) for the three environment variables.
+[Configuration](#configuration) for the four environment variables.
 
 ## Architecture
 
@@ -257,7 +280,9 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's locked deterministic test suite passes on Linux, macOS, and Windows.
+Virga's default locked test suite passes **387 deterministic tests**; four
+provider-dependent live tests — three against Open-Meteo, one against
+GitHub's release redirect — are ignored during normal runs.
 Coverage includes:
 
 - deterministic rendering checks built with Ratatui's `TestBackend`, including
@@ -355,8 +380,11 @@ value prints a warning and leaves detection on rather than refusing to run.
 
 `virga theme` persists the startup palette, `VIRGA_THEME` overrides it for one
 launch, `VIRGA_GEOIP` turns location detection off, and `VIRGA_UPDATE` turns
-the startup release check off, all as described above. Unit and theme changes
-made in the app last for the session.
+the startup release check off, all as described above. `VIRGA_UNITS` picks
+`metric` or `imperial` — `celsius`/`c` and `fahrenheit`/`f` also answer — for
+the `virga now` report and the app's first frame alike; imperial when unset,
+which is what the app has always started in. Unit and theme changes made in
+the app last for the session.
 
 Nothing else is configurable. The command line takes no options at all, only
 the questions [Commands](#commands) lists.
@@ -403,7 +431,8 @@ still publishes and only the tap update is skipped, with a warning.
 
 - There is no general configuration file, and weather is never cached. Every
   launch fetches fresh weather; only the startup theme and location are
-  persisted, and units last for the session.
+  persisted, and units follow `VIRGA_UNITS` at startup and last for the
+  session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
@@ -422,6 +451,9 @@ Weather, air quality, and geocoding all come from
 [Open-Meteo](https://open-meteo.com), which needs no API key. Its free tier is
 **for non-commercial use only** and is rate limited to 10,000 calls per day.
 Each weather load makes two requests, and each submitted search makes a third.
+`virga now` asks the same questions the same way — two requests per report,
+one more for a named city, and the location lookup only on a first run where
+nothing is remembered.
 
 Location detection is the one thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to

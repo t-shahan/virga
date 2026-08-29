@@ -21,14 +21,30 @@ pub struct GeocodeDto {
     pub results: Vec<GeocodeResultDto>,
 }
 
+/// A place name, minus the characters that are instructions rather than
+/// text. Control characters would be escape sequences on the one path that
+/// prints a label raw — a warning written after the terminal is restored —
+/// and bidi overrides reorder whatever is rendered next to the name. Both
+/// arrive off the network claiming to be part of a city's name, and neither
+/// ever is. Joiners (ZWJ/ZWNJ) stay: real names in Persian and Indic
+/// scripts need them.
+fn plain(mut text: String) -> String {
+    const BIDI_CONTROLS: [char; 12] = [
+        '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+        '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ];
+    text.retain(|c| !c.is_control() && !BIDI_CONTROLS.contains(&c));
+    text
+}
+
 impl GeocodeResultDto {
     /// A result without coordinates cannot be fetched for, so it is dropped
     /// rather than surfaced as an unselectable row.
     pub fn into_location(self) -> Option<Location> {
         Some(Location {
-            name: self.name,
-            admin1: self.admin1,
-            country: self.country,
+            name: plain(self.name),
+            admin1: self.admin1.map(plain),
+            country: self.country.map(plain),
             lat: self.latitude?,
             lon: self.longitude?,
         })
@@ -85,9 +101,9 @@ impl GeoIpDto {
         };
 
         Some(Location {
-            name,
-            admin1,
-            country,
+            name: plain(name),
+            admin1: admin1.map(plain),
+            country: country.map(plain),
             lat,
             lon,
         })
@@ -179,6 +195,15 @@ pub struct HourlyDto {
     pub wind_direction_10m: Vec<Option<f64>>,
 }
 
+/// The most days a response is believed. The requests ask for 8 forecast
+/// days and 14 past ones, so a well-behaved answer is 22; the cap only
+/// exists because the answer's length is the server's word, and layout
+/// arithmetic and per-frame regrouping downstream should not have to hold
+/// up under half a million rows of a hostile one. Generous on purpose: a
+/// future request asking for more history should not silently truncate.
+const MAX_DAYS: usize = 64;
+const MAX_HOURS: usize = MAX_DAYS * 24;
+
 /// `values[i]`, collapsing "index out of range" and "value was null" into the
 /// same `None` — the caller cares about neither distinction.
 fn at<T: Copy>(values: &[Option<T>], i: usize) -> Option<T> {
@@ -213,7 +238,7 @@ impl From<ForecastDto> for Weather {
         // `?` on the core four drops a day that is missing them; the
         // supplementary readings stay Option, so a null UV only blanks a cell.
         let day = &dto.daily;
-        let daily: Vec<DailyForecast> = (0..day.time.len())
+        let daily: Vec<DailyForecast> = (0..day.time.len().min(MAX_DAYS))
             .filter_map(|i| {
                 Some(DailyForecast {
                     date: day.time.get(i)?.clone(),
@@ -247,7 +272,7 @@ impl From<ForecastDto> for Weather {
         // Same index-by-position shape as `daily`, for the same reason: many
         // parallel arrays make a zip chain unreadable.
         let hourly: Vec<HourlyForecast> = dto.hourly.map_or_else(Vec::new, |hour| {
-            (0..hour.time.len())
+            (0..hour.time.len().min(MAX_HOURS))
                 .filter_map(|i| {
                     Some(HourlyForecast {
                         time: hour.time.get(i)?.clone(),
@@ -334,7 +359,7 @@ impl From<AqiDto> for AirQualityReport {
         // it is the worst the air got, not an average that hides a bad hour.
         let mut daily_max: HashMap<String, u16> = HashMap::new();
         if let Some(hourly) = dto.hourly {
-            for (stamp, value) in hourly.time.into_iter().zip(hourly.us_aqi) {
+            for (stamp, value) in hourly.time.into_iter().take(MAX_HOURS).zip(hourly.us_aqi) {
                 let (Some(value), Some(date)) = (value, stamp.get(..10)) else {
                     continue;
                 };
@@ -718,6 +743,81 @@ mod tests {
                 .all(|h| h.time.as_str() >= "2026-08-09T02:00"),
             "nothing before now survives the slice"
         );
+    }
+
+    /// Place names arrive off the network and end up on screen — and, via the
+    /// state file, occasionally on the raw terminal. A name carrying escape
+    /// sequences or bidi overrides is carrying instructions, not spelling.
+    #[test]
+    fn place_names_are_stripped_of_control_and_bidi_characters() {
+        // The control characters go; whatever text rode between them stays,
+        // now inert — neutralizing is the job, not reconstructing.
+        let geocode = GeocodeResultDto {
+            name: "Par\u{1b}is\u{7}\n".to_string(),
+            admin1: Some("Île-de-\u{202e}France".to_string()),
+            country: Some("Fra\u{200f}nce".to_string()),
+            latitude: Some(48.85),
+            longitude: Some(2.35),
+        };
+        let location = geocode.into_location().expect("a location");
+        assert_eq!(location.label(), "Paris, Île-de-France, France");
+
+        // The overrides ride JSON's own \u escapes so the hostile
+        // characters are visible in this source rather than reordering it.
+        let geoip: GeoIpDto = serde_json::from_str(
+            r#"{"city":"Reykjav\u00edk","region":"Capital\u202e Region",
+                "country_name":"Ice\u2066land","latitude":64.1,"longitude":-21.9}"#,
+        )
+        .expect("should parse");
+        let location = geoip.into_location().expect("a location");
+        assert_eq!(location.label(), "Reykjavík, Capital Region, Iceland");
+    }
+
+    /// Joiners are not overrides: names in Persian and Indic scripts need
+    /// them, so stripping instructions must not misspell real places.
+    #[test]
+    fn joiners_in_place_names_survive_the_stripping() {
+        let geocode = GeocodeResultDto {
+            // "Bandar-e ʿAbbās" spelled with a ZWNJ, as Persian text uses.
+            name: "بندر\u{200c}عباس".to_string(),
+            admin1: None,
+            country: None,
+            latitude: Some(27.18),
+            longitude: Some(56.26),
+        };
+        let location = geocode.into_location().expect("a location");
+        assert_eq!(location.name, "بندر\u{200c}عباس");
+    }
+
+    /// The series length is the server's word. A response carrying half a
+    /// million rows is not a forecast, and everything downstream — layout
+    /// arithmetic, the per-frame regroup — deserves a bound it can trust.
+    #[test]
+    fn oversized_series_are_capped_rather_than_believed() {
+        let days: Vec<String> = (0..MAX_DAYS + 40)
+            .map(|i| format!("2100-01-01+{i}"))
+            .collect();
+        let hours: Vec<String> = (0..MAX_HOURS + 40)
+            .map(|i| format!("2100-01-01T00:00+{i}"))
+            .collect();
+        let json = serde_json::json!({
+            "current": {"time": "2026-08-09T14:30", "temperature_2m": 20.0,
+                        "apparent_temperature": 20.0, "weather_code": 0, "wind_speed_10m": 5.0},
+            "daily": {
+                "time": days,
+                "weather_code": vec![0; MAX_DAYS + 40],
+                "temperature_2m_max": vec![30.0; MAX_DAYS + 40],
+                "temperature_2m_min": vec![20.0; MAX_DAYS + 40],
+            },
+            "hourly": {"time": hours},
+        });
+
+        let weather: Weather = serde_json::from_value::<ForecastDto>(json)
+            .expect("should parse")
+            .into();
+
+        assert_eq!(weather.daily.len(), MAX_DAYS);
+        assert_eq!(weather.hourly.len(), MAX_HOURS);
     }
 
     #[test]

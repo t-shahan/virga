@@ -15,6 +15,11 @@ pub(crate) enum Invocation {
     Run,
     Version,
     Help,
+    /// Print current conditions and today's outlook, then exit — for a
+    /// glance, a script, or a status bar. Without an argument it asks about
+    /// the remembered city; with one it looks the city up, everything after
+    /// `now` joined with spaces so multi-word names need no quoting.
+    Now(Option<String>),
     /// List the themes, or — with a name — persist one as the startup
     /// default. The name is everything after `theme` joined with spaces, so
     /// multi-word names need no quoting.
@@ -33,8 +38,9 @@ pub(crate) enum Invocation {
 
 /// Classify the arguments, ignoring `argv[0]`.
 ///
-/// The first argument decides everything. Only `theme` reads past it — the
-/// rest of the line is its argument — because nothing else combines: whatever
+/// The first argument decides everything. Only `now` and `theme` read past
+/// it — the rest of the line is their argument — because nothing else
+/// combines: whatever
 /// the first argument asks for is the whole answer, and `virga --help
 /// --version` printing help is as good as any other rule. An unrecognized
 /// argument is an error rather than something to skip past — a typo must not
@@ -53,6 +59,13 @@ where
     match argument.as_ref() {
         "-V" | "--version" | "version" => Invocation::Version,
         "-h" | "--help" | "help" => Invocation::Help,
+        "now" => {
+            let city = arguments
+                .map(|argument| argument.as_ref().to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Invocation::Now((!city.is_empty()).then_some(city))
+        }
         "theme" => {
             let name = arguments
                 .map(|argument| argument.as_ref().to_string())
@@ -81,6 +94,7 @@ virga {version}
 Usage: virga [COMMAND]
 
 Commands:
+  now [CITY]     Print current conditions and today's outlook
   theme [NAME]   List the themes, or set the startup default
   update         Check whether a newer release exists
   help, version  What -h and -V print
@@ -94,6 +108,7 @@ and the bar along the bottom names them. `q` quits.
 
 Environment:
   VIRGA_THEME   Startup palette, for one launch
+  VIRGA_UNITS   `metric` or `imperial`, for `now` and the app's first frame
   VIRGA_GEOIP   Set to `off` to skip the IP location lookup
   VIRGA_UPDATE  Set to `off` to skip the startup release check
 
@@ -165,6 +180,23 @@ mod tests {
     }
 
     #[test]
+    fn now_alone_asks_about_the_remembered_city() {
+        assert_eq!(parse_args(["now"]), Invocation::Now(None));
+    }
+
+    #[test]
+    fn now_joins_its_arguments_so_multiword_cities_need_no_quotes() {
+        assert_eq!(
+            parse_args(["now", "new", "york"]),
+            Invocation::Now(Some("new york".to_string()))
+        );
+        assert_eq!(
+            parse_args(["now", "paris"]),
+            Invocation::Now(Some("paris".to_string()))
+        );
+    }
+
+    #[test]
     fn theme_joins_its_arguments_so_multiword_names_need_no_quotes() {
         assert_eq!(
             parse_args(["theme", "tokyo", "night"]),
@@ -200,13 +232,15 @@ mod tests {
     }
 
     #[test]
-    fn usage_names_the_commands_and_both_environment_variables() {
+    fn usage_names_the_commands_and_every_environment_variable() {
         let text = usage();
         assert!(text.starts_with("virga "));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(text.contains("now"));
         assert!(text.contains("theme"));
         assert!(text.contains("update"));
         assert!(text.contains("VIRGA_THEME"));
+        assert!(text.contains("VIRGA_UNITS"));
         assert!(text.contains("VIRGA_GEOIP"));
         assert!(text.contains("VIRGA_UPDATE"));
     }

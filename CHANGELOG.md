@@ -20,11 +20,45 @@ refuse to publish a version this file does not describe.
   marks the sky every three hours, the wind row carries an arrow every second
   hour, and exact selected-hour details and the weekly precipitation strip
   remain when the terminal is tall enough.
+- **`virga now [CITY]`**: print current conditions and today's outlook, then
+  exit — for a glance, a script, or a status bar. Alone it asks about the
+  same city the app would open with: the remembered one, or a fresh
+  detection when nothing is remembered, falling back to New York when the
+  network will not say. What detection finds is remembered, so a status bar
+  polling by the minute asks the location provider once, not once per poll.
+  With a city — `virga now paris`; multi-word names need no quotes — it asks
+  Open-Meteo's geocoder and reports the best match without touching the
+  remembered city. Every reading in the report is optional and a missing one
+  vanishes rather than printing a dash.
+- **`VIRGA_UNITS`**: choose `metric` or `imperial` — `celsius`/`c` and
+  `fahrenheit`/`f` also answer — for the `now` report and the app's first
+  frame alike, so nobody metric has to press `u` every launch. Imperial when
+  unset, which is what the app has always started in; `u` still toggles for
+  the session, and an unusable value warns and stays imperial rather than
+  refusing to run.
 
 ### Changed
 
 - The default terminal theme uses normal gray for muted labels so they remain
   legible in Terminal.app and Ghostty while staying quieter than readings.
+
+### Security
+
+Hardening from a security audit of 0.4.0, all of it against inputs that
+arrive over the network claiming to be something they are not:
+
+- Release tags now reject pre-release markers outside semver's `0-9A-Za-z.-`
+  alphabet, so a hostile redirect cannot put a terminal escape sequence in
+  the update notice.
+- Place names from the geocoding and location services are stripped of
+  control characters and bidi overrides before they are kept or shown;
+  joiners survive, so Persian and Indic names still spell correctly.
+- Forecast series are capped at 64 days rather than believed, and the
+  forecast table's layout arithmetic saturates, so an oversized response
+  cannot overflow it.
+- The install script verifies the binary's build provenance with
+  `gh attestation verify` when an authenticated `gh` is available, and says
+  when it could not.
 
 ## [0.4.0] - 2026-08-28
 
