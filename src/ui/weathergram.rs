@@ -710,7 +710,7 @@ mod tests {
         let glyphs: Vec<(u16, String)> = (1..79)
             .filter_map(|x| {
                 let symbol = buffer[(x, FULL_SKY_Y)].symbol();
-                ["○", "◐", "●", "≡", "┆", "│", "*", "ϟ", "?"]
+                ["○", "⊙", "●", "≡", "┆", "│", "*", "ϟ", "?"]
                     .contains(&symbol)
                     .then(|| (x, symbol.to_string()))
             })
