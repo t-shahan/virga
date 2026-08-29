@@ -1628,7 +1628,26 @@ mod tests {
                                 width,
                                 height,
                                 "sky",
-                                &["○", "⊙", "●", "≡", "┆", "│", "*", "ϟ", "?"]
+                                &[
+                                    "○",
+                                    "⊙",
+                                    "●",
+                                    "≡",
+                                    "┆",
+                                    "│",
+                                    "*",
+                                    "ϟ",
+                                    "?",
+                                    "☀\u{fe0f}",
+                                    "⛅",
+                                    "☁\u{fe0f}",
+                                    "🌫\u{fe0f}",
+                                    "🌦\u{fe0f}",
+                                    "🌧\u{fe0f}",
+                                    "❄\u{fe0f}",
+                                    "⛈\u{fe0f}",
+                                    "❓"
+                                ]
                             )
                             .is_empty(),
                             "missing conditions drew a weather symbol:\n{text}"

@@ -16,10 +16,10 @@ refuse to publish a version this file does not describe.
 
 - **An adaptive hourly weathergram.** Press `p` to inspect sky conditions,
   temperature, precipitation, and wind on one shared 12- to 48-hour timeline.
-  Temperature draws as a filled silhouette above a rain band, the sky and wind
-  rows annotate changes rather than every hour, and exact selected-hour
-  details and the weekly precipitation strip remain when the terminal is tall
-  enough.
+  Temperature draws as a filled silhouette above a rain band, a weather emoji
+  marks the sky every three hours, the wind row carries an arrow every second
+  hour, and exact selected-hour details and the weekly precipitation strip
+  remain when the terminal is tall enough.
 
 ### Changed
 

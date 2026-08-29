@@ -3,12 +3,12 @@
 //! The full layout is a skyline. Temperature gets four rows of filled
 //! silhouette, so a day has a shape rather than a row of five block heights,
 //! and rain gets a two-row band under it on the same floor. Ink is reserved
-//! for information: the sky row is a faint rail carrying a symbol only where
-//! the condition becomes something new, the wind row draws an arrow every
-//! second hour with its speed on the six-hour ticks, and a dry hour in the
-//! rain band draws nothing at all. An earlier draft gave every hour one
-//! centred glyph per track, which spent most of the plot restating that
-//! nothing was changing and read as noise at 48 columns.
+//! for information: the sky row is a faint rail carrying the condition's
+//! emoji every third hour, the wind row draws an arrow every second hour
+//! with its speed on the six-hour ticks, and a dry hour in the rain band
+//! draws nothing at all. An earlier draft gave every hour one centred glyph
+//! per track, which spent most of the plot restating that nothing was
+//! changing and read as noise at 48 columns.
 //!
 //! The compact layout keeps the one-row-per-track form: below nineteen rows
 //! there is no height for a silhouette, and a single glyph per hour is the
@@ -188,9 +188,10 @@ fn wind_symbol(speed_kph: Option<f64>, direction: Option<f64>) -> &'static str {
     ARROWS[((normalized / 45.0).round() as usize) % ARROWS.len()]
 }
 
-/// The clock hour of a forecast timestamp, for the wind row's cadence. An
-/// unparseable stamp reports `None` and the row falls back to drawing every
-/// hour rather than hiding data behind a broken clock.
+/// The clock hour of a forecast timestamp, for the sky and wind cadences. An
+/// unparseable stamp reports `None` and each row falls back to a cadence
+/// counted from the window edge rather than hiding data behind a broken
+/// clock.
 fn clock_hour(time: &str) -> Option<u32> {
     NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M")
         .ok()
@@ -357,21 +358,41 @@ fn full_tracks_render(
         let x0 = plot.plot_x + offset as u16 * window.cell_width;
         let centre = x0 + (window.cell_width - 1) / 2;
         let state = state_colour(palette, index, selected);
+        let clock = clock_hour(&hour.time);
 
-        // Sky: a faint rail across every known hour, with a symbol where the
-        // condition arrives. The rail is what keeps the sparse glyphs from
-        // reading as leftovers: the line says the condition holds, the symbol
-        // says it changed here, and a gap says the provider made no claim,
-        // which a bare change-only row could not distinguish from calm.
-        let symbol = condition_symbol::symbol(hour.code);
-        let arrived =
-            offset == 0 || index == 0 || condition_symbol::symbol(hours[index - 1].code) != symbol;
-        for column in 0..window.cell_width {
-            let x = x0 + column;
-            if arrived && x == centre {
-                put(frame, x, sky_y, symbol, state.unwrap_or(palette.text));
-            } else if symbol != " " {
-                put_styled(frame, x, sky_y, "─", rail);
+        // Sky: the condition's emoji every third clock hour, on a faint rail.
+        // The steady cadence is what keeps the row from reading as scattered
+        // leftovers, and a two-cell emoji spans its two-cell hour column
+        // exactly, so the symbols sit centred where one-cell glyphs never
+        // could. The rail still says the condition is known between marks,
+        // and a gap still says the provider made no claim. An hour column too
+        // narrow for a wide glyph falls back to the one-cell text symbol.
+        let known = condition_symbol::symbol(hour.code) != " ";
+        let cadence = clock.map_or(offset % 3 == 0, |hour| hour % 3 == 0);
+        let emoji_cells = if cadence && known && window.cell_width >= 2 {
+            put(
+                frame,
+                x0,
+                sky_y,
+                condition_symbol::emoji(hour.code),
+                state.unwrap_or(palette.text),
+            );
+            2
+        } else if cadence && known {
+            put(
+                frame,
+                centre,
+                sky_y,
+                condition_symbol::symbol(hour.code),
+                state.unwrap_or(palette.text),
+            );
+            1
+        } else {
+            0
+        };
+        if known {
+            for column in emoji_cells..window.cell_width {
+                put_styled(frame, x0 + column, sky_y, "─", rail);
             }
         }
 
@@ -401,8 +422,7 @@ fn full_tracks_render(
         // Hour after hour of near-identical arrows says less than a sparse
         // row the eye can actually compare; the selected hour always draws so
         // the marker below never points at a blank.
-        let clock = clock_hour(&hour.time);
-        if clock.is_none_or(|hour| hour % 2 == 0) || index == selected {
+        if clock.map_or(offset % 2 == 0, |hour| hour % 2 == 0) || index == selected {
             let arrow = wind_symbol(hour.wind_kph, hour.wind_dir_deg);
             put(frame, centre, wind_y, arrow, state.unwrap_or(palette.text));
 
@@ -680,21 +700,21 @@ mod tests {
         );
     }
 
-    /// The sky row is a rail with symbols where the condition changes. A
-    /// constant sky is one symbol at the window edge on a quiet line, an
-    /// unchanged hour carries the rail, and a missing code leaves a gap
-    /// rather than pretending the sky held.
+    /// The sky row carries the condition's emoji every third clock hour on
+    /// a faint rail. The rail covers known hours between marks, each
+    /// two-cell emoji spans its two-cell hour column exactly, and a missing
+    /// code leaves a gap rather than pretending the sky held.
     #[test]
-    fn the_sky_row_rails_known_hours_and_marks_changes() {
+    fn the_sky_row_carries_emoji_on_a_three_hour_cadence() {
         let mut weather = Weather::fixture(22, 14);
         let now = weather.now_hour;
         for hour in weather.hourly.iter_mut().skip(now) {
             hour.code = Some(0);
         }
-        for hour in weather.hourly.iter_mut().skip(now + 5).take(3) {
+        for hour in weather.hourly.iter_mut().skip(now + 3).take(3) {
             hour.code = Some(61);
         }
-        for hour in weather.hourly.iter_mut().skip(now + 10).take(2) {
+        for hour in weather.hourly.iter_mut().skip(now + 9).take(3) {
             hour.code = None;
         }
 
@@ -707,37 +727,157 @@ mod tests {
             Theme::default().palette(),
             Unit::Metric,
         );
-        let glyphs: Vec<(u16, String)> = (1..79)
-            .filter_map(|x| {
-                let symbol = buffer[(x, FULL_SKY_Y)].symbol();
-                ["○", "⊙", "●", "≡", "┆", "│", "*", "ϟ", "?"]
-                    .contains(&symbol)
-                    .then(|| (x, symbol.to_string()))
-            })
-            .collect();
 
+        // The forecast opens at midnight, so the cadence lands on offsets
+        // 0, 3, 6, ... and each emoji starts at its hour's first cell.
         assert_eq!(
-            glyphs,
-            vec![
-                (12, "○".to_string()),
-                (22, "│".to_string()),
-                (28, "○".to_string()),
-                (36, "○".to_string()),
-            ],
-            "sky symbols should mark only the window edge and the changes"
+            buffer[(12, FULL_SKY_Y)].symbol(),
+            "\u{2600}\u{fe0f}",
+            "clear at 12a"
         );
-        for x in [13, 21, 27, 31, 58] {
+        assert_eq!(
+            buffer[(18, FULL_SKY_Y)].symbol(),
+            "\u{1F327}\u{fe0f}",
+            "rain at 3a"
+        );
+        assert_eq!(
+            buffer[(24, FULL_SKY_Y)].symbol(),
+            "\u{2600}\u{fe0f}",
+            "clear at 6a"
+        );
+        assert_eq!(
+            buffer[(36, FULL_SKY_Y)].symbol(),
+            "\u{2600}\u{fe0f}",
+            "clear at 12p"
+        );
+        assert_eq!(
+            buffer[(13, FULL_SKY_Y)].symbol(),
+            " ",
+            "the emoji's second cell must stay clear of the rail"
+        );
+        for x in [14, 17, 20, 23, 26, 29, 58] {
             assert_eq!(
                 buffer[(x, FULL_SKY_Y)].symbol(),
-                "─",
-                "an unchanged known hour should carry the rail at {x}"
+                "\u{2500}",
+                "a known off-cadence hour should carry the rail at {x}"
             );
         }
-        for x in 32..=35 {
+        for x in 30..=35 {
             assert_eq!(
                 buffer[(x, FULL_SKY_Y)].symbol(),
                 " ",
-                "a missing code should leave a gap in the rail at {x}"
+                "a missing code should leave a gap at {x}"
+            );
+        }
+    }
+
+    /// The cadence follows the clock, not the window edge. A forecast that
+    /// opens at 5 PM keeps its first mark for 6 PM, the next real multiple of
+    /// three, so the marks stay put as the selection pages through the week.
+    #[test]
+    fn the_sky_cadence_follows_the_clock_not_the_window_edge() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.now_hour += 17;
+        for hour in weather.hourly.iter_mut() {
+            hour.code = Some(0);
+        }
+
+        let buffer = rendered_buffer_in(
+            &weather,
+            80,
+            FULL_ROWS,
+            0,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+
+        assert_eq!(
+            buffer[(12, FULL_SKY_Y)].symbol(),
+            "\u{2500}",
+            "5 PM is off cadence and should carry only the rail"
+        );
+        for (x, hour) in [(14, "6p"), (20, "9p"), (26, "12a")] {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                "\u{2600}\u{fe0f}",
+                "expected the mark for {hour} at {x}"
+            );
+        }
+    }
+
+    /// A full layout whose plot affords only one cell per hour cannot hold a
+    /// two-cell emoji; the sky row falls back to the one-cell text symbols on
+    /// the same cadence.
+    #[test]
+    fn a_narrow_full_layout_falls_back_to_one_cell_sky_symbols() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.code = Some(0);
+        }
+
+        let width = 40;
+        assert_eq!(window_for(width, 0, 192).cell_width, 1);
+        let buffer = rendered_buffer_in(
+            &weather,
+            width,
+            FULL_ROWS,
+            0,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+
+        for x in [10, 13, 16, 19] {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                "\u{25cb}",
+                "cadence hour at {x} should fall back to the text symbol"
+            );
+        }
+        for x in [11, 12, 14, 15, 17, 18, 20, 21] {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                "\u{2500}",
+                "off-cadence hour at {x} should carry the rail"
+            );
+        }
+    }
+
+    /// Timestamps that will not parse cannot anchor the cadence to the
+    /// clock; the row counts thirds from the window edge instead of hiding
+    /// the sky behind a broken clock.
+    #[test]
+    fn unparseable_timestamps_fall_back_to_a_window_cadence() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in weather.hourly.iter_mut() {
+            hour.time = "not-a-time".to_string();
+            hour.code = Some(0);
+        }
+
+        let buffer = rendered_buffer_in(
+            &weather,
+            80,
+            FULL_ROWS,
+            0,
+            false,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+
+        for x in [12, 18, 24, 30] {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                "\u{2600}\u{fe0f}",
+                "every third visible column should carry the mark at {x}"
+            );
+        }
+        for x in [14, 17, 20, 23] {
+            assert_eq!(
+                buffer[(x, FULL_SKY_Y)].symbol(),
+                "\u{2500}",
+                "the rail should hold between fallback marks at {x}"
             );
         }
     }
