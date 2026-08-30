@@ -18,6 +18,13 @@ refuse to publish a version this file does not describe.
   the vertical listing in the Forecast table; left and right keep working as
   they always have.
 
+### Fixed
+
+- Stepping the selection back to a past day now scrolls the Forecast table
+  along with it, so the day's details are readable instead of only its bar
+  being highlighted in the chart below. The table keeps its size: each past
+  day shown drops one from the far end of the list.
+
 ## [0.5.0] - 2026-08-29
 
 The hourly screen becomes a weathergram. Temperature stands as a filled
