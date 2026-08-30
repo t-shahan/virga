@@ -100,6 +100,11 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Char('p') => Some(Action::OpenHourly),
             KeyCode::Left => Some(Action::PrevDay),
             KeyCode::Right => Some(Action::NextDay),
+            // The forecast table lists the days as a column running downward,
+            // so the vertical arrows travel it the way it reads: down advances,
+            // up goes back — the same convention the hourly screen settled on.
+            KeyCode::Up => Some(Action::PrevDay),
+            KeyCode::Down => Some(Action::NextDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Today),
             _ => None,
         },
@@ -314,6 +319,29 @@ mod tests {
         assert_eq!(
             action_for(press(KeyCode::Down), Screen::Search),
             Some(Action::NextResult)
+        );
+    }
+
+    /// The forecast table lists the days as a column, so the vertical arrows
+    /// traverse them too: down advances and up goes back, matching both the
+    /// table's reading order and the hourly screen's convention.
+    #[test]
+    fn the_vertical_arrows_traverse_days_on_the_weather_screen() {
+        assert_eq!(
+            action_for(press(KeyCode::Up), Screen::Weather),
+            Some(Action::PrevDay)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Down), Screen::Weather),
+            Some(Action::NextDay)
+        );
+        // Held arrows scroll here the same as the horizontal pair.
+        assert_eq!(
+            action_for(
+                of_kind(KeyCode::Down, KeyEventKind::Repeat),
+                Screen::Weather
+            ),
+            Some(Action::NextDay)
         );
     }
 

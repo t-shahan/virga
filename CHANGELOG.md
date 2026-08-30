@@ -12,6 +12,12 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- The up and down arrows step through the days on the main screen, matching
+  the vertical listing in the Forecast table; left and right keep working as
+  they always have.
+
 ## [0.5.0] - 2026-08-29
 
 The hourly screen becomes a weathergram. Temperature stands as a filled
