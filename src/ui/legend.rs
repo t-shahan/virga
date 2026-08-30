@@ -6,8 +6,7 @@ use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-/// Columns of indent, and the gap between one binding and the next.
-const INDENT: usize = 2;
+/// Columns between one binding and the next.
 const SPACING: usize = 3;
 
 /// Rows the legend may take before it starts dropping bindings. Two covers
@@ -81,63 +80,104 @@ fn bindings(app: &App) -> Vec<(&'static str, String)> {
     }
 }
 
-/// Wrap the bindings onto as many rows as they need, up to `MAX_ROWS`.
+/// Lay the bindings out on up to `MAX_ROWS` centred rows.
 ///
 /// One row that simply clipped sheared bindings mid-word as the terminal
 /// narrowed, leaving something like `[u] uni` against the edge that read as a
 /// rendering fault. Breaking between whole bindings keeps every one that is
 /// shown legible, and lets a narrow terminal keep them all rather than losing
-/// the tail.
+/// the tail. The rows are centred, so the bar sits under the centred panes
+/// above it instead of pinned to the left edge, and `split` levels the break
+/// so a wrapped bar reads as two deliberate rows rather than a full one over
+/// a stub.
 fn wrapped(app: &App, palette: Palette, width: u16) -> Vec<Line<'static>> {
     let room = width as usize;
+
+    // A binding wider than the whole bar cannot be shown without shearing
+    // it, so it is not shown at all. Only reachable below the app's minimum
+    // width, where the size warning replaces the interface.
+    let entry = |key: &str, label: &str| format!("[{key}] {label}").chars().count();
+    let bindings: Vec<(&'static str, String)> = bindings(app)
+        .into_iter()
+        .filter(|(key, label)| entry(key, label) <= room)
+        .collect();
+    let widths: Vec<usize> = bindings
+        .iter()
+        .map(|(key, label)| entry(key, label))
+        .collect();
+
     let mut lines: Vec<Line> = Vec::new();
-    let mut row: Vec<Span> = Vec::new();
-    let mut used = INDENT;
-
-    for (key, label) in bindings(app) {
-        let entry = format!("[{key}] {label}").chars().count();
-
-        // Wider than the whole bar even on a row of its own. Nothing can be
-        // shown without shearing it, so show nothing. Only reachable below the
-        // app's minimum width, where the size warning replaces the interface.
-        if INDENT + entry > room {
-            continue;
-        }
-
-        // Only the gap *between* bindings counts; the first on a row is flush
-        // against the indent.
-        let needed = if row.is_empty() {
-            entry
-        } else {
-            SPACING + entry
-        };
-
-        if !row.is_empty() && used + needed > room {
-            if lines.len() + 1 >= MAX_ROWS as usize {
-                // No rows left to give, so the remaining bindings go unshown
-                // rather than overflowing the area.
-                break;
+    let mut next = 0;
+    for count in split(&widths, room) {
+        let mut row: Vec<Span> = Vec::new();
+        for (key, label) in &bindings[next..next + count] {
+            if !row.is_empty() {
+                row.push(Span::from(" ".repeat(SPACING)));
             }
-            lines.push(Line::from(std::mem::take(&mut row)));
-            used = INDENT;
+            row.push(Span::from(format!("[{key}]")).fg(palette.selection));
+            row.push(Span::from(format!(" {label}")).fg(palette.muted));
         }
-
-        if row.is_empty() {
-            row.push(Span::from(" ".repeat(INDENT)));
-        } else {
-            row.push(Span::from(" ".repeat(SPACING)));
-            used += SPACING;
-        }
-
-        row.push(Span::from(format!("[{key}]")).fg(palette.selection));
-        row.push(Span::from(format!(" {label}")).fg(palette.muted));
-        used += entry;
-    }
-
-    if !row.is_empty() {
-        lines.push(Line::from(row));
+        next += count;
+        lines.push(Line::from(row).centered());
     }
     lines
+}
+
+/// How many bindings go on each row.
+///
+/// Greedy packing decides how many are shown at all: each row is filled
+/// before the next begins, so as many bindings are kept as `MAX_ROWS` rows
+/// can hold, and the rest drop from the tail. But a greedy break leaves the
+/// first row full to the brim over a second holding whatever fell off it,
+/// so once the count is settled the break moves to wherever levels the two
+/// rows most evenly. The greedy break itself always qualifies, so there is
+/// always a candidate.
+fn split(widths: &[usize], room: usize) -> Vec<usize> {
+    let mut rows: Vec<usize> = Vec::new();
+    let mut index = 0;
+    while index < widths.len() && rows.len() < MAX_ROWS as usize {
+        let mut count = 0;
+        let mut used = 0;
+        while index < widths.len() {
+            let needed = if count == 0 {
+                widths[index]
+            } else {
+                used + SPACING + widths[index]
+            };
+            if count > 0 && needed > room {
+                break;
+            }
+            used = needed;
+            count += 1;
+            index += 1;
+        }
+        rows.push(count);
+    }
+
+    let [first, second] = rows[..] else {
+        // One row, or none: nothing to level.
+        return rows;
+    };
+
+    let kept = first + second;
+    let widths = &widths[..kept];
+    let widest = |at: usize| row_width(&widths[..at]).max(row_width(&widths[at..]));
+
+    let mut best = first;
+    for candidate in 1..kept {
+        if row_width(&widths[..candidate]) <= room
+            && row_width(&widths[candidate..]) <= room
+            && widest(candidate) < widest(best)
+        {
+            best = candidate;
+        }
+    }
+    vec![best, kept - best]
+}
+
+/// Columns a run of bindings takes on one row, gaps included.
+fn row_width(widths: &[usize]) -> usize {
+    widths.iter().sum::<usize>() + SPACING * widths.len().saturating_sub(1)
 }
 
 /// How many rows the legend needs at this width, so the caller can reserve
@@ -366,6 +406,52 @@ mod tests {
         for key in ["[q]", "[b]", "[←→]", "[↑↓]", "[n]"] {
             assert!(shown.contains(key), "50 columns lost {key}: {shown:?}");
         }
+    }
+
+    /// The complaint: the bar sat pinned to the left edge while every pane
+    /// above it is centred, so it read as detached from the interface.
+    #[test]
+    fn the_bar_is_centred_rather_than_pinned_left() {
+        for screen in [Screen::Weather, Screen::Hourly, Screen::Search] {
+            for row in legend_at(120, screen) {
+                let leading = row.chars().take_while(|c| *c == ' ').count();
+                let trailing = row.chars().rev().take_while(|c| *c == ' ').count();
+                assert!(leading > 0, "{screen:?}: {row:?}");
+                assert!(
+                    leading.abs_diff(trailing) <= 1,
+                    "{screen:?}: {leading} blank columns left, {trailing} right: {row:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the complaint: a bar that wrapped greedily left the
+    /// first row full to the brim over a stub of whatever fell off it. The
+    /// break moves to level the rows — at this width, greedy would leave two
+    /// bindings below seven.
+    #[test]
+    fn a_wrapped_bar_levels_its_rows() {
+        let app = app_on(Screen::Hourly);
+        let rows = legend_at_with(&app, 80);
+        assert_eq!(rows.len(), 2, "80 columns should wrap: {rows:?}");
+        assert!(
+            rows[1].matches('[').count() >= 3,
+            "the wrap left a stub: {rows:?}"
+        );
+
+        // At a levelled break the rows sit within one binding of each other:
+        // were they further apart, moving the boundary binding down would
+        // have levelled them more.
+        let widest = bindings(&app)
+            .iter()
+            .map(|(key, label)| format!("[{key}] {label}").chars().count())
+            .max()
+            .unwrap();
+        let width = |row: &String| row.trim().chars().count();
+        assert!(
+            width(&rows[0]).abs_diff(width(&rows[1])) <= widest + SPACING,
+            "{rows:?}"
+        );
     }
 
     #[test]

@@ -12,6 +12,14 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Changed
+
+- The key legend at the bottom of the screen is centred, sitting under the
+  centred panes above it instead of pinned to the left edge. When a narrow
+  terminal wraps it onto two rows, the break now falls where it levels the
+  rows rather than filling the first to the brim and leaving the second a
+  stub.
+
 ## [0.5.0] - 2026-08-29
 
 The hourly screen becomes a weathergram. Temperature stands as a filled
