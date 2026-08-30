@@ -48,7 +48,7 @@ fn bindings(app: &App) -> Vec<(&'static str, String)> {
     match app.screen {
         Screen::Weather => owned(vec![
             ("q", "quit"),
-            ("←→", "day"),
+            ("←→↑↓", "day"),
             ("n", "now"),
             ("p", "hourly"),
             ("r", "refresh"),
@@ -234,6 +234,14 @@ mod tests {
     fn the_weather_legend_advertises_the_hourly_screen() {
         let legend = legend_at(120, Screen::Weather).join("\n");
         assert!(legend.contains("[p] hourly"), "{legend:?}");
+    }
+
+    /// All four arrows move the day selection, and the bar is where anyone
+    /// would learn that.
+    #[test]
+    fn the_weather_legend_names_every_day_arrow() {
+        let legend = legend_at(120, Screen::Weather).join("\n");
+        assert!(legend.contains("[←→↑↓] day"), "{legend:?}");
     }
 
     /// The hourly screen rebinds the arrows and takes `b` for back, so
