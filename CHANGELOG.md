@@ -12,6 +12,12 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- The up and down arrows step through the days on the main screen, matching
+  the vertical listing in the Forecast table; left and right keep working as
+  they always have.
+
 ### Fixed
 
 - Stepping the selection back to a past day now scrolls the Forecast table
