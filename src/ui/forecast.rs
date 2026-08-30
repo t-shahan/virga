@@ -23,10 +23,10 @@ pub(super) fn forecast_area_render(
     // below always draws the whole range; before the slide, selecting a
     // past day highlighted a bar whose details appeared nowhere.
     let start = weather.today_index.min(selected);
-    let count = weather.daily.len().saturating_sub(weather.today_index);
+    let window_len = weather.daily.len().saturating_sub(weather.today_index);
     let shown = weather
         .daily
-        .get(start..weather.daily.len().min(start + count))
+        .get(start..weather.daily.len().min(start + window_len))
         .unwrap_or(&[]);
 
     let block = Block::bordered()
