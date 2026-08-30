@@ -17,8 +17,17 @@ pub(super) fn forecast_area_render(
     unit: Unit,
     selected: usize,
 ) {
-    // Today onwards. The past stays exclusive to the chart.
-    let upcoming = weather.daily.get(weather.today_index..).unwrap_or(&[]);
+    // Today onwards, until the selection steps into the past — then the
+    // window slides back just far enough to keep the selected day on the
+    // list, dropping days off the far end instead of growing. The chart
+    // below always draws the whole range; before the slide, selecting a
+    // past day highlighted a bar whose details appeared nowhere.
+    let start = weather.today_index.min(selected);
+    let window_len = weather.daily.len().saturating_sub(weather.today_index);
+    let shown = weather
+        .daily
+        .get(start..weather.daily.len().min(start + window_len))
+        .unwrap_or(&[]);
 
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
@@ -64,9 +73,9 @@ pub(super) fn forecast_area_render(
 
     let mut lines = vec![Line::from(header).fg(palette.muted)];
 
-    lines.extend(upcoming.iter().enumerate().map(|(i, d)| {
-        let is_today = i == 0;
-        let is_selected = weather.today_index + i == selected;
+    lines.extend(shown.iter().enumerate().map(|(i, d)| {
+        let is_today = start + i == weather.today_index;
+        let is_selected = start + i == selected;
 
         let day = if is_today {
             "Today".to_string()
@@ -245,6 +254,48 @@ mod tests {
                 "the marker did not follow the selection {step} day(s) on"
             );
         }
+    }
+
+    /// The issue: stepping the selection into the past highlighted a bar in
+    /// the chart whose details appeared nowhere — the table stayed pinned to
+    /// today onwards. The window now slides back to keep the selection listed.
+    #[test]
+    fn the_window_slides_back_to_a_selected_past_day() {
+        // Two days into the past: the selected day leads the list — the same
+        // row today leads it from — and Today follows two rows later, still
+        // labelled as such.
+        let top = marked_row(14);
+        assert_eq!(
+            marked_row(12),
+            top,
+            "the selected past day should lead the list"
+        );
+
+        let rows = rows_without_colour(12);
+        let today = rows
+            .iter()
+            .position(|r| r.contains("Today"))
+            .expect("Today stays listed");
+        assert_eq!(
+            today,
+            top + 2,
+            "Today should sit two rows below the selection"
+        );
+    }
+
+    /// Sliding back must not grow the table: a day gained off the back costs
+    /// one off the far end, so the height the layout reserved stays honest.
+    #[test]
+    fn the_window_keeps_its_size_when_it_slides() {
+        let rows_at = |selected: usize| {
+            rows_without_colour(selected)
+                .iter()
+                .filter(|r| !r.trim().is_empty())
+                .count()
+        };
+
+        assert_eq!(rows_at(10), rows_at(14));
+        assert_eq!(rows_at(0), rows_at(14), "even from the oldest day");
     }
 
     /// The gutter the marker uses is the one the header already leaves blank,
