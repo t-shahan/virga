@@ -2,13 +2,50 @@
 //!
 //! Widgets ask for a *role* — the selection, the accent, a muted label — and
 //! never for a colour. That indirection is the whole feature: adding a theme
-//! is filling in one more [`Palette`], and no widget has to be touched or
-//! even know that themes exist.
+//! means defining its full-colour palette and its intentional ANSI fallback;
+//! no widget has to be touched or even know that themes exist.
 //!
 //! `Theme` is a name and nothing else, so `App` can hold the setting without
 //! taking on a Ratatui type. Only `ui` ever resolves one to a `Palette`.
 
 use ratatui::style::Color;
+
+/// The colour vocabulary the active terminal can render faithfully.
+///
+/// Environment detection is kept at this boundary so support for another
+/// terminal or operating-system probe can improve without reaching into a
+/// theme or widget.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColorDepth {
+    Ansi16,
+    Ansi256,
+    TrueColor,
+}
+
+impl ColorDepth {
+    /// Infer support from the capability hints terminals conventionally set.
+    /// Unknown environments use the smallest vocabulary rather than receiving
+    /// escape sequences they may misinterpret.
+    pub fn from_environment(colorterm: Option<&str>, term: Option<&str>) -> Self {
+        let advertises_truecolor = |value: &str| {
+            let value = value.to_ascii_lowercase();
+            value == "truecolor"
+                || value == "24bit"
+                || value.split('-').any(|part| part == "direct")
+                || value.contains("truecolor")
+        };
+        let advertises_ansi256 = |value: &str| value.to_ascii_lowercase().contains("256color");
+
+        if colorterm.is_some_and(advertises_truecolor) || term.is_some_and(advertises_truecolor) {
+            ColorDepth::TrueColor
+        } else if colorterm.is_some_and(advertises_ansi256) || term.is_some_and(advertises_ansi256)
+        {
+            ColorDepth::Ansi256
+        } else {
+            ColorDepth::Ansi16
+        }
+    }
+}
 
 /// The seven meanings the interface actually has.
 ///
@@ -36,12 +73,26 @@ pub struct Palette {
     pub border: Color,
 }
 
+impl Palette {
+    fn map(self, convert: impl Fn(Color) -> Color) -> Self {
+        Self {
+            accent: convert(self.accent),
+            text: convert(self.text),
+            muted: convert(self.muted),
+            selection: convert(self.selection),
+            now: convert(self.now),
+            error: convert(self.error),
+            border: convert(self.border),
+        }
+    }
+}
+
 /// A named palette. Cycled with `t`, defaulting to the terminal's own colours.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Theme {
     /// The sixteen ANSI colours, so the app looks the way the terminal was
-    /// configured to look. The default, and the only palette that renders
-    /// correctly without 24-bit colour.
+    /// configured to look. The default, so the first frame never depends on
+    /// extended colour support.
     #[default]
     Default,
     GruvboxDark,
@@ -108,8 +159,80 @@ impl Theme {
             .find(|theme| normalise(theme.name()) == wanted)
     }
 
-    /// The colours this theme gives the roles. The only place in the app where
-    /// a colour literal appears.
+    /// Resolve the theme using only colours the terminal said it understands.
+    pub fn palette_for(self, depth: ColorDepth) -> Palette {
+        match depth {
+            ColorDepth::TrueColor => self.palette(),
+            ColorDepth::Ansi256 => self.palette().map(to_ansi256),
+            ColorDepth::Ansi16 => self.ansi16_palette(),
+        }
+    }
+
+    /// Deliberate approximations rather than nearest-colour conversions.
+    /// Sixteen colours are too few for that conversion to keep nearby roles
+    /// apart, so each theme preserves its visual grammar instead: the series,
+    /// selection, and current point remain three distinct hues.
+    fn ansi16_palette(self) -> Palette {
+        match self {
+            Theme::Default => self.palette(),
+            Theme::GruvboxDark => Palette {
+                accent: Color::LightRed,
+                text: Color::White,
+                muted: Color::Gray,
+                selection: Color::LightYellow,
+                now: Color::LightGreen,
+                error: Color::Red,
+                border: Color::DarkGray,
+            },
+            Theme::Nord => Palette {
+                accent: Color::LightCyan,
+                text: Color::White,
+                muted: Color::Gray,
+                selection: Color::LightMagenta,
+                now: Color::LightGreen,
+                error: Color::LightRed,
+                border: Color::LightBlue,
+            },
+            Theme::TokyoNight => Palette {
+                accent: Color::LightBlue,
+                text: Color::White,
+                muted: Color::Gray,
+                selection: Color::LightRed,
+                now: Color::LightCyan,
+                error: Color::Red,
+                border: Color::LightMagenta,
+            },
+            Theme::Dracula => Palette {
+                accent: Color::LightMagenta,
+                text: Color::White,
+                muted: Color::Gray,
+                selection: Color::LightYellow,
+                now: Color::LightCyan,
+                error: Color::LightRed,
+                border: Color::Yellow,
+            },
+            Theme::CatppuccinMocha => Palette {
+                accent: Color::LightMagenta,
+                text: Color::White,
+                muted: Color::Gray,
+                selection: Color::LightCyan,
+                now: Color::LightYellow,
+                error: Color::LightRed,
+                border: Color::DarkGray,
+            },
+            Theme::CatppuccinLatte => Palette {
+                accent: Color::Magenta,
+                text: Color::Black,
+                muted: Color::DarkGray,
+                selection: Color::Blue,
+                now: Color::Yellow,
+                error: Color::Red,
+                border: Color::Gray,
+            },
+        }
+    }
+
+    /// The exact colours this theme gives the roles on a truecolor terminal.
     pub fn palette(self) -> Palette {
         match self {
             // Deliberately the sixteen ANSI colours and not their RGB values:
@@ -204,6 +327,46 @@ impl Theme {
     }
 }
 
+fn to_ansi256(colour: Color) -> Color {
+    let Color::Rgb(r, g, b) = colour else {
+        return colour;
+    };
+
+    let cube = [r, g, b].map(cube_level);
+    let cube_index = 16 + 36 * cube[0].0 + 6 * cube[1].0 + cube[2].0;
+
+    let average = (u16::from(r) + u16::from(g) + u16::from(b)) / 3;
+    let gray_step = average.saturating_sub(8).saturating_add(5) / 10;
+    let gray_step = gray_step.min(23) as u8;
+    let gray = 8 + 10 * gray_step;
+    let gray_index = 232 + gray_step;
+
+    let distance = |target: [u8; 3]| {
+        [r, g, b]
+            .into_iter()
+            .zip(target)
+            .map(|(actual, wanted)| u32::from(actual.abs_diff(wanted)).pow(2))
+            .sum::<u32>()
+    };
+
+    if distance([cube[0].1, cube[1].1, cube[2].1]) <= distance([gray; 3]) {
+        Color::Indexed(cube_index)
+    } else {
+        Color::Indexed(gray_index)
+    }
+}
+
+fn cube_level(channel: u8) -> (u8, u8) {
+    match channel {
+        0..=47 => (0, 0),
+        48..=114 => (1, 95),
+        115..=154 => (2, 135),
+        155..=194 => (3, 175),
+        195..=234 => (4, 215),
+        235..=255 => (5, 255),
+    }
+}
+
 /// Fold case and treat every separator people might type as a space, so the
 /// environment variable is forgiving about which one they picked.
 fn normalise(name: &str) -> String {
@@ -218,6 +381,114 @@ fn normalise(name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn terminal_colour_depth_follows_capability_hints() {
+        for (colorterm, term) in [
+            (Some("truecolor"), Some("xterm-256color")),
+            (Some("24BIT"), None),
+            (None, Some("xterm-direct")),
+            (None, Some("screen-truecolor")),
+        ] {
+            assert_eq!(
+                ColorDepth::from_environment(colorterm, term),
+                ColorDepth::TrueColor,
+                "COLORTERM={colorterm:?}, TERM={term:?}"
+            );
+        }
+
+        assert_eq!(
+            ColorDepth::from_environment(None, Some("xterm-256color")),
+            ColorDepth::Ansi256
+        );
+        assert_eq!(
+            ColorDepth::from_environment(Some("256color"), None),
+            ColorDepth::Ansi256
+        );
+        assert_eq!(
+            ColorDepth::from_environment(Some("yes"), Some("xterm-color")),
+            ColorDepth::Ansi16
+        );
+        assert_eq!(ColorDepth::from_environment(None, None), ColorDepth::Ansi16);
+    }
+
+    #[test]
+    fn truecolor_terminals_keep_the_exact_theme_palette() {
+        for theme in Theme::ALL {
+            assert_eq!(
+                theme.palette_for(ColorDepth::TrueColor),
+                theme.palette(),
+                "{} was changed despite truecolor support",
+                theme.name()
+            );
+        }
+    }
+
+    #[test]
+    fn ansi_256_terminals_receive_indexed_theme_colours() {
+        let gruvbox = Theme::GruvboxDark.palette_for(ColorDepth::Ansi256);
+        assert_eq!(gruvbox.accent, Color::Indexed(208));
+
+        for theme in Theme::ALL
+            .into_iter()
+            .filter(|theme| *theme != Theme::Default)
+        {
+            let p = theme.palette_for(ColorDepth::Ansi256);
+            for colour in [
+                p.accent,
+                p.text,
+                p.muted,
+                p.selection,
+                p.now,
+                p.error,
+                p.border,
+            ] {
+                assert!(
+                    matches!(colour, Color::Indexed(_)),
+                    "{} leaked {colour:?} into a 256-colour terminal",
+                    theme.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ansi_16_terminals_receive_distinct_basic_theme_colours() {
+        let gruvbox = Theme::GruvboxDark.palette_for(ColorDepth::Ansi16);
+        assert_eq!(gruvbox.accent, Color::LightRed);
+        assert_eq!(gruvbox.selection, Color::LightYellow);
+        assert_eq!(gruvbox.now, Color::LightGreen);
+
+        for theme in Theme::ALL
+            .into_iter()
+            .filter(|theme| *theme != Theme::Default)
+        {
+            let p = theme.palette_for(ColorDepth::Ansi16);
+            for colour in [
+                p.accent,
+                p.text,
+                p.muted,
+                p.selection,
+                p.now,
+                p.error,
+                p.border,
+            ] {
+                assert!(
+                    !matches!(colour, Color::Rgb(..) | Color::Indexed(_)),
+                    "{} leaked {colour:?} into a sixteen-colour terminal",
+                    theme.name()
+                );
+            }
+
+            let states = [p.accent, p.selection, p.now];
+            assert_eq!(
+                states.into_iter().collect::<HashSet<_>>().len(),
+                states.len(),
+                "{} collapsed two chart states",
+                theme.name()
+            );
+        }
+    }
 
     /// `next` is the cycle and `ALL` is the list of what is in it. If they
     /// disagree, a theme is either unreachable by pressing `t` or missing from

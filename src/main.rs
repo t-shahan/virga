@@ -3,7 +3,7 @@ use crate::app::{
 };
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
-use crate::theme::Theme;
+use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
 use ratatui::DefaultTerminal;
@@ -200,6 +200,10 @@ fn main() -> Result<()> {
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
+    let color_depth = ColorDepth::from_environment(
+        std::env::var("COLORTERM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+    );
 
     let terminal = ratatui::init();
     let mut warning = None;
@@ -210,6 +214,7 @@ fn main() -> Result<()> {
             startup,
             theme,
             unit,
+            color_depth,
         },
         state_path.as_deref(),
         check_updates,
@@ -552,6 +557,17 @@ struct Opening {
     startup: Startup,
     theme: Theme,
     unit: Unit,
+    color_depth: ColorDepth,
+}
+
+impl Opening {
+    fn into_app(self) -> App {
+        let mut app = App::with_startup(self.startup);
+        app.theme = self.theme;
+        app.unit = self.unit;
+        app.color_depth = self.color_depth;
+        app
+    }
 }
 
 fn run(
@@ -580,9 +596,7 @@ fn run(
     }
     events::spawn_worker(request_rx, message_tx);
 
-    let mut app = App::with_startup(opening.startup);
-    app.theme = opening.theme;
-    app.unit = opening.unit;
+    let mut app = opening.into_app();
     let initial = app.startup_request();
     dispatch(&request_tx, &mut app, initial)?;
 
@@ -715,6 +729,25 @@ mod tests {
     use crate::app::ActiveLocation;
     use crate::events::Message;
     use crate::weather::model::Weather;
+
+    #[test]
+    fn opening_carries_terminal_colour_depth_into_the_app() {
+        let app = Opening {
+            startup: Startup {
+                location: ActiveLocation::default(),
+                source: LocationSource::Fallback,
+                detect: false,
+            },
+            theme: Theme::Nord,
+            unit: Unit::Metric,
+            color_depth: crate::theme::ColorDepth::Ansi256,
+        }
+        .into_app();
+
+        assert_eq!(app.theme, Theme::Nord);
+        assert_eq!(app.unit, Unit::Metric);
+        assert_eq!(app.color_depth, crate::theme::ColorDepth::Ansi256);
+    }
 
     /// The clean-repaint trigger: composition moves when the screen or the
     /// weather's state changes, and holds still through the edits a diff

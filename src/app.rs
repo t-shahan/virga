@@ -1,6 +1,6 @@
 use crate::events::{Message, Request, RequestId};
 use crate::input::Action;
-use crate::theme::Theme;
+use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use crate::weather::model::{Location, Weather};
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,9 @@ pub struct App {
     /// The palette in use. A name only — resolving it to colours is `ui`'s
     /// business, which is what keeps this module free of Ratatui types.
     pub theme: Theme,
+    /// The colour vocabulary inferred for the terminal at startup. Kept apart
+    /// from the theme so cycling changes the design, not the capability.
+    pub color_depth: ColorDepth,
     pub tick: usize,
     pub selected: usize,
     /// Index into `Weather::daily` of the day being inspected. Distinct from
@@ -239,6 +242,7 @@ impl App {
             weather: Fetch::Loading,
             unit: Unit::Imperial,
             theme: Theme::default(),
+            color_depth: ColorDepth::Ansi16,
             tick: 0,
             selected: 0,
             selected_day: 0,

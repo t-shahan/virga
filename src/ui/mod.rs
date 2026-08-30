@@ -77,7 +77,7 @@ const MIN_HEIGHT: u16 = 12;
 const CANVAS_WIDTH: u16 = 120;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
-    render_with(frame, app, app.theme.palette());
+    render_with(frame, app, app.theme.palette_for(app.color_depth));
 }
 
 /// The frame, drawn in a given palette.
@@ -299,7 +299,7 @@ fn spinner(tick: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Theme;
+    use crate::theme::{ColorDepth, Theme};
     use crate::units::Unit;
     use crate::weather::model::{Location, Weather};
     use ratatui::Terminal;
@@ -639,6 +639,29 @@ mod tests {
 
             assert!(repainted, "{} left the screen unchanged", theme.name());
         }
+    }
+
+    #[test]
+    fn rendering_respects_the_terminals_colour_depth() {
+        let mut app = ready(Screen::Weather);
+        app.theme = Theme::GruvboxDark;
+        app.color_depth = ColorDepth::Ansi256;
+        let expected_accent = Color::Indexed(208);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let colours: Vec<Color> = (0..40u16)
+            .flat_map(|y| (0..120u16).map(move |x| buffer[(x, y)].fg))
+            .collect();
+
+        assert!(colours.contains(&expected_accent));
+        assert!(
+            colours
+                .into_iter()
+                .all(|colour| !matches!(colour, Color::Rgb(..))),
+            "an RGB colour escaped into indexed rendering"
+        );
     }
 
     /// A terminal below the minimum must say so rather than render a clipped
