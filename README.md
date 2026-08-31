@@ -318,7 +318,7 @@ readout.
 
 | Theme | Notes |
 |---|---|
-| `default` | The sixteen ANSI colours, so Virga looks the way your terminal is already configured to look |
+| `default` | Bright slots from the sixteen ANSI colours, so Virga stays legible while following your terminal's configured palette |
 | `gruvbox dark` | Warm throughout — orange bars, gold selection, green today |
 | `nord` | Cool throughout — icy bars, aurora-purple selection |
 | `tokyo night` | Blue and violet, with the selection the one warm thing on screen |
@@ -332,9 +332,17 @@ instead of stamping a separate dark rectangle over it. That also means a
 palette has to suit the ground it lands on — `catppuccin latte` is the one
 built for a light background, and the others assume a dark one.
 
-The six non-default palettes use 24-bit colour. A terminal without truecolor
-may approximate or ignore them, which is why `default` is the default: the
-out-of-the-box appearance does not depend on truecolor support.
+The six non-default palettes use their exact 24-bit colours when the terminal
+advertises truecolor through `COLORTERM` or `TERM`. On a 256-colour terminal,
+Virga maps them to the closest xterm palette entries; on a sixteen-colour or
+unknown terminal, each theme has an intentional ANSI approximation that keeps
+its series, selection, and current-time colours distinct. `default` remains the
+default, so the first frame always uses the terminal's own configured colours.
+
+Detection is capability-based rather than tied to terminal or operating-system
+names. That lets Terminal.app and other basic terminals receive compatible
+colours while Ghostty, Kitty, and other truecolor terminals keep the exact
+palette, and it leaves one isolated detection boundary for future platforms.
 
 To make a theme the startup default, persist it:
 
