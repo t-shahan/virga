@@ -209,10 +209,13 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         },
         Screen::Search => search_render(frame, app, palette, area),
     }
+    // Centred like the key bar below it: the two share the bottom of the
+    // canvas, and one flush-left row under centred panes read as detached.
     if notice_visible && let Some(notice) = &app.update_notice {
         frame.render_widget(
             Paragraph::new(truncate(notice, notice_area.width as usize))
-                .style(Style::default().fg(palette.muted)),
+                .style(Style::default().fg(palette.muted))
+                .alignment(Alignment::Center),
             notice_area,
         );
     }
@@ -821,24 +824,39 @@ mod tests {
     }
 
     /// The notice is one muted line above the key bar — in the label role,
-    /// where information that is not a reading already lives.
+    /// where information that is not a reading already lives — and centred
+    /// like the bar, so the two read as one block rather than a centred row
+    /// over a flush-left one.
     #[test]
-    fn the_update_notice_sits_above_the_key_bar_in_muted() {
+    fn the_update_notice_sits_centred_above_the_key_bar_in_muted() {
         let (width, height) = (100, 20);
         let buffer = drawn(&noticed(Screen::Weather), probe(), width, height);
         let rows = symbols(&buffer, width, height);
 
         let row = rows
             .iter()
-            .position(|row| row.starts_with("update: virga 9.9.9"))
+            .position(|row| row.contains("update: virga 9.9.9"))
             .expect("the notice was not drawn");
 
         assert!(
             row >= height as usize - 3,
             "row {row} of {height} is not just above the key bar"
         );
+
+        let text = &rows[row];
+        let leading = text.chars().take_while(|c| *c == ' ').count();
+        let trailing = text.chars().rev().take_while(|c| *c == ' ').count();
+        assert!(
+            leading > 0,
+            "the notice is pinned to the left edge: {text:?}"
+        );
+        assert!(
+            leading.abs_diff(trailing) <= 1,
+            "{leading} blank columns left, {trailing} right: {text:?}"
+        );
+
         assert_eq!(
-            buffer[(0, row as u16)].style().fg,
+            buffer[(leading as u16, row as u16)].style().fg,
             Some(probe().muted),
             "the notice is not in the muted role"
         );
