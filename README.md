@@ -318,7 +318,7 @@ readout.
 
 | Theme | Notes |
 |---|---|
-| `default` | The sixteen ANSI colours, so Virga looks the way your terminal is already configured to look |
+| `default` | Bright slots from the sixteen ANSI colours, so Virga stays legible while following your terminal's configured palette |
 | `gruvbox dark` | Warm throughout — orange bars, gold selection, green today |
 | `nord` | Cool throughout — icy bars, aurora-purple selection |
 | `tokyo night` | Blue and violet, with the selection the one warm thing on screen |

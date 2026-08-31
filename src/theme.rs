@@ -237,14 +237,16 @@ impl Theme {
         match self {
             // Deliberately the sixteen ANSI colours and not their RGB values:
             // the point of this palette is to be whatever the terminal's own
-            // scheme says those colours are.
+            // scheme says those colours are. High-area roles use the bright
+            // slots because normal blue and yellow disappear on Terminal.app's
+            // dark ground.
             Theme::Default => Palette {
-                accent: Color::Blue,
+                accent: Color::LightBlue,
                 text: Color::White,
                 muted: Color::Gray,
-                selection: Color::Yellow,
-                now: Color::LightBlue,
-                error: Color::Red,
+                selection: Color::LightYellow,
+                now: Color::LightCyan,
+                error: Color::LightRed,
                 border: Color::Reset,
             },
             // Warm, and committed to it: an orange series against a gold
@@ -519,21 +521,21 @@ mod tests {
     }
 
     /// The default palette stays within the terminal's sixteen ANSI colours,
-    /// while labels use normal gray rather than dark gray. Some terminal
-    /// schemes render dark gray almost indistinguishably from the background;
-    /// normal gray remains subdued beside bright-white readings without
-    /// disappearing.
+    /// while high-area roles use their bright variants. Terminal.app's normal
+    /// blue is too dark to carry the hero digits and charts on a dark ground;
+    /// the bright slots keep those roles legible without assuming truecolor.
+    /// Labels stay normal gray: subdued beside readings without disappearing.
     #[test]
     fn the_terminal_theme_uses_readable_ansi_colours() {
         let p = Theme::Default.palette();
 
-        assert_eq!(p.accent, Color::Blue);
+        assert_eq!(p.accent, Color::LightBlue);
         assert_eq!(p.text, Color::White);
         assert_eq!(p.muted, Color::Gray);
         assert_ne!(p.muted, p.text, "labels must remain quieter than readings");
-        assert_eq!(p.selection, Color::Yellow);
-        assert_eq!(p.now, Color::LightBlue);
-        assert_eq!(p.error, Color::Red);
+        assert_eq!(p.selection, Color::LightYellow);
+        assert_eq!(p.now, Color::LightCyan);
+        assert_eq!(p.error, Color::LightRed);
         assert_eq!(p.border, Color::Reset, "the border was never painted");
     }
 

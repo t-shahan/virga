@@ -19,6 +19,9 @@ refuse to publish a version this file does not describe.
   intentional ANSI approximations on basic or unknown terminals. This keeps
   theme roles readable in Terminal.app without reducing colour fidelity in
   Ghostty, Kitty, and other truecolor terminals.
+- The default theme uses the bright ANSI slots for its accent, selection,
+  current-time marker, and errors, keeping high-area colours legible where
+  Terminal.app renders the normal blue and yellow too dark.
 
 ## [0.5.1] - 2026-08-30
 
