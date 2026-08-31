@@ -1,6 +1,6 @@
 [package]
 name = "virga-tui"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "A responsive terminal weather app with an adaptive hourly weathergram, powered by Open-Meteo"
 license = "MIT OR Apache-2.0"
