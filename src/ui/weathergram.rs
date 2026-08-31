@@ -10,9 +10,9 @@
 //! per track, which spent most of the plot restating that nothing was
 //! changing and read as noise at 48 columns.
 //!
-//! The compact layout keeps the one-row-per-track form: below nineteen rows
-//! there is no height for a silhouette, and a single glyph per hour is the
-//! densest honest rendering left.
+//! There is one layout. A compact one used to take over below the full
+//! height, one glyph per hour per track, and it was that draft's leftover:
+//! the hourly screen now states the size it needs instead (#50).
 
 use crate::theme::Palette;
 use crate::ui::axis::{hour_ticks_render, put, put_right, put_styled, put_text};
@@ -43,14 +43,15 @@ const AXIS_ROW: u16 = WIND_ROW + 1;
 const MARKER_ROW: u16 = AXIS_ROW + 1;
 
 pub(super) const FULL_ROWS: u16 = MARKER_ROW + 1 + 2;
-pub(super) const COMPACT_ROWS: u16 = 6;
 
 const BORDER_COLS: u16 = 2;
 const LABEL_WIDTH: u16 = 6;
 const SUMMARY_GAP: u16 = 1;
 const SUMMARY_WIDTH: u16 = 12;
 const HORIZONS: [usize; 3] = [48, 36, 24];
-const COMPACT_HORIZON: usize = 12;
+/// The horizon left when the plot is too narrow for a day at two cells an
+/// hour. The inspector's minimum width leaves fifteen columns here.
+const NARROW_HORIZON: usize = 12;
 const MAX_CELL_WIDTH: u16 = 3;
 
 /// Every eighth from a floor line to a full block: the vertical resolution
@@ -74,7 +75,7 @@ fn window_for(width: u16, selected: usize, count: usize) -> Window {
     let horizon = HORIZONS
         .into_iter()
         .find(|hours| plot_width as usize >= hours * 2)
-        .unwrap_or(COMPACT_HORIZON);
+        .unwrap_or(NARROW_HORIZON);
     let hours = if count == 0 {
         horizon
     } else {
@@ -143,33 +144,6 @@ fn band_render(frame: &mut Frame, x: u16, top_y: u16, rows: u16, height: u16, st
             continue;
         };
         put_styled(frame, x, top_y + (rows - 1 - above_floor), glyph, style);
-    }
-}
-
-/// The five-step silhouette the compact layout keeps: one row leaves no room
-/// for a band, so height quantised to the glyph is the whole vocabulary.
-fn temperature_step(value: Option<f64>, range: Option<(f64, f64)>) -> &'static str {
-    const STEPS: [&str; 5] = ["▁", "▂", "▄", "▆", "█"];
-
-    let (Some(value), Some((min, max))) = (value, range) else {
-        return " ";
-    };
-    if min == max {
-        return "▄";
-    }
-
-    let step = (((value - min) / (max - min)).clamp(0.0, 1.0) * 4.0).round() as usize;
-    STEPS[step]
-}
-
-fn rain_step(chance: Option<u8>) -> &'static str {
-    match chance {
-        None => " ",
-        Some(0..=9) => "·",
-        Some(10..=29) => "▂",
-        Some(30..=49) => "▄",
-        Some(50..=69) => "▆",
-        Some(_) => "█",
     }
 }
 
@@ -270,19 +244,13 @@ pub(super) fn weathergram_render(
     area: Rect,
     unit: Unit,
     selected: usize,
-    compact: bool,
 ) {
     let window = window_for(area.width, selected, hours.len());
     let end = window.start.saturating_add(window.hours).min(hours.len());
     let visible = hours.get(window.start..end).unwrap_or_default();
-    let block = Block::bordered().border_style(Style::new().fg(palette.border));
-    let block = if compact {
-        block
-    } else {
-        block.title(
-            Line::from(format!(" Hourly weather · next {} h ", window.hours)).fg(palette.muted),
-        )
-    };
+    let block = Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        .title(Line::from(format!(" Hourly weather · next {} h ", window.hours)).fg(palette.muted));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -297,13 +265,7 @@ pub(super) fn weathergram_render(
         summary_x: content_x + LABEL_WIDTH + plot_width + SUMMARY_GAP,
     };
 
-    if compact {
-        compact_tracks_render(
-            frame, hours, visible, palette, unit, selected, &plot, area, inner,
-        );
-    } else {
-        full_tracks_render(frame, hours, visible, palette, unit, selected, &plot, inner);
-    }
+    full_tracks_render(frame, hours, visible, palette, unit, selected, &plot, inner);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -466,89 +428,6 @@ fn full_tracks_render(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compact_tracks_render(
-    frame: &mut Frame,
-    hours: &[HourlyForecast],
-    visible: &[HourlyForecast],
-    palette: Palette,
-    unit: Unit,
-    selected: usize,
-    plot: &Plot,
-    area: Rect,
-    inner: Rect,
-) {
-    let window = plot.window;
-    let axis_y = area.y;
-    let first_track_y = inner.y;
-    let marker_y = area.bottom().saturating_sub(1);
-
-    put_text(frame, area.x + 1, area.y, "Hourly", palette.muted);
-    hour_ticks_render(
-        frame,
-        Rect::new(plot.plot_x, axis_y, plot.plot_width, 1),
-        visible.iter().map(|hour| hour.time.as_str()),
-        window.cell_width,
-        1,
-        if window.start == 0 {
-            palette.now
-        } else {
-            palette.muted
-        },
-        palette,
-    );
-
-    let range = temperature_range(visible);
-    let summaries = [
-        String::new(),
-        temperature_summary(visible, unit),
-        precipitation_summary(hours, selected, unit),
-        wind_summary(visible, unit),
-    ];
-
-    for (row, (label, summary)) in ["sky", "temp", "rain", "wind"]
-        .into_iter()
-        .zip(summaries)
-        .enumerate()
-    {
-        let y = first_track_y + row as u16;
-        put_text(frame, plot.content_x, y, label, palette.muted);
-        put_right(
-            frame,
-            plot.summary_x,
-            y,
-            SUMMARY_WIDTH,
-            &summary,
-            palette.muted,
-        );
-
-        for (offset, hour) in visible.iter().enumerate() {
-            let index = window.start + offset;
-            let symbol = match row {
-                0 => condition_symbol::symbol(hour.code),
-                1 => temperature_step(hour.temp_c, range),
-                2 => rain_step(hour.chance),
-                _ => wind_symbol(hour.wind_kph, hour.wind_dir_deg),
-            };
-            let colour =
-                state_colour(palette, index, selected).unwrap_or(if matches!(row, 1 | 2) {
-                    palette.accent
-                } else {
-                    palette.text
-                });
-            let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
-            put(frame, x, y, symbol, colour);
-        }
-    }
-
-    let end = window.start + visible.len();
-    if selected >= window.start && selected < end {
-        let offset = selected - window.start;
-        let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
-        put(frame, x, marker_y, "▲", palette.selection);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,31 +497,6 @@ mod tests {
         assert_eq!(band_glyph(3, 1), None);
         assert_eq!(band_glyph(11, 1), Some("▃"));
         assert_eq!(band_glyph(0, 0), None);
-    }
-
-    #[test]
-    fn a_flat_temperature_range_uses_the_middle_step() {
-        assert_eq!(temperature_step(Some(12.0), Some((12.0, 12.0))), "▄");
-        assert_eq!(temperature_step(None, Some((12.0, 12.0))), " ");
-    }
-
-    #[test]
-    fn rain_probability_uses_the_week_strip_thresholds() {
-        for (chance, expected) in [
-            (None, " "),
-            (Some(0), "·"),
-            (Some(9), "·"),
-            (Some(10), "▂"),
-            (Some(29), "▂"),
-            (Some(30), "▄"),
-            (Some(49), "▄"),
-            (Some(50), "▆"),
-            (Some(69), "▆"),
-            (Some(70), "█"),
-            (Some(100), "█"),
-        ] {
-            assert_eq!(rain_step(chance), expected);
-        }
     }
 
     #[test]
@@ -723,7 +577,6 @@ mod tests {
             80,
             FULL_ROWS,
             0,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -787,7 +640,6 @@ mod tests {
             80,
             FULL_ROWS,
             0,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -824,7 +676,6 @@ mod tests {
             width,
             FULL_ROWS,
             0,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -861,7 +712,6 @@ mod tests {
             80,
             FULL_ROWS,
             0,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -892,7 +742,6 @@ mod tests {
             80,
             FULL_ROWS,
             0,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -916,7 +765,7 @@ mod tests {
         }
         let palette = Theme::default().palette();
 
-        let buffer = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
+        let buffer = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
         let arrows: Vec<u16> = (0..80)
             .filter(|x| buffer[(*x, FULL_WIND_Y)].symbol() == "↑")
             .collect();
@@ -928,7 +777,7 @@ mod tests {
         assert_eq!(buffer[(13, FULL_WIND_Y)].symbol(), "2", "tick speed digits");
         assert_eq!(buffer[(14, FULL_WIND_Y)].symbol(), "0", "tick speed digits");
 
-        let beside = rendered_buffer_in(&weather, 80, FULL_ROWS, 1, false, palette, Unit::Metric);
+        let beside = rendered_buffer_in(&weather, 80, FULL_ROWS, 1, palette, Unit::Metric);
         assert_eq!(
             beside[(13, FULL_WIND_Y)].symbol(),
             " ",
@@ -952,7 +801,7 @@ mod tests {
         };
 
         for palette in [Theme::default().palette(), monochrome] {
-            let text = rendered_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
+            let text = rendered_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
             assert!(text.contains('▲'), "selection lost without colour:\n{text}");
             assert!(
                 text.contains("Sun 12a"),
@@ -973,10 +822,9 @@ mod tests {
         let weather = Weather::fixture(22, 14);
         let palette = Theme::default().palette();
 
-        for (width, rows, compact) in [(34, COMPACT_ROWS, true), (80, FULL_ROWS, false)] {
-            let buffer =
-                rendered_buffer_in(&weather, width, rows, 3, compact, palette, Unit::Metric);
-            let text: String = (0..rows)
+        for width in [36, 80] {
+            let buffer = rendered_buffer_in(&weather, width, FULL_ROWS, 3, palette, Unit::Metric);
+            let text: String = (0..FULL_ROWS)
                 .map(|y| {
                     (0..width)
                         .map(|x| buffer[(x, y)].symbol())
@@ -984,7 +832,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let axis_y = if compact { 0 } else { FULL_AXIS_Y };
+            let axis_y = FULL_AXIS_Y;
             let anchor_x = (1..width - 1)
                 .find(|x| buffer[(*x, axis_y)].symbol() == "S")
                 .expect("current time anchor");
@@ -1001,16 +849,14 @@ mod tests {
             );
             assert!(text.contains('▲'), "selection marker missing:\n{text}");
 
-            if !compact {
-                let label_x = (1..width - 3)
-                    .find(|x| {
-                        buffer[(*x, FULL_SKY_Y)].symbol() == "s"
-                            && buffer[(*x + 1, FULL_SKY_Y)].symbol() == "k"
-                            && buffer[(*x + 2, FULL_SKY_Y)].symbol() == "y"
-                    })
-                    .expect("sky label");
-                assert_eq!(anchor_x, label_x + LABEL_WIDTH);
-            }
+            let label_x = (1..width - 3)
+                .find(|x| {
+                    buffer[(*x, FULL_SKY_Y)].symbol() == "s"
+                        && buffer[(*x + 1, FULL_SKY_Y)].symbol() == "k"
+                        && buffer[(*x + 2, FULL_SKY_Y)].symbol() == "y"
+                })
+                .expect("sky label");
+            assert_eq!(anchor_x, label_x + LABEL_WIDTH);
         }
     }
 
@@ -1026,7 +872,6 @@ mod tests {
             width,
             FULL_ROWS,
             24,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -1066,7 +911,6 @@ mod tests {
             width,
             FULL_ROWS,
             0,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -1092,7 +936,6 @@ mod tests {
             80,
             FULL_ROWS,
             3,
-            false,
             Theme::default().palette(),
             Unit::Metric,
         );
@@ -1103,8 +946,7 @@ mod tests {
 
         for theme in Theme::ALL {
             let palette = theme.palette();
-            let buffer =
-                rendered_buffer_in(&weather, 80, FULL_ROWS, 3, false, palette, Unit::Metric);
+            let buffer = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
             assert_eq!(
                 marker_coordinates(&buffer, 80, FULL_ROWS, "▲"),
                 selected,
@@ -1123,7 +965,7 @@ mod tests {
     #[test]
     fn full_weathergram_draws_four_aligned_tracks_and_markers() {
         let weather = Weather::fixture(22, 14);
-        let text = rendered(&weather, 80, FULL_ROWS, 3, false);
+        let text = rendered(&weather, 80, FULL_ROWS, 3);
 
         for label in ["sky", "temp", "rain", "wind"] {
             assert!(text.contains(label), "missing {label}:\n{text}");
@@ -1133,54 +975,19 @@ mod tests {
     }
 
     #[test]
-    fn compact_weathergram_keeps_every_track_in_six_rows() {
-        let weather = Weather::fixture(22, 14);
-        let text = rendered(&weather, 34, COMPACT_ROWS, 0, true);
-
-        assert_eq!(text.lines().count(), COMPACT_ROWS as usize);
-        for label in ["sky", "temp", "rain", "wind"] {
-            assert!(text.contains(label), "missing {label}:\n{text}");
-        }
-    }
-
-    #[test]
     fn every_width_uses_its_quantized_horizon() {
         let weather = Weather::fixture(22, 14);
 
-        for (width, hours, compact) in [
-            (34, 12, true),
-            (80, 24, false),
-            (100, 36, false),
-            (120, 48, false),
-        ] {
-            let text = rendered(
-                &weather,
-                width,
-                if compact { COMPACT_ROWS } else { FULL_ROWS },
-                0,
-                compact,
-            );
+        for (width, hours) in [(36, 12), (80, 24), (100, 36), (120, 48)] {
+            let text = rendered(&weather, width, FULL_ROWS, 0);
             assert_eq!(
                 window_for(width, 0, weather.forecast_hours().len()).hours,
                 hours
             );
-            if compact {
-                assert!(
-                    text.contains("Hourly"),
-                    "compact horizon at {width}:\n{text}"
-                );
-                let wind = text
-                    .lines()
-                    .nth(4)
-                    .unwrap_or_else(|| panic!("compact wind row missing at {width}:\n{text}"));
-                assert_eq!(wind.chars().nth(18), Some('↘'), "twelfth hour:\n{text}");
-                assert_eq!(wind.chars().nth(19), Some(' '), "thirteenth hour:\n{text}");
-            } else {
-                assert!(
-                    text.contains(&format!("next {hours} h")),
-                    "horizon at {width}:\n{text}"
-                );
-            }
+            assert!(
+                text.contains(&format!("next {hours} h")),
+                "horizon at {width}:\n{text}"
+            );
         }
     }
 
@@ -1188,7 +995,7 @@ mod tests {
     fn empty_and_missing_weathergrams_draw_without_panicking() {
         let mut empty = Weather::fixture(22, 14);
         empty.hourly.clear();
-        let _ = rendered(&empty, 80, FULL_ROWS, 0, false);
+        let _ = rendered(&empty, 80, FULL_ROWS, 0);
 
         let mut missing = Weather::fixture(22, 14);
         for hour in &mut missing.hourly {
@@ -1199,7 +1006,7 @@ mod tests {
             hour.wind_dir_deg = None;
             hour.precip_mm = None;
         }
-        let _ = rendered(&missing, 80, FULL_ROWS, 0, false);
+        let _ = rendered(&missing, 80, FULL_ROWS, 0);
     }
 
     #[test]
@@ -1214,7 +1021,7 @@ mod tests {
             precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
             "—"
         );
-        let text = rendered(&weather, 80, FULL_ROWS, 0, false);
+        let text = rendered(&weather, 80, FULL_ROWS, 0);
         let rain = text
             .lines()
             .find(|line| line.contains("rain"))
@@ -1268,19 +1075,12 @@ mod tests {
         );
     }
 
-    fn rendered(
-        weather: &Weather,
-        width: u16,
-        height: u16,
-        selected: usize,
-        compact: bool,
-    ) -> String {
+    fn rendered(weather: &Weather, width: u16, height: u16, selected: usize) -> String {
         rendered_in(
             weather,
             width,
             height,
             selected,
-            compact,
             Theme::default().palette(),
             Unit::Metric,
         )
@@ -1291,11 +1091,10 @@ mod tests {
         width: u16,
         height: u16,
         selected: usize,
-        compact: bool,
         palette: Palette,
         unit: Unit,
     ) -> String {
-        let buffer = rendered_buffer_in(weather, width, height, selected, compact, palette, unit);
+        let buffer = rendered_buffer_in(weather, width, height, selected, palette, unit);
         (0..height)
             .map(|y| {
                 (0..width)
@@ -1311,7 +1110,6 @@ mod tests {
         width: u16,
         height: u16,
         selected: usize,
-        compact: bool,
         palette: Palette,
         unit: Unit,
     ) -> Buffer {
@@ -1325,7 +1123,6 @@ mod tests {
                     frame.area(),
                     unit,
                     selected,
-                    compact,
                 )
             })
             .unwrap();
