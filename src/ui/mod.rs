@@ -443,6 +443,10 @@ mod tests {
             }
             states.push((format!("{screen:?}/locating"), locating(screen)));
             states.push((format!("{screen:?}/update-notice"), noticed(screen)));
+
+            let mut helped = ready(screen);
+            helped.help_visible = true;
+            states.push((format!("{screen:?}/help"), helped));
         }
 
         // The search box floats over a loaded screen, so the weather stays
@@ -499,6 +503,14 @@ mod tests {
             assert!(text.contains(entry), "the overlay lost {entry}: {text}");
         }
         assert!(text.contains("Keys"), "{text}");
+
+        // And only that screen's bindings: `l` is not bound on the hourly
+        // screen, and its card must not claim otherwise.
+        let mut app = ready(Screen::Hourly);
+        app.help_visible = true;
+        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
+        assert!(text.contains("[v] view"), "{text}");
+        assert!(!text.contains("location"), "{text}");
     }
 
     /// Closed is the resting state, and it must not leak the reference onto

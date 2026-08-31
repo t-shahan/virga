@@ -287,6 +287,16 @@ impl App {
     /// I/O out here — the caller owns the channel — is what lets every
     /// transition below be tested without a terminal or a network.
     pub fn on_action(&mut self, action: Action) -> Option<Request> {
+        // With the reference open, the next key's only job is closing it —
+        // even `q`: quitting or navigating through the overlay would mean
+        // acting on a screen the reader cannot see, and a misread key
+        // reopening help mid-journey is worse than one spent keystroke.
+        // Checked before the notice is let go, because a key pressed with
+        // the card covering the screen has not seen any news behind it.
+        if self.help_visible {
+            self.help_visible = false;
+            return None;
+        }
         // The notice is dismissed by living — but only by a key that could
         // have seen it. The search screen never renders the notice, so keys
         // pressed there must not silently delete news nobody was shown; and
@@ -294,14 +304,6 @@ impl App {
         // screen a straight-to-quit launch never gave it a frame on.
         if !matches!(action, Action::Quit) && self.screen != Screen::Search {
             self.update_notice = None;
-        }
-        // With the reference open, the next key's only job is closing it —
-        // even `q`: quitting or navigating through the overlay would mean
-        // acting on a screen the reader cannot see, and a misread key
-        // reopening help mid-journey is worse than one spent keystroke.
-        if self.help_visible {
-            self.help_visible = false;
-            return None;
         }
         match action {
             Action::Quit => self.should_quit = true,
@@ -840,6 +842,28 @@ mod tests {
         app.on_action(Action::NextDay);
         assert!(!app.help_visible);
         assert_eq!(app.selected_day, 14, "a swallowed key moved the selection");
+    }
+
+    /// The notice is dismissed by a key that could have seen it, and a key
+    /// pressed with the reference card covering the screen could not: news
+    /// that arrives behind the card must still be standing once it closes,
+    /// whichever key did the closing.
+    #[test]
+    fn closing_the_overlay_spares_a_notice_that_arrived_behind_it() {
+        let mut app = app_with(22, 14);
+        app.on_action(Action::ToggleHelp);
+        app.update_notice = Some("update: virga 9.9.9".to_string());
+
+        app.on_action(Action::NextDay);
+        assert!(!app.help_visible);
+        assert!(
+            app.update_notice.is_some(),
+            "the closing key deleted news nobody was shown"
+        );
+
+        // The next ordinary key sees it on screen and lets it go.
+        app.on_action(Action::NextDay);
+        assert_eq!(app.update_notice, None);
     }
 
     /// `q` and Esc close the overlay rather than quitting through it: the

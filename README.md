@@ -195,7 +195,7 @@ in the platform's per-user state directory:
 | Key | Action |
 |---|---|
 | `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
-| `↑` `↓` | Hourly screen: back / forward a day, keeping the time of day |
+| `↑` `↓` | Back / forward a day — keeping the time of day, on the hourly screen |
 | `n` / `Home` | Jump back to now |
 | `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
 | `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
@@ -203,6 +203,7 @@ in the platform's per-user state directory:
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
+| `?` | Every key for the current screen, on a card — any key closes it |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
 The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
