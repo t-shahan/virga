@@ -12,6 +12,19 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The weather appears sooner after launch.** Two delays sat between a
+  finished download and the screen. The draw loop applied the worker's
+  answers after drawing rather than before, so a forecast that arrived
+  during one wait was painted at the end of the next, and the clean repaint
+  introduced in 0.5.0 asked the terminal where its cursor was and waited
+  for the answer before wiping. Answers are now painted in the pass they
+  arrive, and the repaint no longer asks. The same two delays followed
+  every screen change, so those are quicker too. A terminal that never
+  answered the cursor question used to end the app after two seconds with
+  a cursor error instead of showing weather; it cannot any more.
+
 ## [0.5.2] - 2026-08-31
 
 ### Changed

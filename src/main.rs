@@ -6,9 +6,10 @@ use crate::events::{Message, Request};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
-use ratatui::DefaultTerminal;
+use ratatui::backend::{Backend, ClearType};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
+use ratatui::{DefaultTerminal, Terminal};
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -528,6 +529,32 @@ fn composition(app: &App) -> (Screen, HourlyView, u8) {
     (app.screen, app.hourly_view, weather)
 }
 
+/// Wipe the screen so the next frame is drawn from nothing, without asking
+/// the terminal anything.
+///
+/// `Terminal::clear` would do this, but in ratatui 0.30 it first reads the
+/// cursor position so it can put it back afterwards. That is a question the
+/// terminal has to answer before the draw loop can continue: on a real
+/// terminal a round trip on the critical path of every launch and every
+/// screen change, and on one that never answers — a pty under `script`,
+/// some embedded terminals — crossterm gives up after two seconds and the
+/// app exits with a cursor error instead of showing weather. The cursor is
+/// hidden for the whole of the app's life, so where it was is not worth
+/// preserving.
+///
+/// The two steps `Terminal::clear` takes minus the question: blank the
+/// screen, and reset the buffer the next diff is taken against so every
+/// cell is written afresh. That buffer is the back one, which no accessor
+/// reaches. `swap_buffers` resets whichever buffer is inactive before it
+/// swaps, so swapping twice resets both and leaves the current index where
+/// it started.
+fn clear_screen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    terminal.backend_mut().clear_region(ClearType::All)?;
+    terminal.swap_buffers();
+    terminal.swap_buffers();
+    Ok(())
+}
+
 fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
     match tx.try_send(request) {
         Ok(()) => Ok(()),
@@ -605,6 +632,29 @@ fn run(
     let mut last_composition = composition(&app);
 
     loop {
+        // The worker's answers are applied before anything is drawn, so a
+        // forecast that landed during the last wait is on screen in this
+        // pass. Drained after the draw, as this once was, it was on screen
+        // two passes later: the first pass drew the spinner over it and only
+        // then noticed it, and the wait between passes ran in full before
+        // the second pass painted it. At launch that second wait was the
+        // whole of the delay the user saw beyond the network's.
+        while let Ok(message) = message_rx.try_recv() {
+            dirty = true;
+            let (chained, message_warning) = match state_path {
+                Some(path) => accept_message(&mut app, message, path),
+                None => {
+                    let outcome = app.on_message(message);
+                    (outcome.request, outcome.warning)
+                }
+            };
+            retain_first_warning(warning, message_warning);
+            // A detection answers with the fetch it asked for.
+            if let Some(request) = chained {
+                dispatch(&request_tx, &mut app, request)?;
+            }
+        }
+
         // A wholesale change of what is on screen repaints from a clean
         // slate, the way a resize already does. An ordinary diff after one —
         // the loading popup giving way to the weather, or one screen
@@ -618,7 +668,7 @@ fn run(
         let now_showing = composition(&app);
         if now_showing != last_composition {
             last_composition = now_showing;
-            terminal.clear()?;
+            clear_screen(&mut terminal)?;
             dirty = true;
         }
         // Belt and braces against the class of bug that made resize freeze the
@@ -652,22 +702,6 @@ fn run(
             app.tick = app.tick.wrapping_add(1);
             terminal.draw(|frame| ui::render(frame, &app))?;
             dirty = false;
-        }
-
-        while let Ok(message) = message_rx.try_recv() {
-            dirty = true;
-            let (chained, message_warning) = match state_path {
-                Some(path) => accept_message(&mut app, message, path),
-                None => {
-                    let outcome = app.on_message(message);
-                    (outcome.request, outcome.warning)
-                }
-            };
-            retain_first_warning(warning, message_warning);
-            // A detection answers with the fetch it asked for.
-            if let Some(request) = chained {
-                dispatch(&request_tx, &mut app, request)?;
-            }
         }
 
         // The first wait is the long one; after it, whatever else the burst
@@ -729,6 +763,134 @@ mod tests {
     use crate::app::ActiveLocation;
     use crate::events::Message;
     use crate::weather::model::Weather;
+    use ratatui::Terminal;
+    use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::Cell;
+    use ratatui::layout::{Position, Size};
+    use std::convert::Infallible;
+
+    /// A backend that counts how often the terminal is asked where its
+    /// cursor is, so a test can prove the answer is never waited on.
+    struct Counting {
+        inner: TestBackend,
+        cursor_queries: usize,
+    }
+
+    impl Counting {
+        fn new(width: u16, height: u16) -> Self {
+            Self {
+                inner: TestBackend::new(width, height),
+                cursor_queries: 0,
+            }
+        }
+    }
+
+    impl Backend for Counting {
+        type Error = Infallible;
+
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Infallible>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.inner.draw(content)
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), Infallible> {
+            self.inner.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> Result<(), Infallible> {
+            self.inner.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> Result<Position, Infallible> {
+            self.cursor_queries += 1;
+            self.inner.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(
+            &mut self,
+            position: P,
+        ) -> Result<(), Infallible> {
+            self.inner.set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> Result<(), Infallible> {
+            self.inner.clear()
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Infallible> {
+            self.inner.clear_region(clear_type)
+        }
+
+        fn size(&self) -> Result<Size, Infallible> {
+            self.inner.size()
+        }
+
+        fn window_size(&mut self) -> Result<WindowSize, Infallible> {
+            self.inner.window_size()
+        }
+
+        fn flush(&mut self) -> Result<(), Infallible> {
+            self.inner.flush()
+        }
+    }
+
+    fn ready_app() -> App {
+        let mut app = App::new();
+        app.weather = Fetch::Ready(Weather::fixture(8, 0));
+        app
+    }
+
+    /// `Terminal::clear` in ratatui 0.30 asks the terminal where its cursor
+    /// is and waits for the answer before wiping. That question sits on the
+    /// critical path of every launch, and a terminal that never answers it
+    /// turns the launch into a two-second stall and an exit. The repaint the
+    /// draw loop uses must not ask.
+    #[test]
+    fn a_clean_repaint_never_asks_where_the_cursor_is() {
+        let app = ready_app();
+        let mut terminal = Terminal::new(Counting::new(120, 40)).unwrap();
+        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+
+        clear_screen(&mut terminal).unwrap();
+
+        assert_eq!(terminal.backend().cursor_queries, 0);
+    }
+
+    /// The sentinel for the workaround: `clear_screen` exists because
+    /// `Terminal::clear` asks. The day this fails, ratatui has stopped
+    /// asking and the loop can go back to `terminal.clear()`.
+    #[test]
+    fn ratatui_clear_still_asks_where_the_cursor_is() {
+        let mut terminal = Terminal::new(Counting::new(40, 12)).unwrap();
+
+        terminal.clear().unwrap();
+
+        assert_eq!(terminal.backend().cursor_queries, 1);
+    }
+
+    /// What the repaint is for: the next frame is diffed against nothing, so
+    /// every cell is written and every blank breaks a run. Had the record of
+    /// the previous frame survived, redrawing an unchanged frame over the
+    /// wiped screen would write nothing and leave it blank.
+    #[test]
+    fn a_clean_repaint_writes_every_cell_of_an_unchanged_frame() {
+        let app = ready_app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        let frame = terminal.backend().buffer().clone();
+
+        clear_screen(&mut terminal).unwrap();
+        assert_ne!(
+            terminal.backend().buffer(),
+            &frame,
+            "the screen was not wiped"
+        );
+
+        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        assert_eq!(terminal.backend().buffer(), &frame);
+    }
 
     #[test]
     fn opening_carries_terminal_colour_depth_into_the_app() {
