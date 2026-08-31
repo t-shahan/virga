@@ -464,7 +464,9 @@ still publishes and only the tap update is skipped, with a warning.
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
 - Forecast text is English only.
-- Terminals below 34×12 show a size warning instead of the interface.
+- Terminals below 34×12 show a size warning instead of the interface. The
+  hourly weathergram needs 36 columns and 19 rows above the key bar, and
+  shows the same warning below that.
 - “Today” is distinguished by colour alone in the daily chart. The selection
   is not: every screen marks it by shape as well — a `>` in the forecast
   table's gutter and a `▲` in the hourly weathergram.

@@ -12,6 +12,16 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The hourly weathergram no longer squeezes into a compact layout when the
+  terminal is short or narrow. That layout, one glyph per hour per track
+  under a two-line inspector, was left over from an early prototype and was
+  hard to read. Below 36 columns, or 19 rows above the key bar, the screen
+  now states the size it needs, the way the whole app does below 34×12, and
+  the key bar stays so `b` still shows the way back. The classic hourly
+  view keeps its own tiers.
+
 ## [0.5.2] - 2026-08-31
 
 ### Changed

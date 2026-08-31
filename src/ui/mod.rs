@@ -68,6 +68,10 @@ const _: () = assert!(SIDE_BY_SIDE_MIN > forecast::TABLE_FULL + GUTTER);
 /// set this from the *comfortable* layout and rejected an ordinary 100x20.
 const MIN_WIDTH: u16 = 34;
 const MIN_HEIGHT: u16 = 12;
+
+// The hourly weathergram's floor sits above the app's, never below it. The
+// app-wide check runs first, so a lower screen floor could never be reached.
+const _: () = assert!(hourly::MIN_WIDTH >= MIN_WIDTH);
 /// The canvas the weather screens render inside. Past the width where the
 /// widest content fits — the 48-hour weathergram, the forecast table beside
 /// its chart — broader boxes only detach titles and controls from the
@@ -90,7 +94,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     let area = frame.area();
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        too_small_render(frame, area, palette);
+        too_small_render(frame, area, area, (MIN_WIDTH, MIN_HEIGHT), palette);
         return;
     }
 
@@ -105,21 +109,26 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         }
     };
 
-    // The release notice takes one muted row above the key bar — but not at
-    // the minimum height, where every row is already spoken for, and not on
-    // the search screen, which lays itself out over the whole area and where
-    // news can wait for the choosing to finish.
-    let notice_visible =
-        app.update_notice.is_some() && app.screen != Screen::Search && area.height > MIN_HEIGHT;
-
     // The legend is pinned to the bottom; everything else is laid out inside
     // what remains so panes can be sized to their content. It asks for its own
     // height, because a narrow terminal wraps it onto a second row rather than
     // clipping bindings mid-word.
+    let legend = legend_rows(app, page_area.width);
+
+    // The release notice takes one muted row above the key bar. It yields at
+    // the minimum height, where every row is already spoken for, and wherever
+    // its row would push a screen under its own floor. It also stays off the
+    // search screen, which lays itself out over the whole area and where news
+    // can wait for the choosing to finish.
+    let notice_visible = app.update_notice.is_some()
+        && app.screen != Screen::Search
+        && area.height > MIN_HEIGHT
+        && area.height.saturating_sub(legend + 1) >= content_floor(app);
+
     let [content, notice_area, legend_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(u16::from(notice_visible)),
-        Constraint::Length(legend_rows(app, page_area.width)),
+        Constraint::Length(legend),
     ])
     .areas(page_area);
 
@@ -194,6 +203,16 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
         },
         Screen::Hourly => match &app.weather {
             Fetch::Ready(_) => match app.hourly_view {
+                // The weathergram's floor is above the app's. Below it the
+                // screen says what it needs, as the app does at its own
+                // floor, rather than squeezing into a layout nobody could
+                // read (#50). The size it asks for is the terminal's, so
+                // the chrome under the content is added back on.
+                HourlyView::Weathergram if !hourly::fits(content) => {
+                    let chrome = area.height.saturating_sub(content.height);
+                    let needs = (hourly::MIN_WIDTH, chrome + hourly::MIN_ROWS);
+                    too_small_render(frame, content, area, needs, palette);
+                }
                 HourlyView::Weathergram => hourly_render(frame, app, palette, content),
                 HourlyView::Classic => precip_render(frame, app, palette, content),
             },
@@ -241,10 +260,30 @@ fn loading_verb(app: &App) -> &'static str {
     }
 }
 
-fn too_small_render(frame: &mut Frame, area: Rect, palette: Palette) {
+/// Content rows a screen cannot lay itself out under. Zero where the app's
+/// own floor is the only one.
+fn content_floor(app: &App) -> u16 {
+    if app.screen == Screen::Hourly && app.hourly_view == HourlyView::Weathergram {
+        hourly::MIN_ROWS
+    } else {
+        0
+    }
+}
+
+/// The size warning, drawn in `area` and reporting `terminal` against
+/// `needs`. The two areas differ when one screen's floor is above the app's:
+/// the message then takes the content area and the key bar keeps its row,
+/// so the way back stays in view.
+fn too_small_render(
+    frame: &mut Frame,
+    area: Rect,
+    terminal: Rect,
+    needs: (u16, u16),
+    palette: Palette,
+) {
     let message = format!(
-        "Terminal too small\n\n{}x{}\nneeds {MIN_WIDTH}x{MIN_HEIGHT}",
-        area.width, area.height
+        "Terminal too small\n\n{}x{}\nneeds {}x{}",
+        terminal.width, terminal.height, needs.0, needs.1
     );
 
     // No border: at these sizes it would cost two of the few rows there are.
@@ -303,7 +342,6 @@ fn spinner(tick: usize) -> &'static str {
 mod tests {
     use super::*;
     use crate::theme::{ColorDepth, Theme};
-    use crate::units::Unit;
     use crate::weather::model::{Location, Weather};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -743,75 +781,131 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hourly_screen_is_usable_at_the_declared_minimum() {
-        let app = ready(Screen::Hourly);
-        let buffer = drawn(&app, Theme::default().palette(), MIN_WIDTH, MIN_HEIGHT);
-        let text = symbols(&buffer, MIN_WIDTH, MIN_HEIGHT).join("\n");
-
-        for label in ["sky", "temp", "rain", "wind"] {
-            assert!(text.contains(label), "minimum lost {label}:\n{text}");
-        }
-        assert!(!text.contains("Terminal too small"));
+    /// The terminal height at which the hourly weathergram first fits at
+    /// `width`, being its content floor plus whatever the key bar takes there.
+    fn hourly_fits_at(app: &App, width: u16) -> u16 {
+        hourly::MIN_ROWS + legend_rows(app, width)
     }
 
+    /// Below its full layout the hourly screen used to fall back to a compact
+    /// one, a two-line inspector over a one-glyph-per-hour weathergram kept
+    /// from an earlier prototype. Nobody could read it (#50). The main screen
+    /// answers a short terminal with a plain statement of the size it needs,
+    /// and the hourly screen now gives that same answer at its own floor. The
+    /// key bar stays in place, so the way back stays in view.
     #[test]
-    fn minimum_hourly_inspector_keeps_extreme_facts_in_both_units() {
-        let mut app = ready(Screen::Hourly);
-        app.location.label = "A location name far longer than the minimum terminal".to_string();
-        let Fetch::Ready(weather) = &mut app.weather else {
-            panic!("ready weather")
-        };
-        let now = weather.now_hour;
-        for hour in weather.hourly.iter_mut().skip(now).take(24) {
-            hour.chance = Some(100);
-            hour.code = Some(99);
-            hour.precip_mm = Some(120.5);
-            hour.snow_cm = Some(0.0);
-            hour.wind_kph = Some(200.0);
-            hour.gust_kph = Some(300.0);
-            hour.wind_dir_deg = Some(225.0);
-        }
+    fn a_short_terminal_replaces_the_hourly_weathergram_with_its_size() {
+        let app = ready(Screen::Hourly);
+        let width = 100;
+        let fits = hourly_fits_at(&app, width);
 
-        for (unit, facts) in [
-            (Unit::Metric, ["100%", "120.5mm", "SW200g300", "24h2892mm"]),
-            (
-                Unit::Imperial,
-                ["100%", "4.74in", "SW124g186", "24h113.86in"],
-            ),
-        ] {
-            app.unit = unit;
-            let rows = symbols(
-                &drawn(&app, Theme::default().palette(), MIN_WIDTH, MIN_HEIGHT),
-                MIN_WIDTH,
-                MIN_HEIGHT,
-            );
-            let text = rows.join("\n");
-            assert!(
-                text.contains("Thunderstorm, heavy hail"),
-                "minimum lost its spelled-out condition in {unit:?}:\n{text}"
-            );
-            let detail = rows
-                .iter()
-                .find(|row| row.contains("100%"))
-                .unwrap_or_else(|| panic!("compact detail missing in {unit:?}:\n{text}"));
-            for fact in facts {
-                assert!(
-                    detail.contains(fact),
-                    "minimum clipped {fact:?} in {unit:?}: {detail:?}"
-                );
-            }
-            assert!(
-                detail.starts_with('│') && detail.ends_with('│'),
-                "compact detail overwrote its border in {unit:?}: {detail:?}"
-            );
-        }
+        let short = symbols(&drawn(&app, probe(), width, fits - 1), width, fits - 1).join("\n");
+        assert!(short.contains("Terminal too small"), "{short}");
+        assert!(
+            short.contains(&format!("needs {}x{fits}", hourly::MIN_WIDTH)),
+            "{short}"
+        );
+        assert!(
+            !short.contains("sky"),
+            "the compact tracks came back:\n{short}"
+        );
+        assert!(
+            short.contains("[b] back"),
+            "the way back left the screen:\n{short}"
+        );
+
+        let tall = symbols(&drawn(&app, probe(), width, fits), width, fits).join("\n");
+        assert!(!tall.contains("Terminal too small"), "{tall}");
+        assert!(tall.contains("feels like"), "{tall}");
+    }
+
+    /// The full inspector's detail column is two columns wider than the app's
+    /// own floor, and the compact layout used to cover that gap too.
+    #[test]
+    fn a_narrow_terminal_replaces_the_hourly_weathergram_with_its_size() {
+        let app = ready(Screen::Hourly);
+        let height = 30;
+        let narrow = hourly::MIN_WIDTH - 1;
+
+        let text = symbols(&drawn(&app, probe(), narrow, height), narrow, height).join("\n");
+        assert!(text.contains("Terminal too small"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "needs {}x{}",
+                hourly::MIN_WIDTH,
+                hourly_fits_at(&app, narrow)
+            )),
+            "{text}"
+        );
+        assert!(
+            !text.contains("sky"),
+            "the compact tracks came back:\n{text}"
+        );
+
+        let width = hourly::MIN_WIDTH;
+        let text = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+        assert!(!text.contains("Terminal too small"), "{text}");
+        assert!(text.contains("feels like"), "{text}");
+    }
+
+    /// The app's floor is below the hourly screen's, so the floor itself has
+    /// to show the size message rather than nothing, or a panic.
+    #[test]
+    fn the_declared_minimum_tells_the_hourly_screen_what_it_needs() {
+        let app = ready(Screen::Hourly);
+        let buffer = drawn(&app, probe(), MIN_WIDTH, MIN_HEIGHT);
+        let text = symbols(&buffer, MIN_WIDTH, MIN_HEIGHT).join("\n");
+
+        assert!(text.contains("Terminal too small"), "{text}");
+        assert!(text.contains("[b] back"), "{text}");
+    }
+
+    /// The classic view has its own height tiers and was never the widget the
+    /// complaint was about; the floor belongs to the weathergram.
+    #[test]
+    fn the_classic_hourly_view_keeps_drawing_below_the_weathergram_floor() {
+        let mut app = ready(Screen::Hourly);
+        app.hourly_view = HourlyView::Classic;
+        let width = 100;
+        let height = hourly_fits_at(&app, width) - 1;
+
+        let text = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+        assert!(text.contains("Precipitation · next"), "{text}");
+        assert!(!text.contains("Terminal too small"), "{text}");
+    }
+
+    /// News must not cost the screen its layout, the rule the main screen
+    /// already applies at its own floor. A terminal that just fits the
+    /// weathergram keeps it, and the notice waits for one more row.
+    #[test]
+    fn the_notice_yields_to_the_hourly_floor() {
+        let app = noticed(Screen::Hourly);
+        let width = 100;
+        let fits = hourly_fits_at(&app, width);
+
+        let exact = symbols(&drawn(&app, probe(), width, fits), width, fits).join("\n");
+        assert!(
+            !exact.contains("update:"),
+            "the notice took the row:\n{exact}"
+        );
+        assert!(exact.contains("feels like"), "{exact}");
+
+        let roomy = symbols(&drawn(&app, probe(), width, fits + 1), width, fits + 1).join("\n");
+        assert!(roomy.contains("update:"), "{roomy}");
+        assert!(roomy.contains("feels like"), "{roomy}");
     }
 
     #[test]
     fn hourly_height_tiers_drop_week_before_core_tracks() {
         let app = ready(Screen::Hourly);
-        let short = symbols(&drawn(&app, Theme::default().palette(), 80, 12), 80, 12).join("\n");
+        let width = 100;
+        let fits = hourly_fits_at(&app, width);
+        let short = symbols(
+            &drawn(&app, Theme::default().palette(), width, fits),
+            width,
+            fits,
+        )
+        .join("\n");
         let tall = symbols(&drawn(&app, Theme::default().palette(), 100, 30), 100, 30).join("\n");
 
         assert!(!short.contains("this week"));

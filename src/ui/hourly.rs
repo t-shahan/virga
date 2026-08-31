@@ -24,9 +24,7 @@ use ratatui::widgets::{Block, Paragraph};
 /// Rows the full inspector occupies, borders included — the digit block plus the
 /// two border rows, so it is sized from the font rather than guessed at.
 const FULL_INSPECTOR_ROWS: u16 = DIGIT_ROWS as u16 + 2;
-const COMPACT_INSPECTOR_ROWS: u16 = 4;
 const FULL_PAIR_ROWS: u16 = FULL_INSPECTOR_ROWS + weathergram::FULL_ROWS;
-const COMPACT_PAIR_ROWS: u16 = COMPACT_INSPECTOR_ROWS + weathergram::COMPACT_ROWS;
 const PANEL_GAP_ROWS: u16 = 1;
 
 /// Three temperature characters (including a possible minus sign), plus the
@@ -39,6 +37,18 @@ const DETAIL_WIDTH: u16 = 34;
 const FULL_INSPECTOR_WIDTH: u16 = DETAIL_WIDTH + 2;
 const COLUMN_GUTTER: u16 = 3;
 
+/// The least this screen draws in, borders included. There is no smaller
+/// layout. The compact one that used to take over below this was a
+/// prototype's leftover that nobody could read (#50), and the caller says
+/// what the screen needs instead. `MIN_ROWS` is content rows, not terminal
+/// rows; the key bar under the content is the caller's to count.
+pub(super) const MIN_ROWS: u16 = FULL_PAIR_ROWS;
+pub(super) const MIN_WIDTH: u16 = FULL_INSPECTOR_WIDTH;
+
+pub(super) fn fits(area: Rect) -> bool {
+    area.width >= MIN_WIDTH && area.height >= MIN_ROWS
+}
+
 /// How far ahead the summary rows look. A day is the horizon people actually
 /// plan against, and it matches the vertical arrows' jump.
 const SUMMARY_HOURS: usize = 24;
@@ -50,36 +60,24 @@ pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area
         return;
     };
 
+    // Nothing here has a rendering below the floor; the caller checks it and
+    // draws the size message in this area instead.
+    if !fits(area) {
+        return;
+    }
+
     let hours = weather.forecast_hours();
     let selected = app.selected_hour;
     let hour = hours.get(selected);
 
-    let compact = area.height < FULL_PAIR_ROWS || area.width < FULL_INSPECTOR_WIDTH;
-    let inspector_rows = if compact {
-        COMPACT_INSPECTOR_ROWS
-    } else {
-        FULL_INSPECTOR_ROWS
-    };
-    let gram_rows = if compact {
-        weathergram::COMPACT_ROWS
-    } else {
-        weathergram::FULL_ROWS
-    };
-    let base_pair_rows = if compact {
-        COMPACT_PAIR_ROWS
-    } else {
-        FULL_PAIR_ROWS
-    };
-    let spare_rows = area.height.saturating_sub(base_pair_rows);
-    let pair_gap = if !compact && spare_rows >= PANEL_GAP_ROWS {
+    let spare_rows = area.height.saturating_sub(FULL_PAIR_ROWS);
+    let pair_gap = if spare_rows >= PANEL_GAP_ROWS {
         PANEL_GAP_ROWS
     } else {
         0
     };
-    let pair_rows = inspector_rows + pair_gap + gram_rows;
-    let week = (!compact)
-        .then(|| week_strip(hours, area, pair_rows + PANEL_GAP_ROWS))
-        .flatten();
+    let pair_rows = FULL_INSPECTOR_ROWS + pair_gap + weathergram::FULL_ROWS;
+    let week = week_strip(hours, area, pair_rows + PANEL_GAP_ROWS);
     let week_gap = if week.is_some() { PANEL_GAP_ROWS } else { 0 };
     let week_box = week
         .as_ref()
@@ -104,17 +102,17 @@ pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area
         _bottom_margin,
     ] = Layout::vertical([
         Constraint::Length(top_margin),
-        Constraint::Length(inspector_rows),
+        Constraint::Length(FULL_INSPECTOR_ROWS),
         Constraint::Length(pair_gap),
-        Constraint::Length(gram_rows),
+        Constraint::Length(weathergram::FULL_ROWS),
         Constraint::Length(week_gap),
         Constraint::Length(week_box),
         Constraint::Fill(1),
     ])
     .areas(area);
 
-    inspector_render(frame, app, hours, hour, palette, inspector, compact);
-    weathergram_render(frame, hours, palette, gram, app.unit, selected, compact);
+    inspector_render(frame, app, hours, hour, palette, inspector);
+    weathergram_render(frame, hours, palette, gram, app.unit, selected);
     if let Some((days, _)) = &week {
         precip_week_render(frame, days, palette, week_area, app.unit, selected);
     }
@@ -167,7 +165,6 @@ fn inspector_render(
     hour: Option<&HourlyForecast>,
     palette: Palette,
     area: Rect,
-    compact: bool,
 ) {
     let unit = app.unit;
 
@@ -221,20 +218,6 @@ fn inspector_render(
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    if compact {
-        let lines = compact_lines(
-            hour,
-            window_from(hours, app.selected_hour),
-            unit,
-            inner.width as usize,
-        );
-        frame.render_widget(
-            Paragraph::new(lines.join("\n")).style(Style::new().fg(palette.text)),
-            inner,
-        );
-        return;
-    }
 
     // Same rule as the daily pane: the digits are decoration and the readings
     // are the content, so drop the hero rather than clip it mid-glyph.
@@ -364,263 +347,6 @@ fn wind_line(hour: Option<&HourlyForecast>, unit: Unit) -> String {
         .map(compass)
         .map_or(String::new(), |direction| format!(" {direction}"));
     format!("{speed}{gust} {}{direction}", unit.speed_label())
-}
-
-fn compact_temp(value: Option<f64>, unit: Unit) -> String {
-    value.map_or_else(
-        || "—".to_string(),
-        |celsius| format!("{:.0}{}", unit.temp(celsius), unit.temp_symbol()),
-    )
-}
-
-fn compact_number(value: f64, decimals: usize, label: &str) -> String {
-    let rendered = format!("{value:.decimals$}");
-    let rendered = if label == "in" {
-        rendered
-            .strip_prefix("0.")
-            .map_or_else(|| rendered.clone(), |tail| format!(".{tail}"))
-    } else {
-        rendered
-    };
-    format!("{rendered}{label}")
-}
-
-fn compact_number_short(value: f64, decimals: usize, label: &str) -> String {
-    let rendered = format!("{value:.decimals$}");
-    let rendered = rendered.trim_end_matches('0').trim_end_matches('.');
-    let rendered = if label == "in" {
-        rendered
-            .strip_prefix("0.")
-            .map_or_else(|| rendered.to_string(), |tail| format!(".{tail}"))
-    } else {
-        rendered.to_string()
-    };
-    format!("{rendered}{label}")
-}
-
-/// At the minimum width, values beyond three ordinary digits switch to a
-/// short scientific form. This bounds a non-negative weather reading at five
-/// cells (`2e308`) without clipping its order of magnitude.
-fn dense_number(value: f64, decimals: usize) -> String {
-    let rendered = compact_number_short(value, decimals, "");
-    let rendered = rendered
-        .strip_prefix("0.")
-        .map_or_else(|| rendered.clone(), |tail| format!(".{tail}"));
-    if rendered.chars().count() <= 3 {
-        rendered
-    } else {
-        format!("{value:.0e}")
-    }
-}
-
-fn compact_amount(hour: Option<&HourlyForecast>, unit: Unit) -> String {
-    let Some(hour) = hour else {
-        return "—".to_string();
-    };
-    if let Some(cm) = hour.snow_cm.filter(|cm| *cm > 0.0) {
-        return compact_number(unit.snow(cm), unit.snow_decimals(), unit.snow_label());
-    }
-    match hour.precip_mm {
-        Some(mm) if mm > 0.0 => {
-            let value = unit.precip(mm);
-            let decimals = unit.precip_decimals();
-            let quantum = 0.1_f64.powi(decimals as i32);
-            if value < quantum / 2.0 {
-                format!(
-                    "<{}",
-                    compact_number(quantum, decimals, unit.precip_label())
-                )
-            } else {
-                compact_number(value, decimals, unit.precip_label())
-            }
-        }
-        Some(_) => format!("0{}", unit.precip_label()),
-        None => "—".to_string(),
-    }
-}
-
-fn compact_wind(hour: Option<&HourlyForecast>, unit: Unit) -> String {
-    let Some(hour) = hour else {
-        return "—".to_string();
-    };
-    let direction = hour.wind_dir_deg.map(compass).unwrap_or_default();
-    let speed = hour.wind_kph.map_or_else(
-        || "—".to_string(),
-        |speed| format!("{:.0}", unit.speed(speed)),
-    );
-    match hour.gust_kph {
-        Some(gust) => format!("{direction}{speed}g{:.0}", unit.speed(gust)),
-        None => format!("{direction}{speed}"),
-    }
-}
-
-fn compact_total(total: PrecipitationAggregate, unit: Unit, short: bool) -> String {
-    match total {
-        PrecipitationAggregate::Unavailable => "—".to_string(),
-        PrecipitationAggregate::Zero => format!("0{}", unit.precip_label()),
-        PrecipitationAggregate::Measured(value) if short => {
-            compact_number_short(value, unit.precip_decimals(), unit.precip_label())
-        }
-        PrecipitationAggregate::Trace(_) | PrecipitationAggregate::Measured(_) => total
-            .positive_text(unit, "")
-            .expect("positive aggregate has text"),
-    }
-}
-
-fn dense_direction(degrees: f64) -> &'static str {
-    const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
-    ARROWS[((degrees.rem_euclid(360.0) / 45.0).round() as usize) % ARROWS.len()]
-}
-
-/// Final 32-cell mode. `r` and `s` distinguish selected rain and snowfall,
-/// the arrow is wind direction, `g` is gust, and `24h` is the forward total.
-/// The total's suffix establishes the active precipitation unit; `s` uses the
-/// active snow unit (centimetres metric, inches imperial).
-fn dense_second_line(
-    hour: Option<&HourlyForecast>,
-    total: PrecipitationAggregate,
-    unit: Unit,
-) -> String {
-    let chance = hour
-        .and_then(|hour| hour.chance)
-        .map_or_else(|| "—".to_string(), |chance| format!("{chance}%"));
-
-    let amount = match hour {
-        None => "r—".to_string(),
-        Some(hour) => {
-            if let Some(snow) = hour.snow_cm.filter(|snow| *snow > 0.0) {
-                format!("s{}", dense_number(unit.snow(snow), unit.snow_decimals()))
-            } else {
-                match hour.precip_mm {
-                    None => "r—".to_string(),
-                    Some(amount) if amount <= 0.0 => "r0".to_string(),
-                    Some(amount) => {
-                        let value = unit.precip(amount);
-                        let quantum = 0.1_f64.powi(unit.precip_decimals() as i32);
-                        if value < quantum / 2.0 {
-                            format!("r<{}", dense_number(quantum, unit.precip_decimals()))
-                        } else {
-                            format!("r{}", dense_number(value, unit.precip_decimals()))
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    let wind = match hour {
-        None => "—".to_string(),
-        Some(hour) => {
-            let direction = hour.wind_dir_deg.map(dense_direction).unwrap_or("—");
-            let speed = hour.wind_kph.map_or_else(
-                || "—".to_string(),
-                |speed| dense_number(unit.speed(speed), 0),
-            );
-            let gust = hour
-                .gust_kph
-                .map(|gust| format!("g{}", dense_number(unit.speed(gust), 0)))
-                .unwrap_or_default();
-            format!("{direction}{speed}{gust}")
-        }
-    };
-
-    let total = match total {
-        PrecipitationAggregate::Unavailable => "—".to_string(),
-        PrecipitationAggregate::Zero => "0".to_string(),
-        PrecipitationAggregate::Trace(quantum) => {
-            format!("<{}", dense_number(quantum, unit.precip_decimals()))
-        }
-        PrecipitationAggregate::Measured(value) => dense_number(value, unit.precip_decimals()),
-    };
-
-    format!("{chance}{amount}{wind}24h{total}{}", unit.precip_label())
-}
-
-fn dense_first_line(
-    temp: Option<f64>,
-    feels: Option<f64>,
-    humidity: Option<u8>,
-    unit: Unit,
-) -> String {
-    let temp = temp.map_or_else(
-        || "—".to_string(),
-        |value| dense_number(unit.temp(value), 0),
-    );
-    let feels = feels.map_or_else(
-        || "—".to_string(),
-        |value| dense_number(unit.temp(value), 0),
-    );
-    let humidity = humidity.map_or_else(|| "—".to_string(), |value| value.to_string());
-    format!(
-        "T{temp}{}F{feels}{}H{humidity}%",
-        unit.temp_symbol(),
-        unit.temp_symbol()
-    )
-}
-
-fn fit_compact_second_line(
-    chance: &str,
-    amount: &str,
-    wind: &str,
-    total: PrecipitationAggregate,
-    hour: Option<&HourlyForecast>,
-    unit: Unit,
-    width: usize,
-) -> String {
-    let regular_total = compact_total(total, unit, false);
-    let mut line = format!("{chance} {amount} {wind} 24h{regular_total}");
-    if line.chars().count() <= width {
-        return line;
-    }
-
-    line = format!("{chance}{amount} {wind} 24h{regular_total}");
-    if line.chars().count() <= width {
-        return line;
-    }
-
-    let short_total = compact_total(total, unit, true);
-    line = format!("{chance}{amount} {wind} 24h{short_total}");
-    if line.chars().count() <= width {
-        return line;
-    }
-
-    line = format!("{chance}{amount}{wind}24h{short_total}");
-    if line.chars().count() <= width {
-        return line;
-    }
-
-    dense_second_line(hour, total, unit)
-}
-
-fn compact_lines(
-    hour: Option<&HourlyForecast>,
-    ahead: &[HourlyForecast],
-    unit: Unit,
-    width: usize,
-) -> [String; 2] {
-    let temp = compact_temp(hour.and_then(|h| h.temp_c), unit);
-    let feels = compact_temp(hour.and_then(|h| h.feels_like_c), unit);
-    let humidity = hour
-        .and_then(|h| h.humidity_pct)
-        .map_or_else(|| "—".to_string(), |value| format!("{value}%"));
-    let chance = hour
-        .and_then(|h| h.chance)
-        .map_or_else(|| "—".to_string(), |value| format!("{value}%"));
-    let amount = compact_amount(hour, unit);
-    let wind = compact_wind(hour, unit);
-    let total = aggregate(ahead, unit);
-    let mut first = format!("{temp} feels {feels} RH{humidity}");
-    if first.chars().count() > width {
-        first = dense_first_line(
-            hour.and_then(|hour| hour.temp_c),
-            hour.and_then(|hour| hour.feels_like_c),
-            hour.and_then(|hour| hour.humidity_pct),
-            unit,
-        );
-    }
-    let second = fit_compact_second_line(&chance, &amount, &wind, total, hour, unit, width);
-
-    [first, second]
 }
 
 fn window_from(hours: &[HourlyForecast], selected: usize) -> &[HourlyForecast] {
@@ -797,10 +523,6 @@ mod tests {
 
     fn palette() -> Palette {
         Theme::default().palette()
-    }
-
-    fn compact_total_for(ahead: &[HourlyForecast], unit: Unit) -> String {
-        compact_total(aggregate(ahead, unit), unit, false)
     }
 
     const CITY: &str = "Frederick, Maryland, United States";
@@ -1082,138 +804,22 @@ mod tests {
     }
 
     #[test]
-    fn compact_temperature_keeps_the_active_unit() {
-        assert_eq!(compact_temp(Some(25.0), Unit::Metric), "25°C");
-        assert_eq!(compact_temp(Some(25.0), Unit::Imperial), "77°F");
-        assert_eq!(compact_temp(None, Unit::Imperial), "—");
-    }
-
-    #[test]
-    fn compact_amount_distinguishes_snow_zero_trace_and_missing() {
-        let mut hours = dry_hours(1);
-        hours[0].precip_mm = Some(0.254);
-        assert_eq!(compact_amount(hours.first(), Unit::Imperial), ".01in");
-        assert_eq!(compact_amount(hours.first(), Unit::Metric), "0.3mm");
-
-        hours[0].snow_cm = Some(2.54);
-        assert_eq!(compact_amount(hours.first(), Unit::Imperial), "1.0in");
-        hours[0].snow_cm = Some(0.0);
-        hours[0].precip_mm = Some(0.0);
-        assert_eq!(compact_amount(hours.first(), Unit::Metric), "0mm");
-        assert_eq!(compact_amount(hours.first(), Unit::Imperial), "0in");
-        hours[0].precip_mm = None;
-        assert_eq!(compact_amount(hours.first(), Unit::Metric), "—");
-    }
-
-    #[test]
-    fn compact_wind_keeps_speed_when_direction_is_missing() {
-        let mut hours = dry_hours(1);
-        hours[0].wind_kph = Some(14.5);
-        hours[0].gust_kph = Some(24.1);
-        assert_eq!(compact_wind(hours.first(), Unit::Imperial), "SW9g15");
-        hours[0].wind_dir_deg = None;
-        assert_eq!(compact_wind(hours.first(), Unit::Imperial), "9g15");
-        hours[0].wind_dir_deg = Some(225.0);
-        hours[0].wind_kph = None;
-        assert_eq!(compact_wind(hours.first(), Unit::Imperial), "SW—g15");
-    }
-
-    #[test]
-    fn compact_total_uses_converted_precision_without_spaces() {
-        let mut hours = dry_hours(24);
-        for hour in hours.iter_mut().take(4) {
-            hour.precip_mm = Some(6.35);
-        }
-        assert_eq!(compact_total_for(&hours, Unit::Imperial), "1.00in");
-        assert_eq!(compact_total_for(&dry_hours(4), Unit::Metric), "0mm");
-        assert_eq!(compact_total_for(&[], Unit::Metric), "—");
-    }
-
-    #[test]
-    fn compact_total_is_unavailable_when_every_measurement_is_missing() {
-        let mut hours = dry_hours(24);
-        for hour in &mut hours {
-            hour.precip_mm = None;
-        }
-
-        assert_eq!(compact_total_for(&hours, Unit::Metric), "—");
-        let app = app_showing(hours, 0);
-        let text = rendered(34, COMPACT_PAIR_ROWS, &app);
-        let total = text
-            .lines()
-            .find(|line| line.contains("24h"))
-            .expect("compact total line");
-        assert!(
-            total.contains("24h—"),
-            "all-missing total claimed dryness: {total:?}"
-        );
-    }
-
-    #[test]
     fn selected_forward_totals_reject_partial_measurements() {
         let mut hours = dry_hours(24);
         hours[7].precip_mm = None;
 
         assert_eq!(total_line(&hours, Unit::Metric), UNKNOWN);
-        assert_eq!(compact_total_for(&hours, Unit::Metric), "—");
     }
 
     #[test]
     fn selected_forward_totals_distinguish_zero_and_trace() {
         let zero = dry_hours(24);
         assert_eq!(total_line(&zero, Unit::Metric), "none expected");
-        assert_eq!(compact_total_for(&zero, Unit::Metric), "0mm");
 
         let mut trace = dry_hours(24);
         trace[0].precip_mm = Some(0.01);
         assert_eq!(total_line(&trace, Unit::Metric), "<0.1 mm");
         assert_eq!(total_line(&trace, Unit::Imperial), "<0.01 in");
-        assert_eq!(compact_total_for(&trace, Unit::Metric), "<0.1mm");
-        assert_eq!(compact_total_for(&trace, Unit::Imperial), "<0.01in");
-    }
-
-    #[test]
-    fn compact_lines_fit_the_narrowest_inspector_without_truncation() {
-        let mut hours = dry_hours(24);
-        for hour in &mut hours {
-            hour.temp_c = Some(45.0);
-            hour.feels_like_c = Some(45.0);
-            hour.humidity_pct = Some(100);
-            hour.chance = Some(100);
-            hour.precip_mm = Some(6.35);
-            hour.snow_cm = Some(25.4);
-            hour.wind_kph = Some(15.0);
-            hour.gust_kph = Some(24.0);
-            hour.wind_dir_deg = Some(225.0);
-        }
-
-        for unit in [Unit::Metric, Unit::Imperial] {
-            for line in compact_lines(hours.first(), &hours, unit, 32) {
-                assert!(
-                    line.chars().count() <= 32,
-                    "{unit:?} compact line is too wide: {line:?}"
-                );
-                assert!(!line.ends_with('…'), "compact values must not be truncated");
-            }
-        }
-    }
-
-    #[test]
-    fn compact_lines_use_dense_tokens_before_extreme_values_can_clip() {
-        let mut hours = dry_hours(24);
-        for hour in &mut hours {
-            hour.chance = Some(100);
-            hour.precip_mm = Some(9_999.9);
-            hour.wind_kph = Some(9_999.0);
-            hour.gust_kph = Some(9_999.0);
-            hour.wind_dir_deg = Some(225.0);
-        }
-
-        let line = compact_lines(hours.first(), &hours, Unit::Metric, 32)[1].clone();
-        assert!(line.chars().count() <= 32, "dense line clipped: {line:?}");
-        for fact in ["100%", "r1e4", "↙1e4g1e4", "24h2e5mm"] {
-            assert!(line.contains(fact), "dense line lost {fact:?}: {line:?}");
-        }
     }
 
     /// The window must shorten rather than run off the end of the series.
@@ -1525,16 +1131,6 @@ mod tests {
         assert_eq!(buffer[(98, 21)].symbol(), " ", "weekly title inset");
     }
 
-    #[test]
-    fn compact_pair_uses_exactly_ten_content_rows() {
-        let app = app_showing(dry_hours(192), 0);
-        let text = rendered(34, 10, &app);
-        assert_eq!(text.lines().count(), 10);
-        for label in ["sky", "temp", "rain", "wind"] {
-            assert!(text.contains(label), "lost {label}:\n{text}");
-        }
-    }
-
     /// Rendering the full state matrix proves the selected-hour inspector and
     /// weathergram degrade together: an empty forecast, missing readings, and
     /// every navigation edge still leave the four tracks available.
@@ -1589,7 +1185,13 @@ mod tests {
             if case == "flat below-zero temperatures and threshold readings" {
                 app.unit = Unit::Metric;
             }
-            for (width, height) in [(34, 12), (80, 24), (100, 24), (120, 30), (200, 50)] {
+            for (width, height) in [
+                (MIN_WIDTH, MIN_ROWS),
+                (80, 24),
+                (100, 24),
+                (120, 30),
+                (200, 50),
+            ] {
                 let buffer = rendered_buffer(width, height, &app);
                 let text = buffer_text(&buffer, width, height);
                 for label in ["sky", "temp", "rain", "wind"] {
@@ -1745,10 +1347,25 @@ mod tests {
         let mut app = app_showing(hours, 0);
         app.unit = Unit::Metric;
 
-        let text = rendered(34, FULL_PAIR_ROWS, &app);
+        let text = rendered(MIN_WIDTH, MIN_ROWS, &app);
         assert!(text.contains("200"), "wind speed was lost:\n{text}");
         assert!(text.contains("300"), "wind gust was lost:\n{text}");
         assert!(text.contains("SW"), "wind direction was lost:\n{text}");
+    }
+
+    /// Below the floor the caller draws the size message over this area, so
+    /// anything drawn here would sit under it. A partial layout at these
+    /// sizes is what the compact one used to be.
+    #[test]
+    fn below_the_floor_nothing_is_drawn() {
+        let app = app_showing(dry_hours(192), 0);
+        for (width, height) in [(MIN_WIDTH - 1, 30), (100, MIN_ROWS - 1), (34, 12)] {
+            let text = rendered(width, height, &app);
+            assert!(
+                text.trim().is_empty(),
+                "{width}x{height} drew below the floor:\n{text}"
+            );
+        }
     }
 
     /// The awkward sizes, including the app's declared minimum and either side
