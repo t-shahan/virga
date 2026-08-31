@@ -556,7 +556,7 @@ mod tests {
     /// The hourly card is now one line taller than the floor can hold with
     /// its border, so exactly one line clips from the tail — and it must be
     /// `[?] keys`, the binding the footer already restates, rather than the
-    /// key style toggle just added beside it.
+    /// hide toggle just added beside it.
     #[test]
     fn the_floor_clips_the_redundant_question_mark_line_and_keeps_the_rest() {
         let mut app = ready(Screen::Hourly);
@@ -568,7 +568,7 @@ mod tests {
         )
         .join("\n");
 
-        for entry in ["[q] quit", "[b] back", "[,] key style"] {
+        for entry in ["[q] quit", "[b] back", "[,] hide"] {
             assert!(text.contains(entry), "lost {entry:?}: {text:?}");
         }
         assert!(

@@ -56,7 +56,7 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("u", "units"),
             ("l", "location"),
             ("t", &theme_label(app)),
-            (",", "key style"),
+            (",", "hide"),
         ])
         .into_iter()
         .chain(help)
@@ -71,7 +71,7 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("r", "refresh"),
             ("u", "units"),
             ("t", &theme_label(app)),
-            (",", "key style"),
+            (",", "hide"),
         ])
         .into_iter()
         .chain(help)
@@ -96,8 +96,8 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
 /// live; the standing entry lives in the overlay.
 fn hint(app: &App) -> Vec<(&'static str, String)> {
     let mut pairs = match app.screen {
-        Screen::Weather => owned(vec![("q", "quit"), ("?", "all keys")]),
-        Screen::Hourly => owned(vec![("q", "quit"), ("b", "back"), ("?", "all keys")]),
+        Screen::Weather => owned(vec![("q", "quit"), ("?", "keybinds")]),
+        Screen::Hourly => owned(vec![("q", "quit"), ("b", "back"), ("?", "keybinds")]),
         Screen::Search => return bindings(app),
     };
     if app.theme_readout_visible() {
@@ -324,7 +324,7 @@ mod tests {
         for screen in [Screen::Weather, Screen::Hourly] {
             let legend = legend_at(120, screen).join("\n");
             assert!(legend.contains("[q] quit"), "{screen:?}: {legend:?}");
-            assert!(legend.contains("[?] all keys"), "{screen:?}: {legend:?}");
+            assert!(legend.contains("[?] keybinds"), "{screen:?}: {legend:?}");
         }
     }
 
