@@ -1,0 +1,39 @@
+# The README asks for an issue before any substantial change so approach and
+# scope get discussed before code exists. This form front-loads that
+# discussion: the problem and the fit matter more than the proposed mechanism.
+name: Feature request
+description: Something Virga should do, or should do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What you are trying to do that Virga currently makes hard or
+        impossible. Lead with this rather than the solution — a different
+        mechanism may solve it better.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: >
+        How you imagine it working. Virga is deliberately light on
+        configuration — the command line takes no options and nothing outside
+        the app is configurable beyond units — so a proposal that works
+        without adding a knob has a head start.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Other shapes this could take, including doing nothing, and why they
+        fall short. Fine to leave empty.
+    validations:
+      required: false
