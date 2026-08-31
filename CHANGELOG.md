@@ -14,6 +14,16 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- **The weather appears sooner after launch.** Two delays sat between a
+  finished download and the screen. The draw loop applied the worker's
+  answers after drawing rather than before, so a forecast that arrived
+  during one wait was painted at the end of the next, and the clean repaint
+  introduced in 0.5.0 asked the terminal where its cursor was and waited
+  for the answer before wiping. Answers are now painted in the pass they
+  arrive, and the repaint no longer asks. The same two delays followed
+  every screen change, so those are quicker too. A terminal that never
+  answered the cursor question used to end the app after two seconds with
+  a cursor error instead of showing weather; it cannot any more.
 - The hourly weathergram no longer squeezes into a compact layout when the
   terminal is short or narrow. That layout, one glyph per hour per track
   under a two-line inspector, was left over from an early prototype and was

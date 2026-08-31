@@ -1,0 +1,5 @@
+# Blank issues stay on deliberately. The README invites opening an issue to
+# discuss a change before writing it, and that kind of issue fits neither
+# form; forcing it into one would discourage exactly the conversation the
+# forms exist to encourage.
+blank_issues_enabled: true

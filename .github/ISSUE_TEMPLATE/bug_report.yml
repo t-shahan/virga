@@ -1,0 +1,62 @@
+# The environment fields are not ceremony. Virga's rendering is
+# capability-detected from TERM and COLORTERM, its layout changes with the
+# window size, and its input handling is platform-specific, so "which
+# terminal, how big, on what OS" is usually the difference between a bug
+# that reproduces and one that cannot.
+name: Bug report
+description: A crash, a wrong number, a garbled frame, or anything else Virga does that it should not.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        What you saw, and what you expected instead. For anything visual, a
+        screenshot says more than a description of one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Starting from launch. If it only happens with a particular city,
+        theme, or window size, that detail is the interesting part.
+      placeholder: |
+        1. virga
+        2. Resize the window below ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Virga version
+      description: The output of `virga version`.
+      placeholder: virga 0.5.2
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15, Ubuntu 24.04, Windows 11
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: >
+        The emulator, and for rendering or colour problems also the values of
+        `TERM` and `COLORTERM` and the rough window size. Colour handling is
+        detected from those variables, so they decide which palette variant
+        you were actually seeing.
+      placeholder: Ghostty, TERM=xterm-ghostty, COLORTERM=truecolor, about 120×34
+    validations:
+      required: true
