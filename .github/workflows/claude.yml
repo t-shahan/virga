@@ -1,10 +1,14 @@
 name: Claude Code
 
 on:
+  # `edited` as well as `created`: an @claude added to a comment after posting
+  # it is the common way to ask, and with `created` alone the edit fired
+  # nothing and the request was silently lost. The cost is that every later
+  # edit of a mentioning comment re-fires, which the bot guard below contains.
   issue_comment:
-    types: [created]
+    types: [created, edited]
   pull_request_review_comment:
-    types: [created]
+    types: [created, edited]
   issues:
     types: [opened, assigned]
   pull_request_review:
@@ -12,9 +16,13 @@ on:
 
 jobs:
   claude:
+    # The bot guard is what makes `edited` safe. claude[bot] rewrites its own
+    # progress comment while it works, several times over a few minutes. Those
+    # are edits, and without this a mention quoted back into one of them would
+    # re-trigger the job on its own output.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issue_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
