@@ -12,6 +12,8 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.5.2]
+
 ### Changed
 
 - The key legend at the bottom of the screen is centred, sitting under the
@@ -256,7 +258,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/t-shahan/virga/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/t-shahan/virga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t-shahan/virga/compare/v0.3.0...v0.4.0
