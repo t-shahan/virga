@@ -41,6 +41,44 @@ impl HourlyView {
     }
 }
 
+/// Whether the key bar hints at the reference behind `?` or names every
+/// binding itself, the way it always has. `,` toggles it and the choice is
+/// persisted, the same shape as the theme, but the default is `Hint` rather
+/// than `Full`: unlike the theme, nobody has this bar in front of them yet —
+/// the hint shipped inside the same unreleased range this toggle did, so
+/// there is no standing muscle memory for `Full` to protect. `Full` is what a
+/// user opts *into*, to get the always-visible list back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum KeyHintStyle {
+    #[default]
+    Hint,
+    Full,
+}
+
+impl KeyHintStyle {
+    pub fn toggle(self) -> Self {
+        match self {
+            KeyHintStyle::Hint => KeyHintStyle::Full,
+            KeyHintStyle::Full => KeyHintStyle::Hint,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            KeyHintStyle::Hint => "hint",
+            KeyHintStyle::Full => "full",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "hint" => Some(KeyHintStyle::Hint),
+            "full" => Some(KeyHintStyle::Full),
+            _ => None,
+        }
+    }
+}
+
 /// How far the vertical arrows jump. Eight days is a long way at one press
 /// per hour.
 const HOURS_PER_DAY: usize = 24;
@@ -209,6 +247,13 @@ pub struct App {
     /// weather screens: search binds `?` to text, and while the overlay is
     /// open every action closes it before it could change screen.
     pub help_visible: bool,
+    /// Whether the bar hints at `?` or lists every binding itself.
+    pub key_hint_style: KeyHintStyle,
+    /// Set the moment `,` changes `key_hint_style`, so the caller knows to
+    /// write it down — the same "persist the moment it changes" shape a
+    /// chosen location already follows, rather than a save pass over
+    /// everything at exit.
+    key_hint_style_dirty: bool,
 }
 
 /// How long the palette's name stays on the key bar after `t`. Long enough to
@@ -264,6 +309,8 @@ impl App {
             theme_readout_until: None,
             update_notice: None,
             help_visible: false,
+            key_hint_style: KeyHintStyle::default(),
+            key_hint_style_dirty: false,
         }
     }
 
@@ -330,8 +377,13 @@ impl App {
             Action::Now => self.select_now(),
             Action::ToggleHourlyView => self.hourly_view = self.hourly_view.toggle(),
             // Only ever opens: a `?` with the overlay up is closed by the
-            // interception above, like any other key.
+            // interception above, like any other key, and `input` only ever
+            // produces this action in `Hint` style — `?` is unbound in `Full`.
             Action::ToggleHelp => self.help_visible = true,
+            Action::ToggleKeyHints => {
+                self.key_hint_style = self.key_hint_style.toggle();
+                self.key_hint_style_dirty = true;
+            }
             Action::Insert(c) => {
                 self.query.push(c);
                 self.invalidate_results();
@@ -486,6 +538,18 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Takes the pending save left by a `,` press, if there is one.
+    ///
+    /// Mirrors `expire_theme_readout`'s shape for the same reason: the caller
+    /// owns the write, so this only has to report that one is due and hand
+    /// back what to write, once, rather than write it itself.
+    pub fn take_key_hint_style_save(&mut self) -> Option<KeyHintStyle> {
+        self.key_hint_style_dirty.then(|| {
+            self.key_hint_style_dirty = false;
+            self.key_hint_style
+        })
     }
 
     /// A request this app asked for that never reached the worker, because the
@@ -879,6 +943,39 @@ mod tests {
 
         app.on_action(Action::Quit);
         assert!(app.should_quit, "the second press must still quit");
+    }
+
+    /// The default matches what this branch already renders for everyone —
+    /// there is no released `Full` bar to protect muscle memory for, so
+    /// nobody's first launch may change out from under them.
+    #[test]
+    fn the_key_hint_style_defaults_to_hint() {
+        assert_eq!(App::new().key_hint_style, KeyHintStyle::Hint);
+    }
+
+    #[test]
+    fn a_comma_toggles_the_key_hint_style_and_back() {
+        let mut app = App::new();
+        app.on_action(Action::ToggleKeyHints);
+        assert_eq!(app.key_hint_style, KeyHintStyle::Full);
+        app.on_action(Action::ToggleKeyHints);
+        assert_eq!(app.key_hint_style, KeyHintStyle::Hint);
+    }
+
+    /// The toggle is worth writing down, but only once per press — a caller
+    /// that saves on every idle tick must not rewrite the file forever.
+    #[test]
+    fn toggling_the_key_hint_style_leaves_exactly_one_pending_save() {
+        let mut app = App::new();
+        assert_eq!(app.take_key_hint_style_save(), None);
+
+        app.on_action(Action::ToggleKeyHints);
+        assert_eq!(app.take_key_hint_style_save(), Some(KeyHintStyle::Full));
+        assert_eq!(
+            app.take_key_hint_style_save(),
+            None,
+            "the save was not taken exactly once"
+        );
     }
 
     #[test]

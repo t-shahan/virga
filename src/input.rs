@@ -5,7 +5,7 @@
 //! — more usefully — makes the whole of "which key does what" testable without
 //! a terminal.
 
-use crate::app::Screen;
+use crate::app::{KeyHintStyle, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// Something the user asked for, named in the app's own terms.
@@ -34,6 +34,9 @@ pub enum Action {
     ToggleHourlyView,
     /// Open or close the key reference overlay.
     ToggleHelp,
+    /// Switch the bar between hinting at `?` and naming every binding
+    /// itself.
+    ToggleKeyHints,
     Insert(char),
     Backspace,
     Submit,
@@ -71,19 +74,19 @@ impl Action {
 /// backend reports press and release for every keystroke, and enhanced
 /// terminal protocols can add repeats on Unix too. Acting on a release would
 /// double every keystroke and every request.
-pub fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
+pub fn action_for(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
     match key.kind {
         KeyEventKind::Release => return None,
         KeyEventKind::Repeat => {
-            let action = binding(key, screen)?;
+            let action = binding(key, screen, key_hint_style)?;
             return action.repeatable().then_some(action);
         }
         KeyEventKind::Press => {}
     }
-    binding(key, screen)
+    binding(key, screen, key_hint_style)
 }
 
-fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
+fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
     // Checked before the screen bindings so it works even where the plain key
     // means something else — `c` is ordinary text on the search screen.
     // `contains` rather than equality, because terminals do not all report the
@@ -108,7 +111,8 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Up => Some(Action::PrevDay),
             KeyCode::Down => Some(Action::NextDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Today),
-            KeyCode::Char('?') => Some(Action::ToggleHelp),
+            KeyCode::Char('?') => help_key(key_hint_style),
+            KeyCode::Char(',') => Some(Action::ToggleKeyHints),
             _ => None,
         },
         Screen::Hourly => match key.code {
@@ -134,7 +138,8 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Down => Some(Action::NextHourDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
             KeyCode::Char('v') => Some(Action::ToggleHourlyView),
-            KeyCode::Char('?') => Some(Action::ToggleHelp),
+            KeyCode::Char('?') => help_key(key_hint_style),
+            KeyCode::Char(',') => Some(Action::ToggleKeyHints),
             _ => None,
         },
         // Every printable key is text here, so none of the command letters
@@ -151,9 +156,24 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
     }
 }
 
+/// `?` opens the reference only in `Hint` style — in `Full` style the bar
+/// already names everything, so there is nothing behind the card to open,
+/// and the key is better left unbound than opening an empty one.
+fn help_key(key_hint_style: KeyHintStyle) -> Option<Action> {
+    (key_hint_style == KeyHintStyle::Hint).then_some(Action::ToggleHelp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shadows the real, three-argument `action_for` for every test below
+    /// that does not care which key hint style is active — which is most of
+    /// them, since the style only ever changes what `?` and `,` mean. Tests
+    /// that do care call `super::action_for` directly.
+    fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
+        super::action_for(key, screen, KeyHintStyle::Hint)
+    }
 
     /// `?` opens the key reference wherever a legend hint advertises it, and
     /// stays ordinary text in the search box, where a query might contain one.
@@ -170,6 +190,51 @@ mod tests {
             action_for(press(KeyCode::Char('?')), Screen::Search),
             Some(Action::Insert('?'))
         );
+    }
+
+    /// `Full` style has no card behind `?` to open, so the key is unbound
+    /// there rather than opening an empty one.
+    #[test]
+    fn question_mark_is_unbound_in_full_style() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            assert_eq!(
+                super::action_for(press(KeyCode::Char('?')), screen, KeyHintStyle::Full),
+                None,
+                "{screen:?}"
+            );
+        }
+    }
+
+    /// `,` switches the bar style wherever it names a binding at all, and
+    /// stays ordinary text in the search box, matching every other command
+    /// letter there.
+    #[test]
+    fn comma_toggles_the_key_hint_style_on_the_weather_screens_only() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            assert_eq!(
+                action_for(press(KeyCode::Char(',')), screen),
+                Some(Action::ToggleKeyHints),
+                "{screen:?}"
+            );
+        }
+        assert_eq!(
+            action_for(press(KeyCode::Char(',')), Screen::Search),
+            Some(Action::Insert(','))
+        );
+    }
+
+    /// The toggle works the same whichever style is already active — it is
+    /// what switches between them, so it cannot be gated by the very thing it
+    /// changes.
+    #[test]
+    fn comma_toggles_from_either_style() {
+        for style in [KeyHintStyle::Hint, KeyHintStyle::Full] {
+            assert_eq!(
+                super::action_for(press(KeyCode::Char(',')), Screen::Weather, style),
+                Some(Action::ToggleKeyHints),
+                "{style:?}"
+            );
+        }
     }
 
     /// A toggle on key repeat flickers: a held `?` would open and close the
@@ -275,6 +340,8 @@ mod tests {
             (KeyCode::Char('r'), Screen::Weather),
             (KeyCode::Char('l'), Screen::Weather),
             (KeyCode::Char('u'), Screen::Weather),
+            (KeyCode::Char(','), Screen::Weather),
+            (KeyCode::Char(','), Screen::Hourly),
             // Six palettes go past in well under a second on key repeat, and
             // the one you wanted is not the one you land on.
             (KeyCode::Char('t'), Screen::Weather),

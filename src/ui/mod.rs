@@ -447,6 +447,10 @@ mod tests {
             let mut helped = ready(screen);
             helped.help_visible = true;
             states.push((format!("{screen:?}/help"), helped));
+
+            let mut full_style = ready(screen);
+            full_style.key_hint_style = crate::app::KeyHintStyle::Full;
+            states.push((format!("{screen:?}/full-style"), full_style));
         }
 
         // The search box floats over a loaded screen, so the weather stays
@@ -547,6 +551,45 @@ mod tests {
                 "{screen:?} lost the way out: {rows:?}"
             );
         }
+    }
+
+    /// The hourly card is now one line taller than the floor can hold with
+    /// its border, so exactly one line clips from the tail — and it must be
+    /// `[?] keys`, the binding the footer already restates, rather than the
+    /// key style toggle just added beside it.
+    #[test]
+    fn the_floor_clips_the_redundant_question_mark_line_and_keeps_the_rest() {
+        let mut app = ready(Screen::Hourly);
+        app.help_visible = true;
+        let text = symbols(
+            &drawn(&app, probe(), MIN_WIDTH, MIN_HEIGHT),
+            MIN_WIDTH,
+            MIN_HEIGHT,
+        )
+        .join("\n");
+
+        for entry in ["[q] quit", "[b] back", "[,] key style"] {
+            assert!(text.contains(entry), "lost {entry:?}: {text:?}");
+        }
+        assert!(
+            !text.contains("[?] keys"),
+            "the redundant line should have clipped: {text:?}"
+        );
+    }
+
+    /// `Full` style is the pre-overlay bar revived: every binding named on
+    /// the bar itself, with no card behind `?` because there is nothing left
+    /// for it to hold.
+    #[test]
+    fn full_style_names_every_binding_on_the_bar_and_opens_no_card() {
+        let mut app = ready(Screen::Weather);
+        app.key_hint_style = crate::app::KeyHintStyle::Full;
+        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
+
+        for entry in ["[p] hourly", "[l] location", "[t] theme"] {
+            assert!(text.contains(entry), "{text:?}");
+        }
+        assert!(!text.contains("any key closes"), "{text:?}");
     }
 
     /// `?` then any key must be a round trip: the overlay borrows the screen,

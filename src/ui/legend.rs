@@ -1,4 +1,4 @@
-use crate::app::{App, Fetch, Screen};
+use crate::app::{App, Fetch, KeyHintStyle, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -41,6 +41,11 @@ fn owned(pairs: Vec<(&'static str, &str)>) -> Vec<(&'static str, String)> {
 /// longer the bar's. `?` closes as well as opens, so it earns a line like
 /// any other key.
 pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
+    // `?` only does something in `Hint` style — `Full` already names
+    // everything here, so listing a binding for a key that does nothing
+    // would be a lie the reference itself is telling.
+    let help = (app.key_hint_style == KeyHintStyle::Hint).then_some(("?", "keys".to_string()));
+
     match app.screen {
         Screen::Weather => owned(vec![
             ("q", "quit"),
@@ -51,8 +56,11 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("u", "units"),
             ("l", "location"),
             ("t", &theme_label(app)),
-            ("?", "keys"),
-        ]),
+            (",", "key style"),
+        ])
+        .into_iter()
+        .chain(help)
+        .collect(),
         Screen::Hourly => owned(vec![
             ("q", "quit"),
             ("b", "back"),
@@ -63,8 +71,11 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("r", "refresh"),
             ("u", "units"),
             ("t", &theme_label(app)),
-            ("?", "keys"),
-        ]),
+            (",", "key style"),
+        ])
+        .into_iter()
+        .chain(help)
+        .collect(),
         // Search never opens the overlay — `?` is text there — so its short
         // self-explanatory lists are both hint and reference.
         Screen::Search => match &app.results {
@@ -209,17 +220,26 @@ fn row_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + SPACING * widths.len().saturating_sub(1)
 }
 
+/// What the bar shows: every binding in `Full` style, since there is no card
+/// behind `?` to carry the rest, and just the hint in `Hint` style.
+fn displayed(app: &App) -> Vec<(&'static str, String)> {
+    match app.key_hint_style {
+        KeyHintStyle::Full => bindings(app),
+        KeyHintStyle::Hint => hint(app),
+    }
+}
+
 /// How many rows the legend needs at this width, so the caller can reserve
 /// them before laying out everything else.
 pub(super) fn legend_rows(app: &App, width: u16) -> u16 {
     // The palette cannot change how much room the bindings need, so measuring
     // with any of them gives the same answer.
-    (wrapped(hint(app), app.theme.palette(), width).len() as u16).clamp(1, MAX_ROWS)
+    (wrapped(displayed(app), app.theme.palette(), width).len() as u16).clamp(1, MAX_ROWS)
 }
 
 pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     frame.render_widget(
-        Paragraph::new(wrapped(hint(app), palette, area.width)),
+        Paragraph::new(wrapped(displayed(app), palette, area.width)),
         area,
     );
 }
@@ -258,6 +278,42 @@ mod tests {
         (0..height)
             .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
             .collect()
+    }
+
+    /// `Full` style is what a user opts into to get the old always-visible
+    /// bar back — every binding named, the same as `bindings` gives the
+    /// overlay in `Hint` style.
+    #[test]
+    fn full_style_lists_every_binding_on_the_bar_itself() {
+        let mut app = app_on(Screen::Weather);
+        app.key_hint_style = KeyHintStyle::Full;
+        let legend = legend_at_with(&app, 120).join("\n");
+        for entry in ["[p] hourly", "[l] location", "[t] theme"] {
+            assert!(legend.contains(entry), "{legend:?}");
+        }
+    }
+
+    /// `?` opens nothing in `Full` style, so advertising it on the bar would
+    /// be a binding that lies about what pressing it does.
+    #[test]
+    fn full_style_never_advertises_the_question_mark() {
+        let mut app = app_on(Screen::Weather);
+        app.key_hint_style = KeyHintStyle::Full;
+        let legend = legend_at_with(&app, 120).join("\n");
+        assert!(!legend.contains("[?]"), "{legend:?}");
+    }
+
+    /// The toggle itself has to be discoverable from whichever style is
+    /// active: from `Hint` behind the card, and from `Full` right on the bar,
+    /// since `Full` has nowhere else to put it.
+    #[test]
+    fn the_key_style_toggle_is_listed_in_both_styles() {
+        for style in [KeyHintStyle::Hint, KeyHintStyle::Full] {
+            let mut app = app_on(Screen::Weather);
+            app.key_hint_style = style;
+            let listed = bindings(&app).iter().any(|(key, _)| *key == ",");
+            assert!(listed, "{style:?}");
+        }
     }
 
     /// The bar is a hint now, so the one thing it must advertise is the key
@@ -439,6 +495,42 @@ mod tests {
         }
     }
 
+    /// `Full` style's list is longer than the hint's — the same sweep, over
+    /// `bindings` instead, since that list is what the bar now carries whole
+    /// rather than behind a card.
+    #[test]
+    fn narrowing_never_cuts_a_full_style_binding_in_half() {
+        for screen in [Screen::Weather, Screen::Hourly, Screen::Search] {
+            for width in 8u16..=160 {
+                let mut app = app_on(screen);
+                app.key_hint_style = KeyHintStyle::Full;
+                let rows = legend_at_with(&app, width);
+
+                for row in &rows {
+                    assert!(
+                        row.chars().count() <= width as usize,
+                        "at {width}: row overflows: {row:?}"
+                    );
+                    assert_eq!(
+                        row.matches('[').count(),
+                        row.matches(']').count(),
+                        "at {width}: cut a key in half: {row:?}"
+                    );
+                }
+
+                let shown = rows.join(" ");
+                for (key, label) in bindings(&app) {
+                    if shown.contains(&format!("[{key}]")) {
+                        assert!(
+                            shown.contains(&format!("[{key}] {label}")),
+                            "at {width}: {key:?} lost its label: {shown:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Wrapping is what lets a terminal narrower than the minimum keep the
     /// hint's bindings whole instead of clipping them mid-word.
     #[test]
@@ -495,5 +587,20 @@ mod tests {
         let legend = legend_at(20, Screen::Hourly).join(" ");
         assert!(legend.contains("[q]"), "{legend:?}");
         assert!(legend.contains("[b]"), "{legend:?}");
+    }
+
+    /// `Full` style's longer list is still bound by the same ceiling — the
+    /// row it costs never grows past what `Hint` style's bar already reserves
+    /// room for.
+    #[test]
+    fn full_style_never_takes_more_than_its_share_either() {
+        for width in 1u16..=200 {
+            for screen in [Screen::Weather, Screen::Hourly] {
+                let mut app = app_on(screen);
+                app.key_hint_style = KeyHintStyle::Full;
+                let rows = legend_rows(&app, width);
+                assert!((1..=MAX_ROWS).contains(&rows), "width {width}: {rows} rows");
+            }
+        }
     }
 }

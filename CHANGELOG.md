@@ -17,6 +17,11 @@ refuse to publish a version this file does not describe.
 - **A key reference behind `?`.** Pressing `?` on either weather screen
   opens a card listing every binding for that screen; the next key closes
   it — including `q` and Esc, which close it without also quitting.
+- **`,` switches the key bar between hinting and naming everything.** The
+  short hint plus `?` card is the default; `,` swaps it for the
+  always-visible list of every binding the bar carried before, with no
+  card behind `?` in that style since there is nothing left for it to
+  hold. The choice is persisted the same way a startup theme is.
 
 ### Changed
 

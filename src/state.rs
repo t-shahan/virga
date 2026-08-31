@@ -1,4 +1,4 @@
-use crate::app::{ActiveLocation, LocationSource, Remembered};
+use crate::app::{ActiveLocation, KeyHintStyle, LocationSource, Remembered};
 use crate::theme::Theme;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,10 @@ struct StateDocument {
     /// version: most documents predate it or never set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    /// The bar style `,` last chose, by name. Optional in every version, the
+    /// same way `theme` is: most documents predate it or never toggled it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_hints: Option<String>,
 }
 
 /// Everything the state file had to say, with the parts that could not be
@@ -36,8 +40,10 @@ struct StateDocument {
 pub(crate) struct Persisted {
     pub remembered: Option<Remembered>,
     pub theme: Option<Theme>,
+    pub key_hint_style: Option<KeyHintStyle>,
     /// A complaint about part of the document that did not stop the rest
-    /// being used. Only an unknown theme name produces one today.
+    /// being used. Only an unknown theme or key hint style name produces one
+    /// today.
     pub warning: Option<String>,
 }
 
@@ -56,10 +62,14 @@ fn remembered_of(document: &StateDocument) -> Result<Option<Remembered>> {
         document.version
     );
     let Some(location) = &document.location else {
-        // Only version 3 may omit the location, and only to carry a theme
-        // instead; a document recording nothing at all records a bug.
+        // Only version 3 may omit the location, and only to carry a theme or
+        // a key hint style instead; a document recording nothing at all
+        // records a bug.
         anyhow::ensure!(document.version == LOCATIONLESS_VERSION, "no location");
-        anyhow::ensure!(document.theme.is_some(), "neither a location nor a theme");
+        anyhow::ensure!(
+            document.theme.is_some() || document.key_hints.is_some(),
+            "neither a location, a theme, nor a key hint style"
+        );
         return Ok(None);
     };
     validate(location)?;
@@ -92,6 +102,24 @@ fn theme_of(document: &StateDocument) -> (Option<Theme>, Option<String>) {
     }
 }
 
+/// The key hint style, if the document names one this binary knows. An
+/// unknown name is a warning and nothing else, the same as an unknown theme:
+/// it must not take the remembered location or theme down with it.
+fn key_hint_style_of(document: &StateDocument) -> (Option<KeyHintStyle>, Option<String>) {
+    let Some(name) = &document.key_hints else {
+        return (None, None);
+    };
+    match KeyHintStyle::from_name(name) {
+        Some(style) => (Some(style), None),
+        None => (
+            None,
+            Some(format!(
+                "virga: the state file names an unknown key hint style {name:?}; ignoring it."
+            )),
+        ),
+    }
+}
+
 fn validate(location: &ActiveLocation) -> Result<()> {
     anyhow::ensure!(!location.label.trim().is_empty(), "location label is empty");
     anyhow::ensure!(location.lat.is_finite(), "latitude is not finite");
@@ -118,11 +146,13 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     let document: StateDocument =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
     let remembered = remembered_of(&document)?;
-    let (theme, warning) = theme_of(&document);
+    let (theme, theme_warning) = theme_of(&document);
+    let (key_hint_style, key_hint_warning) = key_hint_style_of(&document);
     Ok(Persisted {
         remembered,
         theme,
-        warning,
+        key_hint_style,
+        warning: theme_warning.or(key_hint_warning),
     })
 }
 
@@ -204,26 +234,54 @@ pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> 
     );
     validate(location)?;
     let _held = exclusive(path)?;
-    // The raw name, not the parsed theme: one this binary does not know
+    // The raw names, not the parsed values: one this binary does not know
     // still belongs to somebody — a newer Virga, most likely — and
     // remembering a city must not erase it.
-    let theme = surviving_document(path)?.and_then(|document| document.theme);
-    save_document(path, Some(remembered), theme)
+    let existing = surviving_document(path)?;
+    let theme = existing
+        .as_ref()
+        .and_then(|document| document.theme.clone());
+    let key_hints = existing.and_then(|document| document.key_hints);
+    save_document(path, Some(remembered), theme, key_hints)
 }
 
 pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
     let _held = exclusive(path)?;
     // A location that no longer parses was unusable anyway; dropping it is
     // the one lossy merge here, and it loses nothing that worked.
-    let remembered =
-        surviving_document(path)?.and_then(|document| remembered_of(&document).ok().flatten());
-    save_document(path, remembered.as_ref(), Some(theme.name().to_string()))
+    let existing = surviving_document(path)?;
+    let remembered = existing
+        .as_ref()
+        .and_then(|document| remembered_of(document).ok().flatten());
+    let key_hints = existing.and_then(|document| document.key_hints);
+    save_document(
+        path,
+        remembered.as_ref(),
+        Some(theme.name().to_string()),
+        key_hints,
+    )
+}
+
+pub(crate) fn save_key_hint_style(path: &Path, style: KeyHintStyle) -> Result<()> {
+    let _held = exclusive(path)?;
+    let existing = surviving_document(path)?;
+    let remembered = existing
+        .as_ref()
+        .and_then(|document| remembered_of(document).ok().flatten());
+    let theme = existing.and_then(|document| document.theme);
+    save_document(
+        path,
+        remembered.as_ref(),
+        theme,
+        Some(style.name().to_string()),
+    )
 }
 
 fn save_document(
     path: &Path,
     remembered: Option<&Remembered>,
     theme: Option<String>,
+    key_hints: Option<String>,
 ) -> Result<()> {
     let version = match remembered {
         Some(_) => VERSION,
@@ -240,6 +298,7 @@ fn save_document(
             location: remembered.map(|remembered| remembered.location.clone()),
             source: remembered.map(|remembered| remembered.source),
             theme,
+            key_hints,
         },
     )?;
     use std::io::Write as _;
@@ -430,6 +489,78 @@ mod tests {
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, None);
         assert_eq!(persisted.theme, Some(Theme::Dracula));
+    }
+
+    /// The same shape as a theme: it rides in a version 2 document beside the
+    /// location, and a version 2 reader that predates it simply ignores it.
+    #[test]
+    fn a_key_hint_style_rides_in_a_version_2_document_beside_the_location() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        save_location(&path, &berlin).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// A key hint style chosen before any weather has ever loaded has no city
+    /// to sit beside — the same shape the theme falls into for the same
+    /// reason.
+    #[test]
+    fn a_key_hint_style_with_no_location_is_a_version_3_document() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+
+        assert_eq!(raw_version(&path), 3);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, None);
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// Three independent saves, none of which may erase either of the other
+    /// two — the same guarantee the location/theme pair already has, extended
+    /// to the third field.
+    #[test]
+    fn saving_any_one_of_location_theme_and_key_hints_preserves_the_others() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+        let reykjavik = chosen("Reykjavík, Iceland", 64.14659, -21.94223);
+
+        save_location(&path, &berlin).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_location(&path, &reykjavik).unwrap();
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(reykjavik));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// An unknown key hint style name is a warning and nothing else, the same
+    /// as an unknown theme: it must not take the rest of the document with it.
+    #[test]
+    fn an_unknown_key_hint_style_name_warns_but_keeps_the_rest() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        write_raw(
+            &path,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","key_hints":"compact"}"#,
+        );
+
+        let persisted = load_from(&path).unwrap();
+
+        assert!(persisted.remembered.is_some());
+        assert_eq!(persisted.key_hint_style, None);
+        assert!(persisted.warning.unwrap().contains("compact"));
     }
 
     #[test]
