@@ -705,7 +705,9 @@ fn run(
                 Event::Key(key) => {
                     // Keys that mean nothing on this screen — and every key
                     // release — leave no mark, so they do not even cost a redraw.
-                    if let Some(action) = input::action_for(key, app.screen, app.key_hint_style) {
+                    if let Some(action) =
+                        input::action_for(key, app.screen, app.key_hint_style, app.help_visible)
+                    {
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {

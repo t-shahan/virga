@@ -74,7 +74,12 @@ impl Action {
 /// backend reports press and release for every keystroke, and enhanced
 /// terminal protocols can add repeats on Unix too. Acting on a release would
 /// double every keystroke and every request.
-pub fn action_for(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
+pub fn action_for(
+    key: KeyEvent,
+    screen: Screen,
+    key_hint_style: KeyHintStyle,
+    help_visible: bool,
+) -> Option<Action> {
     match key.kind {
         KeyEventKind::Release => return None,
         KeyEventKind::Repeat => {
@@ -83,7 +88,18 @@ pub fn action_for(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -
         }
         KeyEventKind::Press => {}
     }
-    binding(key, screen, key_hint_style)
+    let action = binding(key, screen, key_hint_style);
+    // The reference card's footer promises "any key closes", and `App` keeps
+    // that promise by swallowing whichever action arrives while the card is
+    // up — but a key bound to nothing produces no action to swallow, and a
+    // promise kept for `q` and broken for Tab reads as a frozen app. Which
+    // action stands in does not matter, since the swallow closes the card
+    // before it could run; the kind filters above still apply, so the
+    // release half of the `?` press that opened the card cannot close it.
+    if help_visible && action.is_none() {
+        return Some(Action::ToggleHelp);
+    }
+    action
 }
 
 fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
@@ -167,12 +183,13 @@ fn help_key(key_hint_style: KeyHintStyle) -> Option<Action> {
 mod tests {
     use super::*;
 
-    /// Shadows the real, three-argument `action_for` for every test below
-    /// that does not care which key hint style is active — which is most of
-    /// them, since the style only ever changes what `?` and `,` mean. Tests
-    /// that do care call `super::action_for` directly.
+    /// Shadows the real `action_for` for every test below that does not care
+    /// which key hint style is active or whether the help card is up — which
+    /// is most of them, since the style only ever changes what `?` and `,`
+    /// mean, and the card only changes what unbound keys mean. Tests that do
+    /// care call `super::action_for` directly.
     fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
-        super::action_for(key, screen, KeyHintStyle::Hint)
+        super::action_for(key, screen, KeyHintStyle::Hint, false)
     }
 
     /// `?` opens the key reference wherever a legend hint advertises it, and
@@ -198,7 +215,7 @@ mod tests {
     fn question_mark_is_unbound_in_full_style() {
         for screen in [Screen::Weather, Screen::Hourly] {
             assert_eq!(
-                super::action_for(press(KeyCode::Char('?')), screen, KeyHintStyle::Full),
+                super::action_for(press(KeyCode::Char('?')), screen, KeyHintStyle::Full, false),
                 None,
                 "{screen:?}"
             );
@@ -230,7 +247,7 @@ mod tests {
     fn comma_toggles_from_either_style() {
         for style in [KeyHintStyle::Hint, KeyHintStyle::Full] {
             assert_eq!(
-                super::action_for(press(KeyCode::Char(',')), Screen::Weather, style),
+                super::action_for(press(KeyCode::Char(',')), Screen::Weather, style, false),
                 Some(Action::ToggleKeyHints),
                 "{style:?}"
             );
@@ -512,5 +529,57 @@ mod tests {
             assert_eq!(action_for(press(KeyCode::F(5)), screen), None);
         }
         assert_eq!(action_for(press(KeyCode::Tab), Screen::Search), None);
+    }
+
+    /// The card's footer says "any key closes", so with it up even a key the
+    /// screen never bound must produce an action for `App` to swallow. The
+    /// release and repeat filters still hold: without them, the release half
+    /// of the `?` press that opened the card would close it at once on
+    /// Windows.
+    #[test]
+    fn any_pressed_key_acts_while_the_help_card_is_up() {
+        let with_help = |key| super::action_for(key, Screen::Weather, KeyHintStyle::Hint, true);
+
+        for code in [KeyCode::Tab, KeyCode::F(5), KeyCode::Char('x')] {
+            assert!(
+                with_help(press(code)).is_some(),
+                "{code:?} left the card open"
+            );
+            assert_eq!(
+                with_help(of_kind(code, KeyEventKind::Release)),
+                None,
+                "{code:?} acted on release"
+            );
+            assert_eq!(
+                with_help(of_kind(code, KeyEventKind::Repeat)),
+                None,
+                "held {code:?} repeated through the card"
+            );
+        }
+    }
+
+    /// The whole pipeline the event loop runs, key to `action_for` to
+    /// `on_action`: `?` opens the card, and Tab — bound to nothing on the
+    /// weather screen — closes it, with its release along the way changing
+    /// nothing.
+    #[test]
+    fn an_unbound_key_closes_the_help_card_through_the_real_pipeline() {
+        let mut app = crate::app::App::new();
+        let feed = |app: &mut crate::app::App, key| {
+            if let Some(action) =
+                super::action_for(key, app.screen, app.key_hint_style, app.help_visible)
+            {
+                app.on_action(action);
+            }
+        };
+
+        feed(&mut app, press(KeyCode::Char('?')));
+        feed(&mut app, of_kind(KeyCode::Char('?'), KeyEventKind::Release));
+        assert!(app.help_visible, "? did not open the card");
+
+        feed(&mut app, press(KeyCode::Tab));
+        assert!(!app.help_visible, "an unbound key left the card open");
+        feed(&mut app, of_kind(KeyCode::Tab, KeyEventKind::Release));
+        assert!(!app.help_visible, "a release reopened the card");
     }
 }
