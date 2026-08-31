@@ -420,12 +420,17 @@ cargo test --locked --all-targets
 cargo package --locked
 ```
 
-Opening a pull request fills in a template. Keep its `Review focus for
-@claude` section and say where the review should look hardest, because that
-is the part a reviewer cannot reconstruct from the diff. Claude reviews every
-pull request either way, against the requirements in
-[`CLAUDE.md`](CLAUDE.md), so the section directs the review rather than
-triggering it.
+Opening a pull request fills in a template. Keep its `Review focus` section
+and say where the review should look hardest, because that is the part a
+reviewer cannot reconstruct from the diff. Claude reviews every pull request
+either way, against the requirements in [`CLAUDE.md`](CLAUDE.md), so the
+section directs the review rather than triggering it.
+
+Mentioning `@claude` is a separate thing and always optional. It hands the
+work to the interactive agent, which answers questions and can run the cargo
+gates, and it is read from a pull request description, a comment, or an issue.
+Mentions added by editing count, so a request is no longer lost by being typed
+a moment too late.
 
 Notable changes belong in [`CHANGELOG.md`](CHANGELOG.md) under `Unreleased`.
 That is not bookkeeping for its own sake: release notes are generated from that
