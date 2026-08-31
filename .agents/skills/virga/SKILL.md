@@ -43,8 +43,8 @@ the `rust-version` note in `Cargo.toml` set the register.
 ## Tests
 
 Unit tests live beside the code they cover, in an inline `#[cfg(test)] mod
-tests` block. Twenty-eight source files carry one. `tests/fixtures/` holds
-recorded API payloads, not test functions.
+tests` block, which is most of `src/`. `tests/fixtures/` holds recorded API
+payloads, not test functions.
 
 Rendering is tested through Ratatui's `TestBackend`, including narrow and
 awkward terminal sizes. Tests that reach a live provider are marked
