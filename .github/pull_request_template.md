@@ -2,15 +2,23 @@
 
 <!-- What changes, and why. Link the issue if there is one. -->
 
-## Review focus for @claude
+## Review focus
 
-@claude review this pull request against the requirements in
-[CLAUDE.md](https://github.com/t-shahan/virga/blob/main/CLAUDE.md).
-Cover security, panics and error handling, readability, test coverage, and
-cross-platform input. Report general quality problems, not only outright bugs.
+<!-- Claude reviews every pull request on its own against the requirements in
+     CLAUDE.md: security, panics and error handling, readability, test
+     coverage, cross-platform input. You do not have to ask for that.
 
-<!-- Then tell it where to look hardest. Delete the line below if the
-     standard sweep above is genuinely all this needs. -->
+     What it cannot reconstruct from the diff is where the risk actually sits.
+     Say that here.
+
+     Mentioning Claude by handle anywhere in this description additionally
+     hands the whole pull request to the interactive agent, which answers
+     questions and can run the cargo gates. Use it when you want a
+     conversation rather than a review. Leaving it out is the normal case.
+
+     The handle is deliberately not written here: this comment is part of the
+     description GitHub sends, so spelling it out would trigger the agent on
+     every pull request that keeps the template. -->
 
 Look hardest at:
 
