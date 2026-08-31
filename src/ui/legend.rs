@@ -132,7 +132,17 @@ fn wrapped(app: &App, palette: Palette, width: u16) -> Vec<Line<'static>> {
 /// so once the count is settled the break moves to wherever levels the two
 /// rows most evenly. The greedy break itself always qualifies, so there is
 /// always a candidate.
+///
+/// Every width must already fit in `room` on its own — `wrapped` filters
+/// before calling. An over-wide entry would not panic here, but the
+/// first-on-a-row branch accepts it unconditionally and the row would
+/// silently clip.
 fn split(widths: &[usize], room: usize) -> Vec<usize> {
+    // The levelling pass below destructures exactly two rows and skips any
+    // other count. Raising MAX_ROWS means teaching it to level more rows,
+    // not just changing the constant.
+    const _: () = assert!(MAX_ROWS == 2);
+
     let mut rows: Vec<usize> = Vec::new();
     let mut index = 0;
     while index < widths.len() && rows.len() < MAX_ROWS as usize {
