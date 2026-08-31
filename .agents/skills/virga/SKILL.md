@@ -1,159 +1,77 @@
 ---
 name: virga-conventions
-description: Development conventions and patterns for virga. Rust Rust project with conventional commits.
+description: Development conventions and patterns for virga, a Rust terminal weather application.
 ---
 
-# Virga Conventions
+# Virga conventions
 
-> Generated from [t-shahan/virga](https://github.com/t-shahan/virga) on 2026-08-12
+The conventions themselves live in [CLAUDE.md](../../../CLAUDE.md) at the
+repository root, which is also what the pull request review enforces. This
+file orients; that file governs. When the two disagree, CLAUDE.md is right.
 
-## Overview
+## When to use this skill
 
-This skill teaches Claude the development patterns and conventions used in virga.
-
-## Tech Stack
-
-- **Primary Language**: Rust
-- **Framework**: Rust
-- **Architecture**: hybrid module organization
-- **Test Location**: separate
-
-## When to Use This Skill
-
-Activate this skill when:
 - Making changes to this repository
-- Adding new features following established patterns
-- Writing tests that match project conventions
-- Creating commits with proper message format
+- Adding features that should match existing patterns
+- Writing tests
+- Writing commit messages
 
-## Commit Conventions
+## Stack
 
-Follow these commit message conventions based on 8 analyzed commits.
+A single Rust binary crate, `virga-tui`, producing the `virga` binary. Edition
+2024, minimum supported Rust 1.89. Ratatui draws the interface, `ureq` fetches
+from Open-Meteo, and `serde` parses the responses.
 
-### Commit Style: Conventional Commits
+Layout: `src/ui/` renders, `src/weather/` fetches and parses, and the files at
+the top of `src/` hold the app loop, input, state, CLI, and units.
 
-### Prefixes Used
+## Code style
 
-- `feat`
-- `docs`
-- `test`
-
-### Message Guidelines
-
-- Average message length: ~46 characters
-- Keep first line concise and descriptive
-- Use imperative mood ("Add feature" not "Added feature")
-
-
-*Commit message example*
-
-```text
-docs: design remembered startup location
-```
-
-*Commit message example*
-
-```text
-feat: default startup weather to New York City
-```
-
-*Commit message example*
-
-```text
-test: cover remembered-location persistence warnings
-```
-
-*Commit message example*
-
-```text
-docs: plan remembered location implementation
-```
-
-*Commit message example*
-
-```text
-feat: load a remembered location from user state
-```
-
-*Commit message example*
-
-```text
-feat: atomically save the active location
-```
-
-*Commit message example*
-
-```text
-feat: remember locations after successful weather loads
-```
-
-*Commit message example*
-
-```text
-docs: explain remembered location state
-```
-
-## Architecture
-
-### Project Structure: Single Package
-
-This project uses **hybrid** module organization.
-
-### Guidelines
-
-- This project uses a hybrid organization
-- Follow existing patterns when adding new code
-
-## Code Style
-
-### Language: Rust
-
-### Naming Conventions
+Standard Rust naming, which is what `cargo fmt` and Clippy already enforce:
 
 | Element | Convention |
 |---------|------------|
-| Files | camelCase |
-| Functions | camelCase |
-| Classes | PascalCase |
-| Constants | SCREAMING_SNAKE_CASE |
+| Files and modules | `snake_case` |
+| Functions and variables | `snake_case` |
+| Types, traits, enum variants | `PascalCase` |
+| Constants and statics | `SCREAMING_SNAKE_CASE` |
 
-### Import Style: Relative Imports
+Comments explain why, not what. The ones worth writing record a constraint, a
+rejected alternative, or a trap. The header of `.github/workflows/ci.yml` and
+the `rust-version` note in `Cargo.toml` set the register.
 
-### Export Style: Named Exports
+## Tests
 
+Unit tests live beside the code they cover, in an inline `#[cfg(test)] mod
+tests` block. Twenty-eight source files carry one. `tests/fixtures/` holds
+recorded API payloads, not test functions.
 
-*Preferred import style*
+Rendering is tested through Ratatui's `TestBackend`, including narrow and
+awkward terminal sizes. Tests that reach a live provider are marked
+`#[ignore]`, so a provider outage never fails a pull request.
 
-```typescript
-// Use relative imports
-import { Button } from '../components/Button'
-import { useAuth } from './hooks/useAuth'
+## Checks
+
+The four gates CI enforces, and the four `scripts/release.sh` runs before it
+will tag:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked --all-targets
+cargo package --locked
 ```
 
-*Preferred export style*
+## Commits
 
-```typescript
-// Use named exports
-export function calculateTotal() { ... }
-export const TAX_RATE = 0.1
-export interface Order { ... }
+Conventional commits in the imperative mood. The prefixes this repository
+uses: `feat`, `fix`, `perf`, `docs`, `test`, `ci`, `chore`, `refactor`.
+
+```text
+feat: default startup weather to New York City
+fix: scroll the forecast table back to a selected past day
+test: cover remembered-location persistence warnings
 ```
 
-## Best Practices
-
-Based on analysis of the codebase, follow these practices:
-
-### Do
-
-- Use conventional commit format (feat:, fix:, etc.)
-- Use camelCase for file names
-- Prefer named exports
-
-### Don't
-
-- Don't write vague commit messages
-- Don't deviate from established patterns without discussion
-
----
-
-*This skill was auto-generated by [ECC Tools](https://ecc.tools). Review and customize as needed for your team.*
+Work a user can observe also owes a line in `CHANGELOG.md` under the topmost
+section. `scripts/check-changelog.sh` gates it.
