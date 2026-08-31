@@ -12,12 +12,6 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-### Added
-
-- The up and down arrows step through the days on the main screen, matching
-  the vertical listing in the Forecast table; left and right keep working as
-  they always have.
-
 ### Changed
 
 - The key legend at the bottom of the screen is centred, sitting under the
@@ -26,6 +20,14 @@ refuse to publish a version this file does not describe.
   rows rather than filling the first to the brim and leaving the second a
   stub. The update notice that appears above the legend is centred the same
   way.
+
+## [0.5.1] - 2026-08-30
+
+### Added
+
+- The up and down arrows step through the days on the main screen, matching
+  the vertical listing in the Forecast table; left and right keep working as
+  they always have.
 
 ### Fixed
 
@@ -243,7 +245,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/t-shahan/virga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/t-shahan/virga/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/t-shahan/virga/compare/v0.2.0...v0.3.0
