@@ -205,6 +205,10 @@ pub struct App {
     /// Composed in the probe, so this module never learns about versions,
     /// paths, or the network — it holds a string and lets it go.
     pub update_notice: Option<String>,
+    /// Whether the key reference overlay is open. Only reachable from the
+    /// weather screens: search binds `?` to text, and while the overlay is
+    /// open every action closes it before it could change screen.
+    pub help_visible: bool,
 }
 
 /// How long the palette's name stays on the key bar after `t`. Long enough to
@@ -259,6 +263,7 @@ impl App {
             search_return: Screen::Weather,
             theme_readout_until: None,
             update_notice: None,
+            help_visible: false,
         }
     }
 
@@ -290,6 +295,14 @@ impl App {
         if !matches!(action, Action::Quit) && self.screen != Screen::Search {
             self.update_notice = None;
         }
+        // With the reference open, the next key's only job is closing it —
+        // even `q`: quitting or navigating through the overlay would mean
+        // acting on a screen the reader cannot see, and a misread key
+        // reopening help mid-journey is worse than one spent keystroke.
+        if self.help_visible {
+            self.help_visible = false;
+            return None;
+        }
         match action {
             Action::Quit => self.should_quit = true,
             Action::Back => self.back(),
@@ -314,6 +327,9 @@ impl App {
             Action::NextHourDay => self.select_next_hour_day(),
             Action::Now => self.select_now(),
             Action::ToggleHourlyView => self.hourly_view = self.hourly_view.toggle(),
+            // Only ever opens: a `?` with the overlay up is closed by the
+            // interception above, like any other key.
+            Action::ToggleHelp => self.help_visible = true,
             Action::Insert(c) => {
                 self.query.push(c);
                 self.invalidate_results();
@@ -795,6 +811,51 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_help_overlay_toggles_open_and_closed() {
+        let mut app = App::new();
+        assert!(!app.help_visible, "help started open");
+        app.on_action(Action::ToggleHelp);
+        assert!(app.help_visible);
+        app.on_action(Action::ToggleHelp);
+        assert!(!app.help_visible);
+    }
+
+    /// With the reference open the next key's only job is to close it. Acting
+    /// as well would mean navigating blind behind the overlay, and reopening
+    /// help by accident while trying to move would be worse than a no-op
+    /// keystroke.
+    #[test]
+    fn any_action_closes_the_help_overlay_and_does_nothing_else() {
+        let mut app = app_with(22, 14);
+        app.on_action(Action::ToggleHelp);
+
+        let request = app.on_action(Action::Refresh);
+        assert!(request.is_none(), "a swallowed key sent a request");
+        assert!(!app.help_visible, "the overlay outlived a keypress");
+        assert_eq!(app.selected_day, 14);
+
+        app.on_action(Action::ToggleHelp);
+        app.on_action(Action::NextDay);
+        assert!(!app.help_visible);
+        assert_eq!(app.selected_day, 14, "a swallowed key moved the selection");
+    }
+
+    /// `q` and Esc close the overlay rather than quitting through it: the
+    /// first press answers the thing on top, the way htop's help does.
+    #[test]
+    fn quit_closes_the_help_overlay_without_quitting() {
+        let mut app = app_with(22, 14);
+        app.on_action(Action::ToggleHelp);
+        app.on_action(Action::Quit);
+
+        assert!(!app.help_visible);
+        assert!(!app.should_quit, "quit acted through the overlay");
+
+        app.on_action(Action::Quit);
+        assert!(app.should_quit, "the second press must still quit");
+    }
 
     #[test]
     fn the_hourly_view_toggles_between_weathergram_and_classic() {

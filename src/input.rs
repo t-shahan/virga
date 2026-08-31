@@ -32,6 +32,8 @@ pub enum Action {
     /// Flip the hourly screen between the weathergram and the classic
     /// precipitation view.
     ToggleHourlyView,
+    /// Open or close the key reference overlay.
+    ToggleHelp,
     Insert(char),
     Backspace,
     Submit,
@@ -106,6 +108,7 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Up => Some(Action::PrevDay),
             KeyCode::Down => Some(Action::NextDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Today),
+            KeyCode::Char('?') => Some(Action::ToggleHelp),
             _ => None,
         },
         Screen::Hourly => match key.code {
@@ -131,6 +134,7 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
             KeyCode::Down => Some(Action::NextHourDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
             KeyCode::Char('v') => Some(Action::ToggleHourlyView),
+            KeyCode::Char('?') => Some(Action::ToggleHelp),
             _ => None,
         },
         // Every printable key is text here, so none of the command letters
@@ -150,6 +154,38 @@ fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `?` opens the key reference wherever a legend hint advertises it, and
+    /// stays ordinary text in the search box, where a query might contain one.
+    #[test]
+    fn question_mark_toggles_help_on_the_weather_screens_only() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            assert_eq!(
+                action_for(press(KeyCode::Char('?')), screen),
+                Some(Action::ToggleHelp),
+                "{screen:?}"
+            );
+        }
+        assert_eq!(
+            action_for(press(KeyCode::Char('?')), Screen::Search),
+            Some(Action::Insert('?'))
+        );
+    }
+
+    /// A toggle on key repeat flickers: a held `?` would open and close the
+    /// overlay every frame. Windows also reports a release per press, which
+    /// the kind filter already discards — pinned here because a toggle is
+    /// where acting twice is most visible.
+    #[test]
+    fn a_held_or_released_question_mark_does_not_toggle() {
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            assert_eq!(
+                action_for(of_kind(KeyCode::Char('?'), kind), Screen::Weather),
+                None,
+                "{kind:?}"
+            );
+        }
+    }
 
     /// `v` flips the hourly view, and only there: on the weather screen it is
     /// unbound, and in search it types a letter like any other.
