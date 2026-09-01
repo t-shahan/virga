@@ -41,6 +41,44 @@ impl HourlyView {
     }
 }
 
+/// Whether the key bar hints at the reference behind `?` or names every
+/// binding itself, the way it always has. `,` toggles it and the choice is
+/// persisted, the same shape as the theme, but the default is `Hint` rather
+/// than `Full`: unlike the theme, nobody has this bar in front of them yet —
+/// the hint shipped inside the same unreleased range this toggle did, so
+/// there is no standing muscle memory for `Full` to protect. `Full` is what a
+/// user opts *into*, to get the always-visible list back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum KeyHintStyle {
+    #[default]
+    Hint,
+    Full,
+}
+
+impl KeyHintStyle {
+    pub fn toggle(self) -> Self {
+        match self {
+            KeyHintStyle::Hint => KeyHintStyle::Full,
+            KeyHintStyle::Full => KeyHintStyle::Hint,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            KeyHintStyle::Hint => "hint",
+            KeyHintStyle::Full => "full",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "hint" => Some(KeyHintStyle::Hint),
+            "full" => Some(KeyHintStyle::Full),
+            _ => None,
+        }
+    }
+}
+
 /// How far the vertical arrows jump. Eight days is a long way at one press
 /// per hour.
 const HOURS_PER_DAY: usize = 24;
@@ -205,6 +243,17 @@ pub struct App {
     /// Composed in the probe, so this module never learns about versions,
     /// paths, or the network — it holds a string and lets it go.
     pub update_notice: Option<String>,
+    /// Whether the key reference overlay is open. Only reachable from the
+    /// weather screens: search binds `?` to text, and while the overlay is
+    /// open every action closes it before it could change screen.
+    pub help_visible: bool,
+    /// Whether the bar hints at `?` or lists every binding itself.
+    pub key_hint_style: KeyHintStyle,
+    /// Set the moment `,` changes `key_hint_style`, so the caller knows to
+    /// write it down — the same "persist the moment it changes" shape a
+    /// chosen location already follows, rather than a save pass over
+    /// everything at exit.
+    key_hint_style_dirty: bool,
 }
 
 /// How long the palette's name stays on the key bar after `t`. Long enough to
@@ -259,6 +308,9 @@ impl App {
             search_return: Screen::Weather,
             theme_readout_until: None,
             update_notice: None,
+            help_visible: false,
+            key_hint_style: KeyHintStyle::default(),
+            key_hint_style_dirty: false,
         }
     }
 
@@ -282,6 +334,16 @@ impl App {
     /// I/O out here — the caller owns the channel — is what lets every
     /// transition below be tested without a terminal or a network.
     pub fn on_action(&mut self, action: Action) -> Option<Request> {
+        // With the reference open, the next key's only job is closing it —
+        // even `q`: quitting or navigating through the overlay would mean
+        // acting on a screen the reader cannot see, and a misread key
+        // reopening help mid-journey is worse than one spent keystroke.
+        // Checked before the notice is let go, because a key pressed with
+        // the card covering the screen has not seen any news behind it.
+        if self.help_visible {
+            self.help_visible = false;
+            return None;
+        }
         // The notice is dismissed by living — but only by a key that could
         // have seen it. The search screen never renders the notice, so keys
         // pressed there must not silently delete news nobody was shown; and
@@ -314,6 +376,14 @@ impl App {
             Action::NextHourDay => self.select_next_hour_day(),
             Action::Now => self.select_now(),
             Action::ToggleHourlyView => self.hourly_view = self.hourly_view.toggle(),
+            // Only ever opens: a `?` with the overlay up is closed by the
+            // interception above, like any other key, and `input` only ever
+            // produces this action in `Hint` style — `?` is unbound in `Full`.
+            Action::ToggleHelp => self.help_visible = true,
+            Action::ToggleKeyHints => {
+                self.key_hint_style = self.key_hint_style.toggle();
+                self.key_hint_style_dirty = true;
+            }
             Action::Insert(c) => {
                 self.query.push(c);
                 self.invalidate_results();
@@ -468,6 +538,18 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Takes the pending save left by a `,` press, if there is one.
+    ///
+    /// Mirrors `expire_theme_readout`'s shape for the same reason: the caller
+    /// owns the write, so this only has to report that one is due and hand
+    /// back what to write, once, rather than write it itself.
+    pub fn take_key_hint_style_save(&mut self) -> Option<KeyHintStyle> {
+        self.key_hint_style_dirty.then(|| {
+            self.key_hint_style_dirty = false;
+            self.key_hint_style
+        })
     }
 
     /// A request this app asked for that never reached the worker, because the
@@ -795,6 +877,106 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_help_overlay_toggles_open_and_closed() {
+        let mut app = App::new();
+        assert!(!app.help_visible, "help started open");
+        app.on_action(Action::ToggleHelp);
+        assert!(app.help_visible);
+        app.on_action(Action::ToggleHelp);
+        assert!(!app.help_visible);
+    }
+
+    /// With the reference open the next key's only job is to close it. Acting
+    /// as well would mean navigating blind behind the overlay, and reopening
+    /// help by accident while trying to move would be worse than a no-op
+    /// keystroke.
+    #[test]
+    fn any_action_closes_the_help_overlay_and_does_nothing_else() {
+        let mut app = app_with(22, 14);
+        app.on_action(Action::ToggleHelp);
+
+        let request = app.on_action(Action::Refresh);
+        assert!(request.is_none(), "a swallowed key sent a request");
+        assert!(!app.help_visible, "the overlay outlived a keypress");
+        assert_eq!(app.selected_day, 14);
+
+        app.on_action(Action::ToggleHelp);
+        app.on_action(Action::NextDay);
+        assert!(!app.help_visible);
+        assert_eq!(app.selected_day, 14, "a swallowed key moved the selection");
+    }
+
+    /// The notice is dismissed by a key that could have seen it, and a key
+    /// pressed with the reference card covering the screen could not: news
+    /// that arrives behind the card must still be standing once it closes,
+    /// whichever key did the closing.
+    #[test]
+    fn closing_the_overlay_spares_a_notice_that_arrived_behind_it() {
+        let mut app = app_with(22, 14);
+        app.on_action(Action::ToggleHelp);
+        app.update_notice = Some("update: virga 9.9.9".to_string());
+
+        app.on_action(Action::NextDay);
+        assert!(!app.help_visible);
+        assert!(
+            app.update_notice.is_some(),
+            "the closing key deleted news nobody was shown"
+        );
+
+        // The next ordinary key sees it on screen and lets it go.
+        app.on_action(Action::NextDay);
+        assert_eq!(app.update_notice, None);
+    }
+
+    /// `q` and Esc close the overlay rather than quitting through it: the
+    /// first press answers the thing on top, the way htop's help does.
+    #[test]
+    fn quit_closes_the_help_overlay_without_quitting() {
+        let mut app = app_with(22, 14);
+        app.on_action(Action::ToggleHelp);
+        app.on_action(Action::Quit);
+
+        assert!(!app.help_visible);
+        assert!(!app.should_quit, "quit acted through the overlay");
+
+        app.on_action(Action::Quit);
+        assert!(app.should_quit, "the second press must still quit");
+    }
+
+    /// The default matches what this branch already renders for everyone —
+    /// there is no released `Full` bar to protect muscle memory for, so
+    /// nobody's first launch may change out from under them.
+    #[test]
+    fn the_key_hint_style_defaults_to_hint() {
+        assert_eq!(App::new().key_hint_style, KeyHintStyle::Hint);
+    }
+
+    #[test]
+    fn a_comma_toggles_the_key_hint_style_and_back() {
+        let mut app = App::new();
+        app.on_action(Action::ToggleKeyHints);
+        assert_eq!(app.key_hint_style, KeyHintStyle::Full);
+        app.on_action(Action::ToggleKeyHints);
+        assert_eq!(app.key_hint_style, KeyHintStyle::Hint);
+    }
+
+    /// The toggle is worth writing down, but only once per press — a caller
+    /// that saves on every idle tick must not rewrite the file forever.
+    #[test]
+    fn toggling_the_key_hint_style_leaves_exactly_one_pending_save() {
+        let mut app = App::new();
+        assert_eq!(app.take_key_hint_style_save(), None);
+
+        app.on_action(Action::ToggleKeyHints);
+        assert_eq!(app.take_key_hint_style_save(), Some(KeyHintStyle::Full));
+        assert_eq!(
+            app.take_key_hint_style_save(),
+            None,
+            "the save was not taken exactly once"
+        );
+    }
 
     #[test]
     fn the_hourly_view_toggles_between_weathergram_and_classic() {

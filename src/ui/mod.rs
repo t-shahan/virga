@@ -13,6 +13,7 @@ mod condition_symbol;
 mod current;
 mod digits;
 mod forecast;
+mod help;
 mod hourly;
 mod legend;
 mod precip;
@@ -25,6 +26,7 @@ mod weathergram;
 use chart::chart_area_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
+use help::help_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
 use precip::precip_render;
@@ -238,7 +240,20 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
             notice_area,
         );
     }
-    keybind_legend_render(frame, app, palette, legend_area);
+    // The hint's one job is advertising the reference; while the reference is
+    // up it has nothing to add, and at the minimum size the card only half
+    // covers its row, shearing bindings at the card's edges. Its row stays
+    // reserved so closing the card does not reflow the panes.
+    if !app.help_visible {
+        keybind_legend_render(frame, app, palette, legend_area);
+    }
+
+    // Last, so the reference sits over whatever the screen drew. It gets the
+    // whole canvas rather than just the content: at the minimum height the
+    // hourly list plus its border needs every row there is.
+    if app.help_visible {
+        help_render(frame, app, palette, page_area);
+    }
 }
 
 /// The first launch of the day can spend a round trip working out where the
@@ -466,6 +481,14 @@ mod tests {
             }
             states.push((format!("{screen:?}/locating"), locating(screen)));
             states.push((format!("{screen:?}/update-notice"), noticed(screen)));
+
+            let mut helped = ready(screen);
+            helped.help_visible = true;
+            states.push((format!("{screen:?}/help"), helped));
+
+            let mut full_style = ready(screen);
+            full_style.key_hint_style = crate::app::KeyHintStyle::Full;
+            states.push((format!("{screen:?}/full-style"), full_style));
         }
 
         // The search box floats over a loaded screen, so the weather stays
@@ -508,6 +531,119 @@ mod tests {
             let text = symbols(&fetching, 60, 24).join("");
             assert!(text.contains("fetching"), "{screen:?}: {text}");
         }
+    }
+
+    /// The bar only hints, so the overlay is now the one place a binding like
+    /// `p` or `l` is discoverable at all.
+    #[test]
+    fn the_help_overlay_lists_every_binding() {
+        let mut app = ready(Screen::Weather);
+        app.help_visible = true;
+        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
+
+        for entry in ["[p] hourly", "[←→↑↓] day", "[l] location", "[t] theme"] {
+            assert!(text.contains(entry), "the overlay lost {entry}: {text}");
+        }
+        assert!(text.contains("Keys"), "{text}");
+
+        // And only that screen's bindings: `l` is not bound on the hourly
+        // screen, and its card must not claim otherwise.
+        let mut app = ready(Screen::Hourly);
+        app.help_visible = true;
+        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
+        assert!(text.contains("[v] view"), "{text}");
+        assert!(!text.contains("location"), "{text}");
+    }
+
+    /// Closed is the resting state, and it must not leak the reference onto
+    /// the dashboard.
+    #[test]
+    fn a_closed_overlay_leaves_the_dashboard_alone() {
+        let app = ready(Screen::Weather);
+        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
+        assert!(!text.contains("[p] hourly"), "{text}");
+    }
+
+    /// The overlay has to earn its keep at the floor too: every line whole,
+    /// no panic, inside 34x12 — on the hourly screen, whose list is longest.
+    #[test]
+    fn the_help_overlay_survives_the_minimum_terminal() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let mut app = ready(screen);
+            app.help_visible = true;
+            let rows = symbols(
+                &drawn(&app, probe(), MIN_WIDTH, MIN_HEIGHT),
+                MIN_WIDTH,
+                MIN_HEIGHT,
+            );
+
+            for row in &rows {
+                assert_eq!(
+                    row.matches('[').count(),
+                    row.matches(']').count(),
+                    "{screen:?} cut a key in half: {row:?}"
+                );
+            }
+            assert!(
+                rows.join("\n").contains("[q] quit"),
+                "{screen:?} lost the way out: {rows:?}"
+            );
+        }
+    }
+
+    /// The hourly card is now one line taller than the floor can hold with
+    /// its border, so exactly one line clips from the tail — and it must be
+    /// `[?] keys`, the binding the footer already restates, rather than the
+    /// hide toggle just added beside it.
+    #[test]
+    fn the_floor_clips_the_redundant_question_mark_line_and_keeps_the_rest() {
+        let mut app = ready(Screen::Hourly);
+        app.help_visible = true;
+        let text = symbols(
+            &drawn(&app, probe(), MIN_WIDTH, MIN_HEIGHT),
+            MIN_WIDTH,
+            MIN_HEIGHT,
+        )
+        .join("\n");
+
+        for entry in ["[q] quit", "[b] back", "[,] hide"] {
+            assert!(text.contains(entry), "lost {entry:?}: {text:?}");
+        }
+        assert!(
+            !text.contains("[?] keys"),
+            "the redundant line should have clipped: {text:?}"
+        );
+    }
+
+    /// `Full` style is the pre-overlay bar revived: every binding named on
+    /// the bar itself, with no card behind `?` because there is nothing left
+    /// for it to hold.
+    #[test]
+    fn full_style_names_every_binding_on_the_bar_and_opens_no_card() {
+        let mut app = ready(Screen::Weather);
+        app.key_hint_style = crate::app::KeyHintStyle::Full;
+        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
+
+        for entry in ["[p] hourly", "[l] location", "[t] theme"] {
+            assert!(text.contains(entry), "{text:?}");
+        }
+        assert!(!text.contains("any key closes"), "{text:?}");
+    }
+
+    /// `?` then any key must be a round trip: the overlay borrows the screen,
+    /// it does not get to change it.
+    #[test]
+    fn toggling_help_twice_returns_the_prior_frame() {
+        let mut app = ready(Screen::Weather);
+        let before = drawn(&app, probe(), 120, 30);
+
+        app.on_action(crate::input::Action::ToggleHelp);
+        let open = drawn(&app, probe(), 120, 30);
+        assert_ne!(before, open, "opening help drew nothing");
+
+        app.on_action(crate::input::Action::NextDay);
+        let after = drawn(&app, probe(), 120, 30);
+        assert_eq!(before, after, "help did not put the screen back");
     }
 
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {

@@ -12,6 +12,26 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **A key reference behind `?`.** Pressing `?` on either weather screen
+  opens a card listing every binding for that screen; the next key closes
+  it — including `q` and Esc, which close it without also quitting.
+- **`,` switches the key bar between hinting and naming everything.** The
+  short hint plus `?` card is the default; `,` swaps it for the
+  always-visible list of every binding the bar carried before, with no
+  card behind `?` in that style since there is nothing left for it to
+  hold. The choice is persisted the same way a startup theme is.
+
+### Changed
+
+- The key bar at the bottom of the screen is now a short hint — quit, back
+  where there is one, and `?` for everything else — so it never wraps onto
+  a second row at the widths the app runs at, and the row it used to take
+  goes back to the chart. Pressing `t` still names the palette it landed
+  on in the hint while that answer is fresh. The search screen keeps its
+  own short legend, and `?` remains ordinary text there.
+
 ## [0.5.3] - 2026-08-31
 
 ### Fixed
