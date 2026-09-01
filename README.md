@@ -422,12 +422,17 @@ cargo test --locked --all-targets
 cargo package --locked
 ```
 
-Opening a pull request fills in a template. Keep its `Review focus for
-@claude` section and say where the review should look hardest, because that
-is the part a reviewer cannot reconstruct from the diff. Claude reviews every
-pull request either way, against the requirements in
-[`CLAUDE.md`](CLAUDE.md), so the section directs the review rather than
-triggering it.
+Opening a pull request fills in a template. Keep its `Review focus` section
+and say where the review should look hardest, because that is the part a
+reviewer cannot reconstruct from the diff. Claude reviews every pull request
+either way, against the requirements in [`CLAUDE.md`](CLAUDE.md), so the
+section directs the review rather than triggering it.
+
+Mentioning `@claude` is a separate thing and always optional. It hands the
+work to the interactive agent, which answers questions and can run the cargo
+gates, and it is read from a pull request description, a comment, or an issue.
+Mentions added by editing count, so a request is no longer lost by being typed
+a moment too late.
 
 Notable changes belong in [`CHANGELOG.md`](CHANGELOG.md) under `Unreleased`.
 That is not bookkeeping for its own sake: release notes are generated from that
@@ -461,7 +466,9 @@ still publishes and only the tap update is skipped, with a warning.
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
 - Forecast text is English only.
-- Terminals below 34×12 show a size warning instead of the interface.
+- Terminals below 34×12 show a size warning instead of the interface. The
+  hourly weathergram needs 36 columns and 19 rows above the key bar, and
+  shows the same warning below that.
 - “Today” is distinguished by colour alone in the daily chart. The selection
   is not: every screen marks it by shape as well — a `>` in the forecast
   table's gutter and a `▲` in the hourly weathergram.

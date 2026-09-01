@@ -32,6 +32,28 @@ refuse to publish a version this file does not describe.
   on in the hint while that answer is fresh. The search screen keeps its
   own short legend, and `?` remains ordinary text there.
 
+## [0.5.3] - 2026-08-31
+
+### Fixed
+
+- **The weather appears sooner after launch.** Two delays sat between a
+  finished download and the screen. The draw loop applied the worker's
+  answers after drawing rather than before, so a forecast that arrived
+  during one wait was painted at the end of the next, and the clean repaint
+  introduced in 0.5.0 asked the terminal where its cursor was and waited
+  for the answer before wiping. Answers are now painted in the pass they
+  arrive, and the repaint no longer asks. The same two delays followed
+  every screen change, so those are quicker too. A terminal that never
+  answered the cursor question used to end the app after two seconds with
+  a cursor error instead of showing weather; it cannot any more.
+- The hourly weathergram no longer squeezes into a compact layout when the
+  terminal is short or narrow. That layout, one glyph per hour per track
+  under a two-line inspector, was left over from an early prototype and was
+  hard to read. Below 36 columns, or 19 rows above the key bar, the screen
+  now states the size it needs, the way the whole app does below 34×12, and
+  the key bar stays so `b` still shows the way back. The classic hourly
+  view keeps its own tiers.
+
 ## [0.5.2] - 2026-08-31
 
 ### Changed
@@ -278,7 +300,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/t-shahan/virga/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/t-shahan/virga/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/t-shahan/virga/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/t-shahan/virga/compare/v0.4.0...v0.5.0
