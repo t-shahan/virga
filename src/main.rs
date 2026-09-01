@@ -348,9 +348,6 @@ fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
     }
 }
 
-/// Whether to probe for a newer release at startup, given whatever
-/// `VIRGA_UPDATE` was set to. `VIRGA_GEOIP`'s grammar and `VIRGA_GEOIP`'s
-/// forgiveness, for the same reasons.
 /// Whether the last forecast is kept on disk and opened on, given whatever
 /// `VIRGA_CACHE` was set to. The same grammar and the same forgiveness as
 /// the other two switches.
@@ -370,6 +367,9 @@ fn caching_enabled(requested: Option<&str>) -> (bool, Option<String>) {
     }
 }
 
+/// Whether to probe for a newer release at startup, given whatever
+/// `VIRGA_UPDATE` was set to. `VIRGA_GEOIP`'s grammar and `VIRGA_GEOIP`'s
+/// forgiveness, for the same reasons.
 fn checks_enabled(requested: Option<&str>) -> (bool, Option<String>) {
     let Some(value) = requested else {
         return (true, None);
