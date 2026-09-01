@@ -12,6 +12,25 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **The app opens on the last forecast.** With a remembered city, the first
+  frame is the forecast from the previous launch, read from a `forecast.json`
+  beside `state.json`, with `as of 17:52 · updating` on the border until the
+  fresh one replaces it in place. A forecast over 24 hours old, or for
+  another city, is not shown, and `VIRGA_CACHE=off` keeps the file off disk.
+  Launch used to open on a spinner and wait the whole of a network round
+  trip, half a second warm and up to two cold (#54).
+
+### Changed
+
+- `r` keeps the forecast on screen while its replacement is fetched instead
+  of replacing the screen with the loading popup. Choosing a city still
+  shows the popup, since the forecast on screen describes somewhere else.
+- A fetch that fails while a forecast is showing leaves it up, marked
+  `refresh failed, r to retry` in the error colour, and prints the reason
+  after exit. The error popup remains for a launch with nothing to show.
+
 ## [0.5.3] - 2026-08-31
 
 ### Fixed

@@ -1,9 +1,12 @@
 use crate::app::ActiveLocation;
+use crate::cache;
 use crate::weather::client::detect_location;
 use crate::weather::client::fetch_forecast;
 use crate::weather::client::search_locations;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
+use chrono::Utc;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
@@ -81,6 +84,12 @@ pub enum Message {
     UpdateAvailable {
         notice: String,
     },
+    /// A forecast reached the app but its copy for the next launch did not
+    /// reach the disk. No id: the forecast it concerns is already on
+    /// screen, and nothing chains off it.
+    CacheFailed {
+        error: String,
+    },
 }
 
 /// One release probe on its own one-shot thread — never the request queue,
@@ -104,17 +113,33 @@ pub fn spawn_update_check(
     });
 }
 
-pub fn spawn_worker(requests: Receiver<Request>, messages: Sender<Message>) {
+/// `cache` is where a fetched forecast is kept for the next launch, or
+/// `None` to keep nothing. The write happens here, on the thread that
+/// already waits on the network, and only after the forecast has been sent:
+/// the app must never sit behind an fsync for its frame.
+pub fn spawn_worker(
+    requests: Receiver<Request>,
+    messages: Sender<Message>,
+    cache: Option<PathBuf>,
+) {
     thread::spawn(move || {
         for request in requests {
+            let mut keep = None;
             let message = match request {
                 Request::Fetch { id, location } => {
                     match fetch_forecast(location.lat, location.lon) {
-                        Ok(weather) => Message::Loaded {
-                            id,
-                            location,
-                            weather,
-                        },
+                        Ok(weather) => {
+                            // Encoded before the forecast is handed over,
+                            // because handing it over moves it.
+                            keep = cache.as_ref().map(|path| {
+                                (path.clone(), cache::encode(&location, &weather, Utc::now()))
+                            });
+                            Message::Loaded {
+                                id,
+                                location,
+                                weather,
+                            }
+                        }
                         Err(e) => Message::LoadFailed {
                             id,
                             error: e.to_string(),
@@ -140,6 +165,16 @@ pub fn spawn_worker(requests: Receiver<Request>, messages: Sender<Message>) {
                 },
             };
             if messages.send(message).is_err() {
+                break;
+            }
+            if let Some((path, encoded)) = keep
+                && let Err(error) = encoded.and_then(|bytes| cache::write(&path, &bytes))
+                && messages
+                    .send(Message::CacheFailed {
+                        error: format!("{error:#}"),
+                    })
+                    .is_err()
+            {
                 break;
             }
         }

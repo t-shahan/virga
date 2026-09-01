@@ -178,7 +178,7 @@ fn surviving_document(path: &Path) -> Result<Option<StateDocument>> {
 /// holding process exits, however it exits, and here when the returned
 /// handle drops. A platform that cannot lock (std returns unsupported on
 /// some) gets the unserialized behavior rather than losing saves entirely.
-fn exclusive(path: &Path) -> Result<std::fs::File> {
+pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     let parent = path.parent().context("state path has no parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let lock = parent.join(format!(

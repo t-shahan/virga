@@ -9,7 +9,7 @@ use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::precip_week::precip_week_render;
 use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
 use crate::ui::weathergram::weathergram_render;
-use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
+use crate::ui::{TITLE_GUTTER, UNKNOWN, status_mark, title_room, truncate};
 use crate::ui::{precip_week, weathergram};
 use crate::units::Unit;
 use crate::weather::code::description;
@@ -180,7 +180,14 @@ fn inspector_render(
     let upcoming = next_precipitation(hours);
 
     let (city, condition) = top_titles(&app.location.label, &condition, area.width);
-    let (upcoming, when) = bottom_titles(&upcoming, &when, area.width);
+    // As on the daily pane, the mark takes the left corner while there is
+    // one: a cached or unrefreshed forecast is never shown unlabelled here
+    // either.
+    let mark = status_mark(app, palette);
+    let left = mark
+        .as_ref()
+        .map_or(upcoming.as_str(), |(text, _)| text.as_str());
+    let (upcoming, when) = bottom_titles(left, &when, area.width);
 
     let mut block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
@@ -208,12 +215,13 @@ fn inspector_render(
         // and the weight rather than the one reserved for labels. It was muted
         // to begin with and read as chrome — the eye went straight past the one
         // line on the screen that answers "do I need a coat".
-        block = block.title_bottom(
-            Line::from(format!(" {upcoming}"))
+        let line = match mark {
+            Some((_, color)) => Line::from(format!(" {upcoming}")).fg(color),
+            None => Line::from(format!(" {upcoming}"))
                 .bold()
-                .fg(palette.selection)
-                .left_aligned(),
-        );
+                .fg(palette.selection),
+        };
+        block = block.title_bottom(line.left_aligned());
     }
 
     let inner = block.inner(area);

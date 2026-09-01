@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
-use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
+use crate::ui::{TITLE_GUTTER, UNKNOWN, status_mark, title_room, truncate};
 use crate::units::Unit;
 use crate::weather::code::{aqi_label, description};
 use crate::weather::model::{DailyForecast, Weather};
@@ -64,7 +64,13 @@ pub(super) fn current_area_render(
     let aqi = reading.map(|value| format!("AQI {qualifier}{value} {}", aqi_label(value)));
 
     let (city, condition, aqi) = top_titles(name, condition, aqi.as_deref(), area.width);
-    let (summary, when) = bottom_titles(&summary, &when, area.width);
+    // The mark takes the comparison's corner while there is one: what the
+    // forecast is outranks how it compares.
+    let mark = status_mark(app, palette);
+    let left = mark
+        .as_ref()
+        .map_or(summary.as_str(), |(text, _)| text.as_str());
+    let (summary, when) = bottom_titles(left, &when, area.width);
 
     let mut block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
@@ -85,7 +91,8 @@ pub(super) fn current_area_render(
         block = block.title_top(Line::from(right).right_aligned());
     }
     if let Some(summary) = summary {
-        block = block.title_bottom(Line::from(summary).fg(palette.muted).left_aligned());
+        let color = mark.map_or(palette.muted, |(_, color)| color);
+        block = block.title_bottom(Line::from(summary).fg(color).left_aligned());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);

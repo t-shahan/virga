@@ -56,6 +56,14 @@ pub struct ActiveLocation {
     pub lon: f64,
 }
 
+impl ActiveLocation {
+    /// The same coordinates, whatever the label says. A cache and a refresh
+    /// are judged by where, not by what the place was called.
+    pub fn same_place(&self, other: &ActiveLocation) -> bool {
+        self.lat == other.lat && self.lon == other.lon
+    }
+}
+
 impl Default for ActiveLocation {
     fn default() -> Self {
         Self {
@@ -99,11 +107,34 @@ pub enum LocationSource {
 }
 
 /// How the app opens: the place to show if nothing better arrives, where that
-/// place came from, and whether to ask the network who we are first.
+/// place came from, whether to ask the network who we are first, and the
+/// forecast to show for that place until the network answers.
 pub struct Startup {
     pub location: ActiveLocation,
     pub source: LocationSource,
     pub detect: bool,
+    pub cached: Option<CachedWeather>,
+}
+
+/// A forecast read back from disk, and when it was fetched, on the user's
+/// clock: "17:52", or "yesterday 22:14".
+pub struct CachedWeather {
+    pub weather: Weather,
+    pub as_of: String,
+}
+
+/// What the weather on screen is besides fresh. Both flags are cleared by a
+/// load, and both are drawn as a mark on the border so a forecast is never
+/// shown as something it is not.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shown {
+    /// When a forecast read from disk was fetched. `None` for one fetched
+    /// this session.
+    pub as_of: Option<String>,
+    /// The last attempt to replace what is showing failed. The forecast
+    /// stays, because it is still a forecast; the mark says it is not the
+    /// one that was asked for.
+    pub refresh_failed: bool,
 }
 
 /// A location worth keeping, and the provenance that decides whether a later
@@ -145,6 +176,9 @@ struct Pending {
     id: RequestId,
     location: ActiveLocation,
     source: LocationSource,
+    /// Cleared when the fetch answers or is refused. The rest survives a
+    /// failure so a retry aims at the place that failed.
+    in_flight: bool,
 }
 
 pub struct App {
@@ -152,6 +186,7 @@ pub struct App {
     pub query: String,
     pub results: Fetch<Vec<Location>>,
     pub weather: Fetch<Weather>,
+    pub shown: Shown,
     pub unit: Unit,
     /// The palette in use. A name only — resolving it to colours is `ui`'s
     /// business, which is what keeps this module free of Ratatui types.
@@ -226,6 +261,7 @@ impl App {
             location,
             source: LocationSource::Chosen,
             detect: false,
+            cached: None,
         })
     }
 
@@ -234,18 +270,33 @@ impl App {
             location,
             source,
             detect,
+            cached,
         } = startup;
+        // A cached forecast is the first frame; the fetch the caller is
+        // about to dispatch replaces it. Nothing here waits for that.
+        let (weather, shown, selected_day) = match cached {
+            Some(CachedWeather { weather, as_of }) => {
+                let today = weather.today_index;
+                let shown = Shown {
+                    as_of: Some(as_of),
+                    refresh_failed: false,
+                };
+                (Fetch::Ready(weather), shown, today)
+            }
+            None => (Fetch::Loading, Shown::default(), 0),
+        };
         Self {
             screen: Screen::Weather,
             query: String::new(),
             results: Fetch::Idle,
-            weather: Fetch::Loading,
+            weather,
+            shown,
             unit: Unit::Imperial,
             theme: Theme::default(),
             color_depth: ColorDepth::Ansi16,
             tick: 0,
             selected: 0,
-            selected_day: 0,
+            selected_day,
             selected_hour: 0,
             hourly_view: HourlyView::default(),
             location,
@@ -369,6 +420,7 @@ impl App {
                 self.location = location;
                 self.location_source = source;
                 self.weather = Fetch::Ready(weather);
+                self.shown = Shown::default();
                 Outcome {
                     remember: self.remembered(),
                     ..Outcome::nothing()
@@ -377,11 +429,19 @@ impl App {
             // `pending` deliberately survives a failure, so retrying aims at
             // the place that failed rather than the one still on screen.
             Message::LoadFailed { id, error } => {
-                if self.awaiting_weather(id) {
-                    self.weather = Fetch::Failed(error);
+                if !self.awaiting_weather(id) {
+                    return Outcome::nothing();
                 }
-                Outcome::nothing()
+                self.fetch_failed(error)
             }
+            // The forecast reached the screen; only the copy for next launch
+            // was lost. Worth a line on the way out, not a frame.
+            Message::CacheFailed { error } => Outcome {
+                warning: Some(format!(
+                    "virga: could not keep the forecast for the next launch: {error}"
+                )),
+                ..Outcome::nothing()
+            },
             Message::Detected { id, location } => {
                 if !self.awaiting_detection(id) {
                     return Outcome::nothing();
@@ -427,6 +487,36 @@ impl App {
                 Outcome::nothing()
             }
         }
+    }
+
+    /// A fetch that did not answer. With weather on screen the weather
+    /// stays and is marked: it is still a forecast, and a popup over it
+    /// would trade a stale answer for none. With nothing showing, the error
+    /// is the screen.
+    fn fetch_failed(&mut self, error: String) -> Outcome {
+        if let Some(pending) = &mut self.pending {
+            pending.in_flight = false;
+        }
+        if matches!(self.weather, Fetch::Ready(_)) {
+            self.shown.refresh_failed = true;
+            return Outcome {
+                warning: Some(format!("virga: could not refresh the forecast: {error}")),
+                ..Outcome::nothing()
+            };
+        }
+        self.weather = Fetch::Failed(error);
+        Outcome::nothing()
+    }
+
+    /// Whether the weather on screen is waiting to be replaced: a fetch or
+    /// a detection is out, and the forecast showing is the one from before
+    /// it. The draw loop animates on it, and the border says "updating".
+    pub fn is_refreshing(&self) -> bool {
+        matches!(self.weather, Fetch::Ready(_)) && (self.is_fetching() || self.is_locating())
+    }
+
+    fn is_fetching(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.in_flight)
     }
 
     /// Whether the app is still working out where the user is, rather than
@@ -484,7 +574,7 @@ impl App {
             // retry aims at the place that failed rather than the one on screen.
             Request::Fetch { id, .. } => {
                 if self.awaiting_weather(id) {
-                    self.weather = Fetch::Failed("too many requests at once".to_string());
+                    self.fetch_failed("too many requests at once".to_string());
                 }
             }
             // A dropped detection is the detection failing, and it fails the
@@ -525,21 +615,32 @@ impl App {
     }
 
     /// Aim at a place. The label does not move yet — only a response does that.
+    ///
+    /// The weather on screen stays while the fetch targets the place it
+    /// describes: a refresh, or the launch fetch behind a cached forecast.
+    /// Only a fetch for somewhere else clears to the spinner, since the
+    /// forecast showing would be a lie under the new name.
     fn fetch(&mut self, location: ActiveLocation, source: LocationSource) -> Request {
         let id = self.next_id();
+        let showing_it =
+            matches!(self.weather, Fetch::Ready(_)) && self.location.same_place(&location);
         self.pending = Some(Pending {
             id,
             location: location.clone(),
             source,
+            in_flight: true,
         });
-        self.weather = Fetch::Loading;
+        if !showing_it {
+            self.weather = Fetch::Loading;
+        }
+        self.shown.refresh_failed = false;
         Request::Fetch { id, location }
     }
 
-    /// Ignored while a fetch is already running, so a held `r` cannot queue one
-    /// request per keypress against a single worker.
+    /// Ignored while a fetch or a detection is already running, so a held
+    /// `r` cannot queue one request per keypress against a single worker.
     fn refresh(&mut self) -> Option<Request> {
-        if matches!(self.weather, Fetch::Loading) {
+        if self.is_fetching() || self.is_locating() {
             return None;
         }
         let (target, source) = self.refresh_target();
@@ -1336,6 +1437,7 @@ mod tests {
             location: fallback,
             source,
             detect: true,
+            cached: None,
         })
     }
 
@@ -1559,6 +1661,143 @@ mod tests {
     fn loaded(app: &mut App) {
         let request = app.startup_request();
         deliver(app, request, Weather::fixture(5, 2));
+    }
+
+    fn cached_app(location: ActiveLocation, source: LocationSource, detect: bool) -> App {
+        App::with_startup(Startup {
+            location,
+            source,
+            detect,
+            cached: Some(CachedWeather {
+                weather: Weather::fixture(5, 3),
+                as_of: "17:52".to_string(),
+            }),
+        })
+    }
+
+    /// A forecast from disk is the first frame: the app opens `Ready`, on
+    /// today, marked with the fetch time, and the launch fetch goes out
+    /// behind it without taking it down.
+    #[test]
+    fn a_cached_forecast_opens_the_app_ready_and_marked() {
+        let mut app = cached_app(ActiveLocation::default(), LocationSource::Chosen, false);
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        assert_eq!(app.shown.as_of.as_deref(), Some("17:52"));
+        assert_eq!(app.selected_day, 3, "opens on the cached forecast's today");
+        assert!(!app.is_refreshing(), "nothing is out yet");
+
+        let request = app.startup_request();
+        assert!(matches!(request, Request::Fetch { .. }));
+        assert!(matches!(app.weather, Fetch::Ready(_)), "the fetch keeps it");
+        assert!(app.is_refreshing());
+
+        deliver(&mut app, request, Weather::fixture(5, 2));
+        assert_eq!(app.shown, Shown::default(), "fresh weather carries no mark");
+        assert!(!app.is_refreshing());
+        assert_eq!(app.selected_day, 2, "and today follows the fresh forecast");
+    }
+
+    /// A detection over a cached forecast keeps the forecast while it asks,
+    /// then keeps or clears it by where the answer lands.
+    #[test]
+    fn a_detection_keeps_the_cached_forecast_until_it_lands_elsewhere() {
+        let mut app = cached_app(ActiveLocation::default(), LocationSource::Detected, true);
+        let request = app.startup_request();
+        assert!(matches!(request, Request::Detect { .. }));
+        assert!(app.is_refreshing(), "the forecast waits on the detection");
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+
+        let mut same = app;
+        let outcome = same.on_message(Message::Detected {
+            id: id_of(&request),
+            location: ActiveLocation::default(),
+        });
+        assert!(matches!(outcome.request, Some(Request::Fetch { .. })));
+        assert!(
+            matches!(same.weather, Fetch::Ready(_)),
+            "same place, same forecast"
+        );
+
+        let mut elsewhere = cached_app(ActiveLocation::default(), LocationSource::Detected, true);
+        let request = elsewhere.startup_request();
+        let _ = elsewhere.on_message(Message::Detected {
+            id: id_of(&request),
+            location: berlin(),
+        });
+        assert!(
+            matches!(elsewhere.weather, Fetch::Loading),
+            "a forecast for somewhere else is not shown under the new name"
+        );
+    }
+
+    /// `r` no longer blanks the screen: the forecast stays while its
+    /// replacement is fetched. Choosing a city still spins, because the
+    /// forecast on screen describes somewhere else.
+    #[test]
+    fn a_refresh_keeps_the_forecast_and_a_new_city_does_not() {
+        let mut app = App::new();
+        loaded(&mut app);
+
+        let request = app.on_action(Action::Refresh).expect("a refresh request");
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        assert!(app.is_refreshing());
+        assert!(
+            app.on_action(Action::Refresh).is_none(),
+            "a second r while one is out is ignored"
+        );
+        deliver(&mut app, request, Weather::fixture(5, 2));
+        assert!(!app.is_refreshing());
+
+        app.fetch(berlin(), LocationSource::Chosen);
+        assert!(matches!(app.weather, Fetch::Loading));
+    }
+
+    /// A refresh that fails leaves the forecast, marks it, complains on the
+    /// way out, and lets the next `r` try again with the mark cleared.
+    #[test]
+    fn a_failed_refresh_keeps_the_forecast_and_marks_it() {
+        let mut app = App::new();
+        loaded(&mut app);
+        let request = app.on_action(Action::Refresh).unwrap();
+
+        let outcome = app.on_message(Message::LoadFailed {
+            id: id_of(&request),
+            error: "no route to host".to_string(),
+        });
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        assert!(app.shown.refresh_failed);
+        assert!(!app.is_refreshing());
+        assert!(outcome.warning.unwrap().contains("no route to host"));
+
+        let retry = app.on_action(Action::Refresh).expect("retry allowed");
+        assert!(!app.shown.refresh_failed, "the retry clears the mark");
+        assert!(app.is_refreshing());
+        deliver(&mut app, retry, Weather::fixture(5, 2));
+        assert_eq!(app.shown, Shown::default());
+    }
+
+    /// With nothing on screen the error still is the screen.
+    #[test]
+    fn a_failed_first_fetch_is_still_the_error_screen() {
+        let mut app = App::new();
+        let request = app.startup_request();
+        fail(&mut app, request);
+        assert!(matches!(app.weather, Fetch::Failed(_)));
+        assert!(!app.shown.refresh_failed);
+    }
+
+    /// A forecast that reached the screen but not the disk is a line on the
+    /// way out, never a frame.
+    #[test]
+    fn a_cache_that_could_not_be_written_is_a_warning() {
+        let mut app = App::new();
+        loaded(&mut app);
+        let outcome = app.on_message(Message::CacheFailed {
+            error: "permission denied".to_string(),
+        });
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        assert!(outcome.warning.unwrap().contains("permission denied"));
+        assert!(outcome.request.is_none());
     }
 
     /// The bug ActiveLocation exists to kill: `r` used to refetch the
