@@ -2,7 +2,7 @@ use crate::app::{App, Fetch, HourlyView, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
@@ -333,6 +333,31 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
     )
 }
 
+/// What the forecast on screen is besides fresh, for the left of a pane's
+/// bottom border: read from disk, waiting to be replaced, or left in place
+/// by a refresh that failed. `None` for a live forecast with nothing
+/// pending, when that corner belongs to its usual sentence. The failure
+/// outranks the age, and takes the error colour: a forecast that could not
+/// be replaced is the one fact the user must not miss.
+pub(super) fn status_mark(app: &App, palette: Palette) -> Option<(String, Color)> {
+    let mut parts = Vec::new();
+    if let Some(as_of) = &app.shown.as_of {
+        parts.push(format!("as of {as_of}"));
+    }
+    let color = if app.shown.refresh_failed {
+        parts.push("refresh failed, r to retry".to_string());
+        palette.error
+    } else if app.is_refreshing() {
+        parts.push(format!("{} updating", spinner(app.tick)));
+        palette.muted
+    } else if parts.is_empty() {
+        return None;
+    } else {
+        palette.muted
+    };
+    Some((parts.join(" · "), color))
+}
+
 fn spinner(tick: usize) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES[(tick / 2) % FRAMES.len()]
@@ -410,6 +435,7 @@ mod tests {
             location: crate::app::ActiveLocation::default(),
             source: crate::app::LocationSource::Fallback,
             detect: true,
+            cached: None,
         });
         let _ = app.startup_request();
         app.screen = screen;
@@ -417,6 +443,23 @@ mod tests {
     }
 
     /// A newer release's news has arrived and nothing has been pressed since.
+    /// A launch that found a forecast on disk: the app opened on it and the
+    /// fetch that will replace it is out.
+    fn cached(screen: Screen) -> App {
+        let mut app = App::with_startup(crate::app::Startup {
+            location: crate::app::ActiveLocation::default(),
+            source: crate::app::LocationSource::Chosen,
+            detect: false,
+            cached: Some(crate::app::CachedWeather {
+                weather: Weather::fixture(22, 14),
+                as_of: "17:52".to_string(),
+            }),
+        });
+        let _ = app.startup_request();
+        app.screen = screen;
+        app
+    }
+
     fn noticed(screen: Screen) -> App {
         let mut app = ready(screen);
         app.update_notice = Some(
@@ -893,6 +936,85 @@ mod tests {
         let roomy = symbols(&drawn(&app, probe(), width, fits + 1), width, fits + 1).join("\n");
         assert!(roomy.contains("update:"), "{roomy}");
         assert!(roomy.contains("feels like"), "{roomy}");
+    }
+
+    /// A forecast read from disk is weather, not a spinner, and it says
+    /// when it is from and that a fresh one is coming, in the muted colour.
+    #[test]
+    fn a_cached_forecast_is_drawn_with_its_age_while_updating() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let app = cached(screen);
+            let buffer = drawn(&app, probe(), 100, 30);
+            let text = symbols(&buffer, 100, 30).join("\n");
+            assert!(text.contains("feels like"), "{screen:?}:\n{text}");
+            assert!(!text.contains("Loading"), "{screen:?}:\n{text}");
+            assert!(text.contains("as of 17:52 · "), "{screen:?}:\n{text}");
+            assert!(text.contains(" updating"), "{screen:?}:\n{text}");
+
+            let row = symbols(&buffer, 100, 30)
+                .into_iter()
+                .position(|row| row.contains("as of 17:52"))
+                .unwrap();
+            let column = symbols(&buffer, 100, 30)[row].find("as of").unwrap();
+            assert_eq!(
+                buffer[(column as u16, row as u16)].fg,
+                probe().muted,
+                "{screen:?}: the mark wears the muted colour"
+            );
+        }
+    }
+
+    /// The mark leaves with the fresh forecast, and the comparison sentence
+    /// gets its corner back.
+    #[test]
+    fn a_live_forecast_carries_no_mark() {
+        let app = ready(Screen::Weather);
+        let text = symbols(&drawn(&app, probe(), 100, 30), 100, 30).join("\n");
+        assert!(!text.contains("as of"), "{text}");
+        assert!(!text.contains("updating"), "{text}");
+    }
+
+    /// A refresh that fails leaves the forecast up and says so in the error
+    /// colour, on both screens, rather than trading it for a popup.
+    #[test]
+    fn a_failed_refresh_keeps_the_forecast_and_marks_it_in_the_error_colour() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let mut app = ready(screen);
+            let request = app.startup_request();
+            let crate::events::Request::Fetch { id, .. } = request else {
+                panic!("not a fetch")
+            };
+            let _ = app.on_message(crate::events::Message::LoadFailed {
+                id,
+                error: "no route to host".to_string(),
+            });
+
+            let buffer = drawn(&app, probe(), 100, 30);
+            let rows = symbols(&buffer, 100, 30);
+            let text = rows.join("\n");
+            assert!(text.contains("feels like"), "{screen:?}:\n{text}");
+            assert!(!text.contains("Error"), "{screen:?}:\n{text}");
+            assert!(
+                text.contains("refresh failed, r to retry"),
+                "{screen:?}:\n{text}"
+            );
+            let row = rows
+                .iter()
+                .position(|r| r.contains("refresh failed"))
+                .unwrap();
+            let column = rows[row].find("refresh failed").unwrap();
+            assert_eq!(buffer[(column as u16, row as u16)].fg, probe().error);
+        }
+    }
+
+    /// At the floor there is no room for the mark beside the day, and the
+    /// day is what keeps its place, as the comparison already yields to it.
+    #[test]
+    fn the_mark_yields_to_the_day_at_the_minimum_width() {
+        let app = cached(Screen::Weather);
+        let text = symbols(&drawn(&app, probe(), MIN_WIDTH, 20), MIN_WIDTH, 20).join("\n");
+        assert!(text.contains("Today"), "{text}");
+        assert!(text.contains("feels like"), "{text}");
     }
 
     #[test]

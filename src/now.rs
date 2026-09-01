@@ -238,6 +238,7 @@ mod tests {
             feels_like_c: None,
             code: None,
             wind_kph: None,
+            observed: None,
         };
 
         let text = report("Berlin, Germany", &weather, Unit::Metric);
@@ -255,6 +256,7 @@ mod tests {
             feels_like_c: None,
             code: None,
             wind_kph: None,
+            observed: None,
         };
         weather.air_quality = None;
 
@@ -339,6 +341,7 @@ mod tests {
                 feels_like_c: None,
                 code: None,
                 wind_kph: None,
+                observed: None,
             },
             daily: Vec::new(),
             today_index: 0,

@@ -217,19 +217,16 @@ fn at_owned(values: &[Option<String>], i: usize) -> Option<String> {
 
 impl From<ForecastDto> for Weather {
     fn from(dto: ForecastDto) -> Self {
-        // `current.time` is local to the forecast location, so its date identifies
-        // today's entry without assuming how many past days were requested.
-        // Falls back to the system date if the API omits its own clock. That is
-        // wrong for a city in another timezone, but only by a day at the edges,
-        // and it beats defaulting the index to zero — which would present the
-        // whole history as forecast.
-        let today = dto
-            .current
-            .time
-            .as_deref()
-            .and_then(|stamp| stamp.get(..10))
-            .map(str::to_string)
-            .unwrap_or_else(|| Local::now().date_naive().to_string());
+        // `current.time` is local to the forecast location, so it identifies
+        // today's entry and this hour's without assuming how many past days
+        // were requested. Falls back to the system clock if the API omits
+        // its own. That is wrong for a city in another timezone, but only
+        // by a day at the edges, and it beats defaulting the index to zero,
+        // which would present the whole history as forecast.
+        let observed = dto.current.time.clone();
+        let stamp = observed
+            .clone()
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%dT%H:%M").to_string());
 
         // Seven parallel arrays would make a zip chain unreadable — the pattern
         // becomes ((((((a, b), c), d), e), f), g) — so index instead. Costs a
@@ -262,13 +259,6 @@ impl From<ForecastDto> for Weather {
             })
             .collect();
 
-        // Located after filtering, so a dropped row can't shift the index. If
-        // today's own row was dropped, fall back to the count of days before it.
-        let today_index = daily
-            .iter()
-            .position(|day| day.date == today)
-            .unwrap_or_else(|| daily.iter().filter(|day| day.date < today).count());
-
         // Same index-by-position shape as `daily`, for the same reason: many
         // parallel arrays make a zip chain unreadable.
         let hourly: Vec<HourlyForecast> = dto.hourly.map_or_else(Vec::new, |hour| {
@@ -291,45 +281,27 @@ impl From<ForecastDto> for Weather {
                 .collect()
         });
 
-        // The hourly series runs 14 days back as well as forward, so getting
-        // this wrong points the whole screen at history. Truncating to the hour
-        // matches "2026-08-10T19:15" against "2026-08-10T19:00"; the same
-        // system-clock fallback as `today` applies if the API omits its clock.
-        let this_hour = dto
-            .current
-            .time
-            .as_deref()
-            .and_then(|stamp| stamp.get(..13))
-            .map_or_else(
-                || Local::now().format("%Y-%m-%dT%H").to_string(),
-                str::to_string,
-            );
-
-        // Located after filtering, exactly as `today_index` is, so a dropped
-        // hour cannot shift it.
-        let now_hour = hourly
-            .iter()
-            .position(|h| h.time.get(..13) == Some(this_hour.as_str()))
-            .unwrap_or_else(|| {
-                hourly
-                    .iter()
-                    .filter(|h| h.time.as_str() < this_hour.as_str())
-                    .count()
-            });
-
-        Self {
+        // Positioned after filtering, so a dropped row cannot shift either
+        // index. `position_of` owns the matching, and the cache's relocation
+        // reuses it.
+        let mut weather = Self {
             hourly,
-            now_hour,
+            now_hour: 0,
             current: Current {
                 temp_c: dto.current.temperature_2m,
                 feels_like_c: dto.current.apparent_temperature,
                 code: dto.current.weather_code,
                 wind_kph: dto.current.wind_speed_10m,
+                observed,
             },
             daily,
-            today_index,
+            today_index: 0,
             air_quality: None,
-        }
+        };
+        let position = weather.position_of(&stamp);
+        weather.today_index = position.today_index;
+        weather.now_hour = position.now_hour;
+        weather
     }
 }
 
