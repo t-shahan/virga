@@ -74,7 +74,18 @@ impl Action {
 /// backend reports press and release for every keystroke, and enhanced
 /// terminal protocols can add repeats on Unix too. Acting on a release would
 /// double every keystroke and every request.
-pub fn action_for(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
+///
+/// With the key reference open, "means nothing there" stops existing for
+/// presses: the card promises any key closes it, and a key the screen has no
+/// binding for would otherwise never reach the app at all — the caller drops
+/// a `None` before `App::on_action` can swallow it. Releases and repeats
+/// stay filtered as ever; the press that comes with them already closed it.
+pub fn action_for(
+    key: KeyEvent,
+    screen: Screen,
+    key_hint_style: KeyHintStyle,
+    help_visible: bool,
+) -> Option<Action> {
     match key.kind {
         KeyEventKind::Release => return None,
         KeyEventKind::Repeat => {
@@ -83,7 +94,7 @@ pub fn action_for(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -
         }
         KeyEventKind::Press => {}
     }
-    binding(key, screen, key_hint_style)
+    binding(key, screen, key_hint_style).or_else(|| help_visible.then_some(Action::ToggleHelp))
 }
 
 fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
@@ -167,12 +178,61 @@ fn help_key(key_hint_style: KeyHintStyle) -> Option<Action> {
 mod tests {
     use super::*;
 
-    /// Shadows the real, three-argument `action_for` for every test below
-    /// that does not care which key hint style is active — which is most of
-    /// them, since the style only ever changes what `?` and `,` mean. Tests
-    /// that do care call `super::action_for` directly.
+    /// Shadows the real, four-argument `action_for` for every test below
+    /// that does not care which key hint style is active or whether the
+    /// reference is open — which is most of them. Tests that do care call
+    /// `super::action_for` directly.
     fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
-        super::action_for(key, screen, KeyHintStyle::Hint)
+        super::action_for(key, screen, KeyHintStyle::Hint, false)
+    }
+
+    /// The card's footer promises any key closes it. That has to include
+    /// keys the screen has no binding for — Tab, a digit, a function key —
+    /// which would otherwise resolve to `None` and never reach the app,
+    /// leaving the card sitting there against its own word.
+    #[test]
+    fn with_the_reference_open_an_unbound_press_still_closes_it() {
+        for code in [KeyCode::Tab, KeyCode::Char('5'), KeyCode::F(5)] {
+            assert_eq!(
+                super::action_for(press(code), Screen::Weather, KeyHintStyle::Hint, true),
+                Some(Action::ToggleHelp),
+                "{code:?}"
+            );
+        }
+    }
+
+    /// With the reference closed an unbound key stays unbound — the catch-all
+    /// exists for the card, not as a new binding.
+    #[test]
+    fn with_the_reference_closed_an_unbound_key_still_means_nothing() {
+        assert_eq!(
+            super::action_for(
+                press(KeyCode::Tab),
+                Screen::Weather,
+                KeyHintStyle::Hint,
+                false
+            ),
+            None
+        );
+    }
+
+    /// Windows reports a release per press, and enhanced protocols repeat.
+    /// The press that arrives alongside either has already closed the card,
+    /// so acting on them too would toggle it straight back open.
+    #[test]
+    fn with_the_reference_open_releases_and_repeats_still_do_nothing() {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            assert_eq!(
+                super::action_for(
+                    of_kind(KeyCode::Tab, kind),
+                    Screen::Weather,
+                    KeyHintStyle::Hint,
+                    true
+                ),
+                None,
+                "{kind:?}"
+            );
+        }
     }
 
     /// `?` opens the key reference wherever a legend hint advertises it, and
@@ -198,7 +258,7 @@ mod tests {
     fn question_mark_is_unbound_in_full_style() {
         for screen in [Screen::Weather, Screen::Hourly] {
             assert_eq!(
-                super::action_for(press(KeyCode::Char('?')), screen, KeyHintStyle::Full),
+                super::action_for(press(KeyCode::Char('?')), screen, KeyHintStyle::Full, false),
                 None,
                 "{screen:?}"
             );
@@ -230,7 +290,7 @@ mod tests {
     fn comma_toggles_from_either_style() {
         for style in [KeyHintStyle::Hint, KeyHintStyle::Full] {
             assert_eq!(
-                super::action_for(press(KeyCode::Char(',')), Screen::Weather, style),
+                super::action_for(press(KeyCode::Char(',')), Screen::Weather, style, false),
                 Some(Action::ToggleKeyHints),
                 "{style:?}"
             );
