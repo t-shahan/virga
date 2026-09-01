@@ -12,6 +12,15 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Changed
+
+- The Homebrew tap is now
+  [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga), so
+  the install command reads as the app's name twice rather than once each of
+  two names: `brew install t-shahan/virga/virga`. Installs made through the
+  old `t-shahan/tap` name keep updating, because GitHub redirects a renamed
+  repository, so nothing needs retapping.
+
 ## [0.5.3] - 2026-08-31
 
 ### Fixed

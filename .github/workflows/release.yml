@@ -285,7 +285,7 @@ jobs:
         if: env.TAP_KEY != ''
         env:
           OWNER: ${{ github.repository_owner }}
-        run: git clone --depth 1 "git@github.com:${OWNER}/homebrew-tap.git" tap
+        run: git clone --depth 1 "git@github.com:${OWNER}/homebrew-virga.git" tap
 
       - name: write the formula
         if: env.TAP_KEY != ''

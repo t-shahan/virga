@@ -91,7 +91,7 @@ not need Rust unless you are building it yourself.
 ### Homebrew
 
 ```bash
-brew install t-shahan/tap/virga
+brew install t-shahan/virga/virga
 ```
 
 macOS and Linux. This is the path that needs the least explanation on macOS,
@@ -449,7 +449,7 @@ commits, tags, and pushes. From there
 platforms, publishes the release with checksums and build provenance, and
 updates the Homebrew tap. The tap push authenticates with a `TAP_KEY` secret
 holding an SSH private key whose public half is a write-enabled deploy key on
-[the tap repository](https://github.com/t-shahan/homebrew-tap). A deploy key
+[the tap repository](https://github.com/t-shahan/homebrew-virga). A deploy key
 rather than a personal access token, because it grants write to that one
 repository and nothing else, and does not expire. Without the secret the release
 still publishes and only the tap update is skipped, with a warning.
