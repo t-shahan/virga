@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The review reads git blame and the history of the lines it is
           # judging. A shallow clone cannot see them, and the agent that looks
