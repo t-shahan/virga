@@ -8,6 +8,7 @@ use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::precip_chart::precip_chart_render;
 use crate::ui::precip_week::precip_week_render;
+use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
 use crate::ui::{precip_chart, precip_week};
 use crate::units::Unit;
@@ -303,17 +304,18 @@ fn measured(mm: f64, unit: Unit) -> String {
 /// the ordinary winter case. Reporting only the snow depth would hide the rain
 /// that fell with it, so the total is the precipitation total, flagged when
 /// some of it arrived frozen.
+///
+/// Through `aggregate`, like the weathergram's inspector, so a window with an
+/// hour the provider did not report says so instead of summing the rest and
+/// calling the answer a day's total.
 fn total_line(ahead: &[HourlyForecast], unit: Unit) -> String {
-    if ahead.is_empty() {
+    let total = aggregate(ahead, unit);
+    if total == PrecipitationAggregate::Unavailable {
         return UNKNOWN.to_string();
     }
-
-    let total: f64 = ahead.iter().filter_map(|h| h.precip_mm).sum();
-    if total <= 0.0 {
+    let Some(amount) = total.positive_text(unit, " ") else {
         return "none expected".to_string();
-    }
-
-    let amount = measured(total, unit);
+    };
     if ahead.iter().any(HourlyForecast::is_snow) {
         return format!("{amount} incl. snow");
     }
@@ -332,8 +334,10 @@ fn peak_line(ahead: &[HourlyForecast]) -> String {
     }
 }
 
+/// A count needs every hour to have answered. An unreported hour counted as
+/// dry would make "0 of 24" the reading for a window the provider dropped.
 fn wet_hours_line(ahead: &[HourlyForecast]) -> String {
-    if ahead.is_empty() {
+    if ahead.is_empty() || ahead.iter().any(|h| h.precip_mm.is_none()) {
         return UNKNOWN.to_string();
     }
     format!(
@@ -704,6 +708,62 @@ mod tests {
             total_line(window_from(&hours, 24), Unit::Imperial),
             "none expected"
         );
+    }
+
+    #[test]
+    fn selected_forward_totals_reject_partial_measurements() {
+        let mut hours = dry_hours(24);
+        hours[7].precip_mm = None;
+
+        assert_eq!(total_line(&hours, Unit::Metric), UNKNOWN);
+        assert_eq!(wet_hours_line(&hours), UNKNOWN);
+    }
+
+    #[test]
+    fn selected_forward_totals_distinguish_zero_and_trace() {
+        let zero = dry_hours(24);
+        assert_eq!(total_line(&zero, Unit::Metric), "none expected");
+
+        let mut trace = dry_hours(24);
+        trace[0].precip_mm = Some(0.01);
+        assert_eq!(total_line(&trace, Unit::Metric), "<0.1 mm");
+        assert_eq!(total_line(&trace, Unit::Imperial), "<0.01 in");
+    }
+
+    #[test]
+    fn a_snowy_window_flags_its_total() {
+        let mut hours = dry_hours(24);
+        hours[2].precip_mm = Some(3.0);
+        hours[2].snow_cm = Some(2.0);
+
+        assert_eq!(total_line(&hours, Unit::Metric), "3.0 mm incl. snow");
+    }
+
+    /// The bug this screen had and the weathergram's inspector did not: a
+    /// window the provider dropped summed to zero and was reported as a dry
+    /// day, with "0 of 24" wet hours to back it up.
+    #[test]
+    fn full_total_is_unavailable_when_every_measurement_is_missing() {
+        let mut hours = dry_hours(24);
+        for hour in &mut hours {
+            hour.precip_mm = None;
+        }
+
+        assert_eq!(total_line(&hours, Unit::Metric), UNKNOWN);
+        assert_eq!(wet_hours_line(&hours), UNKNOWN);
+
+        let app = app_showing(hours, 0);
+        let text = rendered(100, 16, &app);
+        for label in ["24 h total", "wet hours"] {
+            let line = text
+                .lines()
+                .find(|line| line.contains(label))
+                .unwrap_or_else(|| panic!("no {label} line:\n{text}"));
+            assert!(
+                line.contains(UNKNOWN),
+                "{label} claimed dryness from missing data: {line:?}"
+            );
+        }
     }
 
     #[test]
