@@ -63,12 +63,63 @@ impl Action {
     }
 }
 
+/// Which keys are down right now, for terminals that say when one comes up.
+///
+/// Crossterm's Windows backend never reports `Repeat`. A held key arrives as
+/// a stream of `Press` events, each indistinguishable from a fresh keystroke,
+/// so the repeat filter in `action_for` did nothing there and a held `t`
+/// walked through every theme. What Windows does report is a `Release` for
+/// every key, and that is enough: a second `Press` with no release in between
+/// is the repeat, and gets relabelled as one before the filter sees it.
+///
+/// Legacy Unix terminals report neither, and a held set that nothing ever
+/// empties would call every second keystroke a repeat. So the tracking arms
+/// itself only where releases are known to arrive: on Windows from the start,
+/// and elsewhere from the first release seen, which is how a terminal
+/// speaking the kitty protocol announces itself.
+#[derive(Debug, Default)]
+pub struct HeldKeys {
+    armed: bool,
+    down: Vec<KeyCode>,
+}
+
+impl HeldKeys {
+    /// `reports_releases` is passed rather than read from `cfg!` so both
+    /// arms are testable everywhere; the caller passes `cfg!(windows)`.
+    pub fn new(reports_releases: bool) -> Self {
+        Self {
+            armed: reports_releases,
+            down: Vec::new(),
+        }
+    }
+
+    /// The same event, with a press that is really a repeat labelled as one.
+    pub fn observe(&mut self, mut key: KeyEvent) -> KeyEvent {
+        match key.kind {
+            KeyEventKind::Release => {
+                self.armed = true;
+                self.down.retain(|code| *code != key.code);
+            }
+            KeyEventKind::Press if self.armed => {
+                if self.down.contains(&key.code) {
+                    key.kind = KeyEventKind::Repeat;
+                } else {
+                    self.down.push(key.code);
+                }
+            }
+            KeyEventKind::Press | KeyEventKind::Repeat => {}
+        }
+        key
+    }
+}
+
 /// The action a key means on `screen`, or `None` if it means nothing there.
 ///
 /// Event *kind* is filtered here rather than deeper in: Crossterm's Windows
 /// backend reports press and release for every keystroke, and enhanced
 /// terminal protocols can add repeats on Unix too. Acting on a release would
-/// double every keystroke and every request.
+/// double every keystroke and every request. A Windows repeat, which arrives
+/// as another press, is relabelled by `HeldKeys` before it gets here.
 pub fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
     match key.kind {
         KeyEventKind::Release => return None,
@@ -255,6 +306,127 @@ mod tests {
                 "held {code:?} repeated on {screen:?}"
             );
         }
+    }
+
+    /// What Windows actually sends for a held `t`: press, press, press, and
+    /// a single release at the end. Only the first press may act.
+    #[test]
+    fn a_press_with_no_release_between_is_a_repeat_where_releases_are_reported() {
+        let mut held = HeldKeys::new(true);
+        let actions: Vec<Option<Action>> = [
+            KeyEventKind::Press,
+            KeyEventKind::Press,
+            KeyEventKind::Press,
+            KeyEventKind::Release,
+        ]
+        .into_iter()
+        .map(|kind| {
+            action_for(
+                held.observe(of_kind(KeyCode::Char('t'), kind)),
+                Screen::Weather,
+            )
+        })
+        .collect();
+
+        assert_eq!(
+            actions,
+            [Some(Action::CycleTheme), None, None, None],
+            "a held t cycled the theme more than once"
+        );
+    }
+
+    /// The relabelling must not cost the keys that are meant to repeat: a
+    /// held arrow on Windows still scrolls.
+    #[test]
+    fn a_held_arrow_still_repeats_where_releases_are_reported() {
+        let mut held = HeldKeys::new(true);
+        let actions: Vec<Option<Action>> = [KeyEventKind::Press; 3]
+            .into_iter()
+            .map(|kind| action_for(held.observe(of_kind(KeyCode::Left, kind)), Screen::Weather))
+            .collect();
+
+        assert_eq!(actions, [Some(Action::PrevDay); 3]);
+    }
+
+    /// Two distinct keystrokes are two: a release between the presses ends
+    /// the hold, and the next press is a fresh one.
+    #[test]
+    fn a_release_ends_the_hold() {
+        let mut held = HeldKeys::new(true);
+        let mut press = |kind| {
+            action_for(
+                held.observe(of_kind(KeyCode::Char('u'), kind)),
+                Screen::Weather,
+            )
+        };
+
+        assert_eq!(press(KeyEventKind::Press), Some(Action::ToggleUnits));
+        assert_eq!(press(KeyEventKind::Release), None);
+        assert_eq!(press(KeyEventKind::Press), Some(Action::ToggleUnits));
+    }
+
+    /// Holding one key must not make a different key look held.
+    #[test]
+    fn holds_are_tracked_per_key() {
+        let mut held = HeldKeys::new(true);
+        assert_eq!(
+            action_for(held.observe(press(KeyCode::Char('t'))), Screen::Weather),
+            Some(Action::CycleTheme)
+        );
+        assert_eq!(
+            action_for(held.observe(press(KeyCode::Char('u'))), Screen::Weather),
+            Some(Action::ToggleUnits)
+        );
+    }
+
+    /// A legacy Unix terminal never reports a release, so consecutive presses
+    /// of the same key are consecutive keystrokes and every one must act.
+    #[test]
+    fn without_releases_every_press_is_a_keystroke() {
+        let mut held = HeldKeys::new(false);
+        let actions: Vec<Option<Action>> = [KeyEventKind::Press; 3]
+            .into_iter()
+            .map(|kind| {
+                action_for(
+                    held.observe(of_kind(KeyCode::Char('t'), kind)),
+                    Screen::Weather,
+                )
+            })
+            .collect();
+
+        assert_eq!(actions, [Some(Action::CycleTheme); 3]);
+    }
+
+    /// A terminal that was not known to report releases proves it does with
+    /// its first one, and the tracking arms itself from there.
+    #[test]
+    fn the_first_release_arms_the_tracking() {
+        let mut held = HeldKeys::new(false);
+        let mut observe =
+            |code, kind| action_for(held.observe(of_kind(code, kind)), Screen::Weather);
+
+        assert_eq!(observe(KeyCode::Char('x'), KeyEventKind::Press), None);
+        assert_eq!(observe(KeyCode::Char('x'), KeyEventKind::Release), None);
+
+        assert_eq!(
+            observe(KeyCode::Char('t'), KeyEventKind::Press),
+            Some(Action::CycleTheme)
+        );
+        assert_eq!(
+            observe(KeyCode::Char('t'), KeyEventKind::Press),
+            None,
+            "the second press of a held key acted after releases were seen"
+        );
+    }
+
+    /// The kitty protocol labels its repeats itself; passing them through
+    /// unchanged keeps that path exactly as it was.
+    #[test]
+    fn a_labelled_repeat_passes_through_untouched() {
+        let mut held = HeldKeys::new(true);
+        let key = held.observe(of_kind(KeyCode::Left, KeyEventKind::Repeat));
+        assert_eq!(key.kind, KeyEventKind::Repeat);
+        assert_eq!(action_for(key, Screen::Weather), Some(Action::PrevDay));
     }
 
     /// Ctrl-C quits from anywhere, including where `c` is ordinary text.

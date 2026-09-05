@@ -12,6 +12,15 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- Holding a key on Windows no longer fires it over and over. The Windows
+  console reports a held key as a stream of presses rather than as
+  repeats, so the filter that stops a held `t` from cycling through every
+  theme, or a held `p` from flapping the hourly screen, never saw them.
+  A second press with no release in between now counts as the repeat it
+  is. Arrows and typing still repeat, as they should.
+
 ### Changed
 
 - The Homebrew tap is now
