@@ -9,13 +9,15 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 mod axis;
 mod bars;
 mod chart;
+mod classic;
 mod condition_symbol;
 mod current;
 mod digits;
 mod forecast;
 mod hourly;
+mod inspector;
 mod legend;
-mod precip;
+mod pane;
 mod precip_chart;
 mod precip_week;
 mod precipitation;
@@ -23,11 +25,11 @@ mod search;
 mod weathergram;
 
 use chart::chart_area_render;
+use classic::classic_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
-use precip::precip_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
@@ -214,7 +216,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
                     too_small_render(frame, content, area, needs, palette);
                 }
                 HourlyView::Weathergram => hourly_render(frame, app, palette, content),
-                HourlyView::Classic => precip_render(frame, app, palette, content),
+                HourlyView::Classic => classic_render(frame, app, palette, content),
             },
             Fetch::Loading => popup_render(
                 frame,
