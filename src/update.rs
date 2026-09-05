@@ -152,6 +152,22 @@ pub(crate) enum InstallMethod {
     Download,
 }
 
+/// Where the running binary really lives.
+///
+/// `current_exe` answers with the path the binary was invoked through, and
+/// on macOS that is not symlink-resolved. An Intel Homebrew install runs as
+/// `/usr/local/bin/virga`, a link into the Cellar; judged by the link it
+/// looked like the script's work, and the advice was to pipe `install.sh`
+/// over Homebrew's symlink, which is the one outcome this module exists to
+/// prevent. A path that cannot be resolved is judged as it was invoked.
+pub(crate) fn running_binary() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(resolve_links)
+}
+
+fn resolve_links(exe: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&exe).unwrap_or(exe)
+}
+
 /// Classify the running binary's path. `windows` is passed rather than read
 /// from `cfg!` so the branch is testable everywhere; the caller passes
 /// `cfg!(windows)`.
@@ -168,9 +184,15 @@ pub(crate) fn install_method(
         return InstallMethod::Script { install_dir: None };
     };
 
+    // Whole components, not substrings: a checkout of the tap lives in a
+    // directory called homebrew-virga, and a username can contain either
+    // word. With the path resolved above, every Homebrew binary passes
+    // through a Cellar; the prefixes cover the unresolved fallback.
     let under_homebrew = exe.components().any(|component| {
-        let name = component.as_os_str().to_string_lossy();
-        name == "Cellar" || name.contains("homebrew") || name.contains("linuxbrew")
+        matches!(
+            component.as_os_str().to_str(),
+            Some("Cellar" | "homebrew" | ".linuxbrew")
+        )
     });
     if under_homebrew {
         return InstallMethod::Homebrew;
@@ -430,6 +452,64 @@ mod tests {
                 "{exe}"
             );
         }
+    }
+
+    /// The Intel-Mac case: Homebrew's `bin` is a directory of symlinks into
+    /// the Cellar, and `current_exe` hands back the link, not its target.
+    /// Unresolved, nothing in `/usr/local/bin/virga` says Homebrew and the
+    /// user was told to overwrite the link with `install.sh`.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_the_cellar_means_brew() {
+        let prefix = tempfile::tempdir().unwrap();
+        let cellar = prefix.path().join("Cellar/virga/0.5.3/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        std::fs::write(cellar.join("virga"), b"").unwrap();
+        let bin = prefix.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("virga");
+        std::os::unix::fs::symlink(cellar.join("virga"), &link).unwrap();
+
+        let resolved = resolve_links(link.clone());
+        assert_ne!(resolved, link, "the link was not followed");
+        assert_eq!(
+            install_method(Some(&resolved), Some(&home()), false),
+            InstallMethod::Homebrew
+        );
+    }
+
+    /// A path that does not exist resolves to itself rather than to nothing,
+    /// so the classification still has something to judge.
+    #[test]
+    fn an_unresolvable_path_is_judged_as_invoked() {
+        let exe = PathBuf::from("/nowhere/at/all/virga");
+        assert_eq!(resolve_links(exe.clone()), exe);
+    }
+
+    /// The words are matched as whole path components. A tap checkout or a
+    /// username containing them is not a Homebrew install.
+    #[test]
+    fn a_homebrew_substring_is_not_a_homebrew_install() {
+        for exe in [
+            "/home/someone/src/homebrew-virga/target/release/virga",
+            "/home/homebrewer/.local/bin/virga",
+            "/home/linuxbrewfan/bin/virga",
+        ] {
+            assert_ne!(
+                install_method(Some(Path::new(exe)), Some(&home()), false),
+                InstallMethod::Homebrew,
+                "{exe}"
+            );
+        }
+        assert_eq!(
+            install_method(
+                Some(Path::new("/opt/homebrew/bin/virga")),
+                Some(&home()),
+                false
+            ),
+            InstallMethod::Homebrew,
+            "the unresolved Apple silicon link still names its prefix"
+        );
     }
 
     #[test]

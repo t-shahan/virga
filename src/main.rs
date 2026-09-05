@@ -490,7 +490,7 @@ fn check_for_update() -> Result<String> {
     let current = update::Release::parse(env!("CARGO_PKG_VERSION"))
         .context("parse this binary's own version")?;
     let latest = update::Release::parse(&update::latest_tag(update::RELEASES_URL)?)?;
-    let exe = std::env::current_exe().ok();
+    let exe = update::running_binary();
     let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
     let method = update::install_method(exe.as_deref(), home.as_deref(), cfg!(windows));
     Ok(update::report(&current, &latest, &method))

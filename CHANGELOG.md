@@ -12,6 +12,16 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- `virga update` recognises a Homebrew install on an Intel Mac. The binary
+  there is reached through a symlink in `/usr/local/bin`, and judged by the
+  link alone it looked like the install script's work, so the advice was to
+  run the script over Homebrew's own link. The link is followed first now,
+  and only a whole path component called `Cellar`, `homebrew` or
+  `.linuxbrew` counts, so a checkout of the tap is not mistaken for a
+  Homebrew install either.
+
 ### Changed
 
 - The Homebrew tap is now
