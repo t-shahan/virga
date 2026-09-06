@@ -258,6 +258,32 @@ mod tests {
         }
     }
 
+    /// One hole is enough. The all-missing render above proves the wording
+    /// reaches the screen; this proves a single unreported hour, in a window
+    /// that would otherwise sum to something, is not summed around.
+    #[test]
+    fn a_single_unreported_hour_renders_neither_a_total_nor_a_count() {
+        let mut hours = dry_hours(24);
+        hours[2].precip_mm = Some(3.0);
+        hours[7].precip_mm = None;
+
+        let app = app_showing(hours, 0);
+        for width in [60, 100] {
+            let text = rendered(width, 16, &app);
+            for label in ["24 h total", "wet hours"] {
+                let line = text
+                    .lines()
+                    .find(|line| line.contains(label))
+                    .unwrap_or_else(|| panic!("no {label} line at {width}:\n{text}"));
+                assert!(
+                    line.contains(UNKNOWN),
+                    "{label} at {width} summed around a hole: {line:?}"
+                );
+                assert!(!line.contains(" mm"), "{label} at {width}: {line:?}");
+            }
+        }
+    }
+
     /// Every value has to fit beside its label or it is clipped mid-word, and
     /// metric is the system that overflows first — a real bug the daily pane
     /// only caught because its test covered both.
