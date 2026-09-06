@@ -316,7 +316,6 @@ fn comparison(weather: &Weather, day: &DailyForecast, unit: Unit) -> String {
     }
 }
 
-/// Sixteen points is more precision than a daily dominant direction deserves.
 fn duration(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64 / 60;
     format!("{}h {}m", total / 60, total % 60)

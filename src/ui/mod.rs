@@ -399,6 +399,54 @@ mod tests {
         }
     }
 
+    /// The two hourly renderings now share one inspector, so `v` has to
+    /// keep it in place at the narrowest terminal that stacks the panes as
+    /// well as one wide enough to lay them side by side. Driven through the
+    /// action rather than by setting the view, so the toggle itself is what
+    /// is under test.
+    #[test]
+    fn pressing_v_keeps_the_shared_inspector_at_36_and_100_columns() {
+        for width in [36u16, 100] {
+            let mut app = ready(Screen::Hourly);
+            let height = 24;
+
+            let weathergram =
+                symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert!(
+                weathergram.contains("Hourly weather · next"),
+                "{width}:\n{weathergram}"
+            );
+            assert!(
+                weathergram.contains("feels like"),
+                "{width}:\n{weathergram}"
+            );
+            assert!(
+                weathergram.contains("Sun 2 Aug, 12:00 AM"),
+                "{width}:\n{weathergram}"
+            );
+
+            app.on_action(crate::input::Action::ToggleHourlyView);
+            let classic = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert!(
+                classic.contains("Precipitation · next"),
+                "{width}:\n{classic}"
+            );
+            assert!(classic.contains("wet hours"), "{width}:\n{classic}");
+            assert!(
+                classic.contains("Sun 2 Aug, 12:00 AM"),
+                "{width}:\n{classic}"
+            );
+            assert!(!classic.contains("Hourly weather"), "{width}:\n{classic}");
+
+            app.on_action(crate::input::Action::ToggleHourlyView);
+            let back = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert_eq!(
+                back, weathergram,
+                "{width}: the second press did not restore the weathergram"
+            );
+        }
+    }
+
     fn ready(screen: Screen) -> App {
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
