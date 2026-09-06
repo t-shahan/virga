@@ -46,9 +46,15 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
     // would be a lie the reference itself is telling.
     let help = (app.key_hint_style == KeyHintStyle::Hint).then_some(("?", "keys".to_string()));
 
+    // `,` rides right behind the way out rather than at the tail, because
+    // the bar's wrapping drops from the tail: in `Full` style the bar is the
+    // only place the comma is discoverable — `?` is unbound there — and a
+    // narrow terminal that dropped it would strand the user in `Full` with
+    // no visible way back.
     match app.screen {
         Screen::Weather => owned(vec![
             ("q", "quit"),
+            (",", "hide"),
             ("←→↑↓", "day"),
             ("n", "now"),
             ("p", "hourly"),
@@ -56,7 +62,6 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("u", "units"),
             ("l", "location"),
             ("t", &theme_label(app)),
-            (",", "hide"),
         ])
         .into_iter()
         .chain(help)
@@ -64,6 +69,7 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
         Screen::Hourly => owned(vec![
             ("q", "quit"),
             ("b", "back"),
+            (",", "hide"),
             ("←→", "hour"),
             ("↑↓", "day"),
             ("n", "now"),
@@ -71,7 +77,6 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("r", "refresh"),
             ("u", "units"),
             ("t", &theme_label(app)),
-            (",", "hide"),
         ])
         .into_iter()
         .chain(help)
@@ -587,6 +592,25 @@ mod tests {
         let legend = legend_at(20, Screen::Hourly).join(" ");
         assert!(legend.contains("[q]"), "{legend:?}");
         assert!(legend.contains("[b]"), "{legend:?}");
+    }
+
+    /// In `Full` style the bar is the only place `,` is discoverable at all —
+    /// `?` is unbound there, so a wrap that drops the comma from the tail
+    /// strands the user in `Full` with no visible way back. The rendered bar,
+    /// not just the list, has to keep it at every width the app runs at.
+    #[test]
+    fn full_style_keeps_the_way_back_to_hint_at_every_supported_width() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            for width in 34u16..=160 {
+                let mut app = app_on(screen);
+                app.key_hint_style = KeyHintStyle::Full;
+                let shown = legend_at_with(&app, width).join(" ");
+                assert!(
+                    shown.contains("[,] hide"),
+                    "{screen:?} at {width} lost the way back: {shown:?}"
+                );
+            }
+        }
     }
 
     /// `Full` style's longer list is still bound by the same ceiling — the

@@ -545,6 +545,22 @@ mod tests {
         assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
     }
 
+    /// The sweep above saves the theme before any key hint style exists, so
+    /// a `save_theme` that quietly dropped the third field would still pass
+    /// it. This is the ordering that catches that: hints first, theme second.
+    #[test]
+    fn saving_a_theme_preserves_an_existing_key_hint_style() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
     /// An unknown key hint style name is a warning and nothing else, the same
     /// as an unknown theme: it must not take the rest of the document with it.
     #[test]
