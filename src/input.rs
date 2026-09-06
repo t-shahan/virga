@@ -73,10 +73,17 @@ impl Action {
 /// is the repeat, and gets relabelled as one before the filter sees it.
 ///
 /// Legacy Unix terminals report neither, and a held set that nothing ever
-/// empties would call every second keystroke a repeat. So the tracking arms
-/// itself only where releases are known to arrive: on Windows from the start,
-/// and elsewhere from the first release seen, which is how a terminal
-/// speaking the kitty protocol announces itself.
+/// empties would call every second keystroke a repeat. So the tracking is
+/// armed on Windows and nowhere else.
+///
+/// An earlier draft armed it from the first release seen anywhere, on the
+/// theory that one release proves the terminal reports them. It does not.
+/// The kitty protocol reports releases for the keys that produce text but
+/// not for Enter, Tab, or Backspace unless "report all keys as escape codes"
+/// is also negotiated, so an arrow's release followed by two Enters silently
+/// turned the second Enter into a repeat and every Enter after it too. A
+/// terminal speaking that protocol labels its own repeats, so nothing on
+/// Unix needs the synthetic relabel in the first place.
 #[derive(Debug, Default)]
 pub struct HeldKeys {
     armed: bool,
@@ -97,7 +104,6 @@ impl HeldKeys {
     pub fn observe(&mut self, mut key: KeyEvent) -> KeyEvent {
         match key.kind {
             KeyEventKind::Release => {
-                self.armed = true;
                 self.down.retain(|code| *code != key.code);
             }
             KeyEventKind::Press if self.armed => {
@@ -397,10 +403,10 @@ mod tests {
         assert_eq!(actions, [Some(Action::CycleTheme); 3]);
     }
 
-    /// A terminal that was not known to report releases proves it does with
-    /// its first one, and the tracking arms itself from there.
+    /// A release seen on a terminal that was not declared to report them
+    /// proves nothing about the other keys, so it must not arm the tracking.
     #[test]
-    fn the_first_release_arms_the_tracking() {
+    fn a_release_alone_does_not_arm_the_tracking() {
         let mut held = HeldKeys::new(false);
         let mut observe =
             |code, kind| action_for(held.observe(of_kind(code, kind)), Screen::Weather);
@@ -408,14 +414,40 @@ mod tests {
         assert_eq!(observe(KeyCode::Char('x'), KeyEventKind::Press), None);
         assert_eq!(observe(KeyCode::Char('x'), KeyEventKind::Release), None);
 
+        for _ in 0..2 {
+            assert_eq!(
+                observe(KeyCode::Char('t'), KeyEventKind::Press),
+                Some(Action::CycleTheme),
+                "a repeated press was suppressed after a lone release"
+            );
+        }
+    }
+
+    /// The kitty protocol releases an arrow but never Enter, Tab, or
+    /// Backspace unless every key is reported as an escape code. Armed by
+    /// that arrow's release, the tracking called the second Enter a repeat
+    /// and dropped the submit, and every submit after it.
+    #[test]
+    fn an_arrow_release_does_not_make_the_next_enter_a_repeat() {
+        let mut held = HeldKeys::new(false);
+        let mut observe =
+            |code, kind| action_for(held.observe(of_kind(code, kind)), Screen::Search);
+
         assert_eq!(
-            observe(KeyCode::Char('t'), KeyEventKind::Press),
-            Some(Action::CycleTheme)
+            observe(KeyCode::Left, KeyEventKind::Press),
+            None,
+            "left is unbound on the search screen"
+        );
+        assert_eq!(observe(KeyCode::Left, KeyEventKind::Release), None);
+
+        assert_eq!(
+            observe(KeyCode::Enter, KeyEventKind::Press),
+            Some(Action::Submit)
         );
         assert_eq!(
-            observe(KeyCode::Char('t'), KeyEventKind::Press),
-            None,
-            "the second press of a held key acted after releases were seen"
+            observe(KeyCode::Enter, KeyEventKind::Press),
+            Some(Action::Submit),
+            "a second Enter with no release between was dropped as a repeat"
         );
     }
 
