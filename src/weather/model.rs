@@ -31,10 +31,6 @@ pub struct Current {
     pub feels_like_c: Option<f64>,
     pub code: Option<u8>,
     pub wind_kph: Option<f64>,
-    /// When the reading is for, local to the location and as the endpoint
-    /// spells it, e.g. "2026-08-09T17:45". The cache relocates "now" from
-    /// it; nothing on screen prints it.
-    pub observed: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,6 +106,14 @@ pub struct Weather {
     pub hourly: Vec<HourlyForecast>,
     /// Index of the current hour within `hourly`.
     pub now_hour: usize,
+    /// The location's UTC offset when this was fetched, in seconds east,
+    /// from the response's `utc_offset_seconds`. The cache derives the
+    /// location's current time from it — never from the user's clock alone,
+    /// and never from the reading's stamp, which model data can hold up to
+    /// a quarter hour behind the fetch. Defaulted so a cache written before
+    /// the field existed parses, and is then refused for lacking it.
+    #[serde(default)]
+    pub utc_offset_secs: Option<i32>,
     pub air_quality: Option<AirQuality>,
 }
 
@@ -207,7 +211,6 @@ impl Weather {
                 feels_like_c: Some(26.0),
                 code: Some(0),
                 wind_kph: Some(10.0),
-                observed: None,
             },
             daily: (0..days)
                 .map(|i| DailyForecast {
@@ -249,6 +252,7 @@ impl Weather {
                 })
                 .collect(),
             now_hour: PAST_HOURS,
+            utc_offset_secs: None,
             air_quality: None,
         }
     }

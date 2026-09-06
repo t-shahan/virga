@@ -158,6 +158,10 @@ pub struct DailyDto {
 
 #[derive(Debug, Deserialize)]
 pub struct ForecastDto {
+    /// Present whenever the request asked `timezone=auto`, as ours does.
+    /// Optional so a fixture recorded without it still parses.
+    #[serde(default)]
+    pub utc_offset_seconds: Option<i32>,
     pub current: CurrentDto,
     pub daily: DailyDto,
     /// Optional so a request that never asked for an hourly block — or a
@@ -223,8 +227,9 @@ impl From<ForecastDto> for Weather {
         // its own. That is wrong for a city in another timezone, but only
         // by a day at the edges, and it beats defaulting the index to zero,
         // which would present the whole history as forecast.
-        let observed = dto.current.time.clone();
-        let stamp = observed
+        let stamp = dto
+            .current
+            .time
             .clone()
             .unwrap_or_else(|| Local::now().format("%Y-%m-%dT%H:%M").to_string());
 
@@ -292,10 +297,10 @@ impl From<ForecastDto> for Weather {
                 feels_like_c: dto.current.apparent_temperature,
                 code: dto.current.weather_code,
                 wind_kph: dto.current.wind_speed_10m,
-                observed,
             },
             daily,
             today_index: 0,
+            utc_offset_secs: dto.utc_offset_seconds,
             air_quality: None,
         };
         let position = weather.position_of(&stamp);

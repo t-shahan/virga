@@ -13,7 +13,7 @@ use crate::app::{ActiveLocation, CachedWeather};
 use crate::state;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, NaiveDateTime, TimeDelta, Utc};
+use chrono::{DateTime, FixedOffset, Local, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,7 @@ const FILE: &str = "forecast.json";
 /// The age is shown beside the forecast whatever it is; this only decides
 /// whether it is shown at all.
 const MAX_AGE: TimeDelta = TimeDelta::hours(24);
-/// The stamp Open-Meteo puts on `current.time`, local to the location.
+/// The shape of the series' timestamps, local to the location.
 const STAMP: &str = "%Y-%m-%dT%H:%M";
 
 /// The body behind the envelope. The version is read from the envelope
@@ -87,19 +87,19 @@ pub fn load(
         return Ok(None);
     }
 
-    // Local time at the city now is the reading's own stamp plus what has
-    // elapsed since; the user's clock never enters it, which is what keeps a
-    // forecast for another timezone pointing at the right hour.
+    // Local time at the city is UTC now shifted by the offset the response
+    // itself carried. Not the reading's stamp plus the elapsed time: the
+    // stamp is model data, up to a quarter hour behind the fetch, and that
+    // slack pointed a launch just after midnight at the previous day. The
+    // one thing this trusts across the gap is the offset, which a DST
+    // transition inside the 24 h window can move — the wrong hour that
+    // leaves is corrected by the fetch already on its way, where the wrong
+    // day stood until `r`.
     let mut weather = document.weather;
-    let Some(observed) = weather
-        .current
-        .observed
-        .as_deref()
-        .and_then(|stamp| NaiveDateTime::parse_from_str(stamp, STAMP).ok())
-    else {
+    let Some(offset) = weather.utc_offset_secs.and_then(FixedOffset::east_opt) else {
         return Ok(None);
     };
-    let stamp = (observed + age).format(STAMP).to_string();
+    let stamp = now.with_timezone(&offset).format(STAMP).to_string();
     if !weather.relocate(&stamp) {
         return Ok(None);
     }
@@ -192,11 +192,13 @@ mod tests {
         }
     }
 
-    /// The fixture's hours open at 2026-08-01T00:00; its reading is stamped
-    /// a day in, at the fixture's own `now_hour`.
-    fn forecast() -> Weather {
+    /// The fixture's hours run 2026-08-01T00:00 through 2026-08-09T23:00.
+    /// The city is placed in the test machine's own zone — the offset is
+    /// read off `at` — so every expected position below can be written as a
+    /// plain local stamp whatever zone the tests run in.
+    fn forecast(at: DateTime<Local>) -> Weather {
         let mut weather = Weather::fixture(9, 1);
-        weather.current.observed = Some("2026-08-02T00:00".to_string());
+        weather.utc_offset_secs = Some(at.offset().local_minus_utc());
         weather
     }
 
@@ -206,7 +208,12 @@ mod tests {
 
     fn written(dir: &Path, fetched: DateTime<Local>) -> PathBuf {
         let path = dir.join(FILE);
-        let bytes = encode(&frederick(), &forecast(), fetched.with_timezone(&Utc)).unwrap();
+        let bytes = encode(
+            &frederick(),
+            &forecast(fetched),
+            fetched.with_timezone(&Utc),
+        )
+        .unwrap();
         write(&path, &bytes).unwrap();
         path
     }
@@ -214,25 +221,58 @@ mod tests {
     #[test]
     fn a_forecast_comes_back_relocated_to_the_current_hour() {
         let dir = tempfile::tempdir().unwrap();
-        let fetched = local(2026, 8, 31, 17, 52);
+        let fetched = local(2026, 8, 2, 17, 52);
         let path = written(dir.path(), fetched);
 
-        let cached = load(&path, &frederick(), local(2026, 8, 31, 21, 5))
+        let now = local(2026, 8, 2, 21, 5);
+        let cached = load(&path, &frederick(), now)
             .unwrap()
             .expect("a three hour old forecast opens the app");
         assert_eq!(cached.as_of, "17:52");
-        // 00:00 on the reading's clock plus 3 h 13 m is the 03:00 entry.
-        assert_eq!(cached.weather.now_hour, 27);
+        // 21:05 on the second day of the series is its 21:00 entry.
+        assert_eq!(cached.weather.now_hour, 45);
         assert_eq!(cached.weather.today_index, 1);
-        assert_eq!(cached.weather.hourly.len(), forecast().hourly.len());
+        assert_eq!(cached.weather.hourly.len(), forecast(now).hourly.len());
+    }
+
+    /// The regression the observation stamp used to cause: model data can
+    /// stamp the reading a quarter hour behind the fetch, so deriving the
+    /// city's clock from the stamp pointed a launch just after midnight at
+    /// the previous day. The positions come from the clock now, so crossing
+    /// midnight between the fetch and the launch lands on the new day.
+    #[test]
+    fn reopening_after_midnight_lands_on_the_new_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = written(dir.path(), local(2026, 8, 2, 23, 59));
+
+        let cached = load(&path, &frederick(), local(2026, 8, 3, 0, 5))
+            .unwrap()
+            .expect("a six minute old forecast opens the app");
+        assert_eq!(cached.weather.today_index, 2, "midnight has passed");
+        assert_eq!(cached.weather.now_hour, 48);
+        assert_eq!(cached.as_of, "yesterday 23:59");
+    }
+
+    /// The same rule one tier down: crossing an hour boundary moves "now"
+    /// to the new hour's entry, however recent the fetch.
+    #[test]
+    fn reopening_after_an_hour_boundary_lands_on_the_new_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = written(dir.path(), local(2026, 8, 2, 13, 59));
+
+        let cached = load(&path, &frederick(), local(2026, 8, 2, 14, 1))
+            .unwrap()
+            .expect("a two minute old forecast opens the app");
+        assert_eq!(cached.weather.now_hour, 38);
+        assert_eq!(cached.weather.today_index, 1);
     }
 
     #[test]
     fn a_fetch_before_midnight_says_yesterday() {
         let dir = tempfile::tempdir().unwrap();
-        let path = written(dir.path(), local(2026, 8, 30, 22, 14));
+        let path = written(dir.path(), local(2026, 8, 1, 22, 14));
 
-        let cached = load(&path, &frederick(), local(2026, 8, 31, 1, 0))
+        let cached = load(&path, &frederick(), local(2026, 8, 2, 1, 0))
             .unwrap()
             .unwrap();
         assert_eq!(cached.as_of, "yesterday 22:14");
@@ -241,7 +281,7 @@ mod tests {
     #[test]
     fn a_day_old_forecast_is_not_opened_on() {
         let dir = tempfile::tempdir().unwrap();
-        let fetched = local(2026, 8, 30, 12, 0);
+        let fetched = local(2026, 8, 2, 12, 0);
         let path = written(dir.path(), fetched);
 
         let just_inside = fetched + TimeDelta::hours(24);
@@ -313,25 +353,26 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let bytes = encode(&frederick(), &forecast(), Utc::now()).unwrap();
+        let bytes = encode(&frederick(), &forecast(Local::now()), Utc::now()).unwrap();
         let error = write(&path, &bytes).unwrap_err().to_string();
         assert!(error.contains("newer virga"), "{error}");
         assert!(std::fs::read_to_string(&path).unwrap().contains("99"));
     }
 
-    /// A reading with no stamp cannot be relocated, and a forecast that has
-    /// run out of hours must not open the app on its last one.
+    /// A cache with no offset cannot say what time it is at the city, and a
+    /// forecast that has run out of hours must not open the app on its last
+    /// one — both are refused whole rather than shown at a guessed position.
     #[test]
     fn a_forecast_that_cannot_be_relocated_is_no_cache() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE);
-        let fetched = local(2026, 8, 31, 12, 0);
 
-        let mut unstamped = forecast();
-        unstamped.current.observed = None;
+        let fetched = local(2026, 8, 2, 12, 0);
+        let mut offsetless = forecast(fetched);
+        offsetless.utc_offset_secs = None;
         write(
             &path,
-            &encode(&frederick(), &unstamped, fetched.with_timezone(&Utc)).unwrap(),
+            &encode(&frederick(), &offsetless, fetched.with_timezone(&Utc)).unwrap(),
         )
         .unwrap();
         assert!(
@@ -340,15 +381,21 @@ mod tests {
                 .is_none()
         );
 
-        let mut ending = forecast();
-        ending.current.observed = Some("2026-08-09T22:00".to_string());
+        // The series' last hour is 2026-08-09T23:00; two hours past it is
+        // inside the age bound but outside the forecast.
+        let fetched = local(2026, 8, 9, 20, 0);
         write(
             &path,
-            &encode(&frederick(), &ending, fetched.with_timezone(&Utc)).unwrap(),
+            &encode(
+                &frederick(),
+                &forecast(fetched),
+                fetched.with_timezone(&Utc),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(
-            load(&path, &frederick(), fetched + TimeDelta::hours(3))
+            load(&path, &frederick(), local(2026, 8, 10, 1, 0))
                 .unwrap()
                 .is_none()
         );
