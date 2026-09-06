@@ -20,7 +20,9 @@ refuse to publish a version this file does not describe.
   run the script over Homebrew's own link. The link is followed first now,
   and only a whole path component called `Cellar`, `homebrew` or
   `.linuxbrew` counts, so a checkout of the tap is not mistaken for a
-  Homebrew install either.
+  Homebrew install either. A Cargo install reached through a symlinked
+  `~/.cargo` is recognised as Cargo's, not the script's, for the same
+  reason.
 
 ### Changed
 

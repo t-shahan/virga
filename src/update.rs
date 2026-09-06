@@ -198,13 +198,20 @@ pub(crate) fn install_method(
         return InstallMethod::Homebrew;
     }
 
-    if let Some(home) = home
-        && exe.parent() == Some(home.join(".cargo").join("bin").as_path())
+    // The binary arrives resolved, so the directories it is measured against
+    // have to be resolved the same way, or a `~/.cargo` that is itself a
+    // symlink puts its binary somewhere the unresolved path never names and
+    // a Cargo install is told to run the script over itself. A directory
+    // that does not exist resolves to itself, which is still the right
+    // comparison for an exe that could not be resolved either.
+    let cargo_dir = home.map(|home| resolve_links(home.join(".cargo").join("bin")));
+    if let (Some(parent), Some(cargo_dir)) = (exe.parent(), cargo_dir.as_deref())
+        && parent == cargo_dir
     {
         return InstallMethod::Cargo;
     }
 
-    let default_dir = home.map(|home| home.join(".local").join("bin"));
+    let default_dir = home.map(|home| resolve_links(home.join(".local").join("bin")));
     let install_dir = exe
         .parent()
         .filter(|parent| Some(*parent) != default_dir.as_deref())
@@ -475,6 +482,50 @@ mod tests {
         assert_eq!(
             install_method(Some(&resolved), Some(&home()), false),
             InstallMethod::Homebrew
+        );
+    }
+
+    /// `~/.cargo` moved onto another disk and left behind as a symlink. The
+    /// binary resolves to where the directory really is, so the directory it
+    /// is compared against has to be resolved too, or the install is judged
+    /// the script's and the advice is to overwrite a Cargo binary.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cargo_directory_still_means_cargo() {
+        let root = tempfile::tempdir().unwrap();
+        let tools_bin = root.path().join("tools/bin");
+        std::fs::create_dir_all(&tools_bin).unwrap();
+        std::fs::write(tools_bin.join("virga"), b"").unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(root.path().join("tools"), home.join(".cargo")).unwrap();
+
+        let invoked = home.join(".cargo/bin/virga");
+        let resolved = resolve_links(invoked.clone());
+        assert_ne!(resolved, invoked, "the link was not followed");
+        assert_eq!(
+            install_method(Some(&resolved), Some(&home), false),
+            InstallMethod::Cargo
+        );
+    }
+
+    /// The same for the script's default directory: reached through a link,
+    /// it is still the default, and the one-liner needs no directory named.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_default_directory_needs_no_naming() {
+        let root = tempfile::tempdir().unwrap();
+        let real_bin = root.path().join("elsewhere/bin");
+        std::fs::create_dir_all(&real_bin).unwrap();
+        std::fs::write(real_bin.join("virga"), b"").unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join(".local")).unwrap();
+        std::os::unix::fs::symlink(&real_bin, home.join(".local/bin")).unwrap();
+
+        let resolved = resolve_links(home.join(".local/bin/virga"));
+        assert_eq!(
+            install_method(Some(&resolved), Some(&home), false),
+            InstallMethod::Script { install_dir: None }
         );
     }
 
