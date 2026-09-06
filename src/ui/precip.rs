@@ -8,7 +8,7 @@ use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::precip_chart::precip_chart_render;
 use crate::ui::precip_week::precip_week_render;
-use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
+use crate::ui::{TITLE_GUTTER, UNKNOWN, status_mark, title_room, truncate};
 use crate::ui::{precip_chart, precip_week};
 use crate::units::Unit;
 use crate::weather::code::description;
@@ -140,7 +140,14 @@ fn detail_pane_render(
     let upcoming = next_precipitation(hours);
 
     let (city, condition) = top_titles(&app.location.label, &condition, area.width);
-    let (upcoming, when) = bottom_titles(&upcoming, &when, area.width);
+    // The same mark the weathergram's inspector carries: the classic view
+    // is the same forecast, so it is never shown unlabelled here either.
+    let mark = status_mark(app, palette, area.width, &when);
+    let (upcoming, when) = match &mark {
+        Some(mark) if mark.alone => (Some(mark.text.clone()), String::new()),
+        Some(mark) => bottom_titles(&mark.text, &when, area.width),
+        None => bottom_titles(&upcoming, &when, area.width),
+    };
 
     let mut block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
@@ -155,12 +162,11 @@ fn detail_pane_render(
         // and the weight rather than the one reserved for labels. It was muted
         // to begin with and read as chrome — the eye went straight past the one
         // line on the screen that answers "do I need a coat".
-        block = block.title_bottom(
-            Line::from(upcoming)
-                .bold()
-                .fg(palette.selection)
-                .left_aligned(),
-        );
+        let line = match mark {
+            Some(mark) => Line::from(upcoming).fg(mark.color),
+            None => Line::from(upcoming).bold().fg(palette.selection),
+        };
+        block = block.title_bottom(line.left_aligned());
     }
 
     let inner = block.inner(area);

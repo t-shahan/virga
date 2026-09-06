@@ -336,26 +336,79 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
 /// What the forecast on screen is besides fresh, for the left of a pane's
 /// bottom border: read from disk, waiting to be replaced, or left in place
 /// by a refresh that failed. `None` for a live forecast with nothing
-/// pending, when that corner belongs to its usual sentence. The failure
-/// outranks the age, and takes the error colour: a forecast that could not
-/// be replaced is the one fact the user must not miss.
-pub(super) fn status_mark(app: &App, palette: Palette) -> Option<(String, Color)> {
-    let mut parts = Vec::new();
-    if let Some(as_of) = &app.shown.as_of {
-        parts.push(format!("as of {as_of}"));
-    }
-    let color = if app.shown.refresh_failed {
-        parts.push("refresh failed, r to retry".to_string());
-        palette.error
-    } else if app.is_refreshing() {
-        parts.push(format!("{} updating", spinner(app.tick)));
-        palette.muted
-    } else if parts.is_empty() {
-        return None;
-    } else {
-        palette.muted
+/// pending, when that corner belongs to its usual sentence.
+pub(super) struct StatusMark {
+    pub text: String,
+    pub color: Color,
+    /// No wording fit beside the right-hand title and the mark is a
+    /// failure, which outranks it: the caller shows this in that title's
+    /// place rather than not at all.
+    pub alone: bool,
+}
+
+/// Fitted, not fixed: the longest wording that sits beside `beside` within
+/// `width`'s title room is the one returned, and the optional parts give
+/// way before the fact itself — the age first, then the retry hint. A
+/// narrow terminal used to drop the whole mark instead, which showed a
+/// stale or unrefreshed forecast as a fresh one at exactly the sizes with
+/// the least room for doubt. A failure the corner still cannot hold comes
+/// back `alone`: it takes the error colour and outranks even the title on
+/// the right, because a forecast that could not be replaced is the one
+/// fact the user must not miss.
+pub(super) fn status_mark(
+    app: &App,
+    palette: Palette,
+    width: u16,
+    beside: &str,
+) -> Option<StatusMark> {
+    let aged = |text: String| match &app.shown.as_of {
+        Some(as_of) => format!("as of {as_of} · {text}"),
+        None => text,
     };
-    Some((parts.join(" · "), color))
+    let (candidates, color, must_show) = if app.shown.refresh_failed {
+        let retry = "refresh failed, r to retry".to_string();
+        (
+            vec![
+                aged(retry.clone()),
+                retry,
+                "refresh failed".to_string(),
+                "failed".to_string(),
+            ],
+            palette.error,
+            true,
+        )
+    } else if app.is_refreshing() {
+        let updating = format!("{} updating", spinner(app.tick));
+        (vec![aged(updating.clone()), updating], palette.muted, false)
+    } else if let Some(as_of) = &app.shown.as_of {
+        (vec![format!("as of {as_of}")], palette.muted, false)
+    } else {
+        return None;
+    };
+
+    let room = title_room(width);
+    let len = |text: &str| text.chars().count();
+    if let Some(text) = candidates
+        .iter()
+        .find(|text| len(text) + TITLE_GUTTER + len(beside) <= room)
+    {
+        return Some(StatusMark {
+            text: text.clone(),
+            color,
+            alone: false,
+        });
+    }
+    if !must_show {
+        return None;
+    }
+    let shortest = candidates.into_iter().next_back()?;
+    Some(StatusMark {
+        // Only reachable below the minimum size, where the size warning has
+        // replaced most of the interface; a clipped mark still beats none.
+        text: truncate(&shortest, room),
+        color,
+        alone: true,
+    })
 }
 
 fn spinner(tick: usize) -> &'static str {
@@ -1010,11 +1063,68 @@ mod tests {
     /// At the floor there is no room for the mark beside the day, and the
     /// day is what keeps its place, as the comparison already yields to it.
     #[test]
-    fn the_mark_yields_to_the_day_at_the_minimum_width() {
+    fn the_mark_degrades_but_never_vanishes_at_the_minimum_width() {
         let app = cached(Screen::Weather);
         let text = symbols(&drawn(&app, probe(), MIN_WIDTH, 20), MIN_WIDTH, 20).join("\n");
         assert!(text.contains("Today"), "{text}");
         assert!(text.contains("feels like"), "{text}");
+        assert!(
+            text.contains("updating"),
+            "the floor hid that a fetch is out: {text}"
+        );
+    }
+
+    /// The failure has to survive narrowing too — the sizes with the least
+    /// room are exactly the ones with the least room for doubt about what
+    /// is on screen. The wording gives way, the fact does not.
+    #[test]
+    fn a_failed_cached_refresh_stays_marked_at_narrow_widths() {
+        // 24 rows, not 20: below 36x21 the hourly screen is its size
+        // warning, and a screen with no weather on it has nothing to mark.
+        for (screen, width, height) in [
+            (Screen::Weather, MIN_WIDTH, 20),
+            (Screen::Weather, 50, 20),
+            (Screen::Hourly, 50, 24),
+        ] {
+            let mut app = cached(screen);
+            let request = app.startup_request();
+            let crate::events::Request::Fetch { id, .. } = request else {
+                panic!("not a fetch")
+            };
+            let _ = app.on_message(crate::events::Message::LoadFailed {
+                id,
+                error: "no route to host".to_string(),
+            });
+
+            let text = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert!(
+                text.contains("failed"),
+                "{screen:?} at {width} hid the failure: {text}"
+            );
+        }
+    }
+
+    /// The classic hourly view is the same forecast, so it carries the same
+    /// marks — it had none at all when the mark lived only on the
+    /// weathergram's inspector.
+    #[test]
+    fn the_classic_hourly_view_carries_the_mark_too() {
+        let mut app = cached(Screen::Hourly);
+        app.hourly_view = HourlyView::Classic;
+        let text = symbols(&drawn(&app, probe(), 100, 30), 100, 30).join("\n");
+        assert!(text.contains("as of 17:52"), "{text}");
+        assert!(text.contains("updating"), "{text}");
+
+        let request = app.startup_request();
+        let crate::events::Request::Fetch { id, .. } = request else {
+            panic!("not a fetch")
+        };
+        let _ = app.on_message(crate::events::Message::LoadFailed {
+            id,
+            error: "no route to host".to_string(),
+        });
+        let text = symbols(&drawn(&app, probe(), 100, 30), 100, 30).join("\n");
+        assert!(text.contains("refresh failed"), "{text}");
     }
 
     #[test]

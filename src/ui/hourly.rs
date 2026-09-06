@@ -182,12 +182,14 @@ fn inspector_render(
     let (city, condition) = top_titles(&app.location.label, &condition, area.width);
     // As on the daily pane, the mark takes the left corner while there is
     // one: a cached or unrefreshed forecast is never shown unlabelled here
-    // either.
-    let mark = status_mark(app, palette);
-    let left = mark
-        .as_ref()
-        .map_or(upcoming.as_str(), |(text, _)| text.as_str());
-    let (upcoming, when) = bottom_titles(left, &when, area.width);
+    // either, and a failure that fits nowhere else takes the hour's corner
+    // too.
+    let mark = status_mark(app, palette, area.width, &when);
+    let (upcoming, when) = match &mark {
+        Some(mark) if mark.alone => (Some(mark.text.clone()), String::new()),
+        Some(mark) => bottom_titles(&mark.text, &when, area.width),
+        None => bottom_titles(&upcoming, &when, area.width),
+    };
 
     let mut block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
@@ -216,7 +218,7 @@ fn inspector_render(
         // to begin with and read as chrome — the eye went straight past the one
         // line on the screen that answers "do I need a coat".
         let line = match mark {
-            Some((_, color)) => Line::from(format!(" {upcoming}")).fg(color),
+            Some(mark) => Line::from(format!(" {upcoming}")).fg(mark.color),
             None => Line::from(format!(" {upcoming}"))
                 .bold()
                 .fg(palette.selection),

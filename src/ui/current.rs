@@ -65,12 +65,14 @@ pub(super) fn current_area_render(
 
     let (city, condition, aqi) = top_titles(name, condition, aqi.as_deref(), area.width);
     // The mark takes the comparison's corner while there is one: what the
-    // forecast is outranks how it compares.
-    let mark = status_mark(app, palette);
-    let left = mark
-        .as_ref()
-        .map_or(summary.as_str(), |(text, _)| text.as_str());
-    let (summary, when) = bottom_titles(left, &when, area.width);
+    // forecast is outranks how it compares. A failure that fits nowhere
+    // else takes the day's corner too.
+    let mark = status_mark(app, palette, area.width, &when);
+    let (summary, when) = match &mark {
+        Some(mark) if mark.alone => (Some(mark.text.clone()), String::new()),
+        Some(mark) => bottom_titles(&mark.text, &when, area.width),
+        None => bottom_titles(&summary, &when, area.width),
+    };
 
     let mut block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
@@ -91,7 +93,7 @@ pub(super) fn current_area_render(
         block = block.title_top(Line::from(right).right_aligned());
     }
     if let Some(summary) = summary {
-        let color = mark.map_or(palette.muted, |(_, color)| color);
+        let color = mark.map_or(palette.muted, |mark| mark.color);
         block = block.title_bottom(Line::from(summary).fg(color).left_aligned());
     }
     let inner = block.inner(area);
