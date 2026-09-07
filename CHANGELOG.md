@@ -25,6 +25,12 @@ refuse to publish a version this file does not describe.
   round trip that ended in "no city matched", which answered nothing the
   user asked. Any other option after those commands is a usage error, as
   it already was after `update` (#82).
+- A temperature just below zero no longer prints as `-0°`. Rounding a
+  reading in [-0.5, 0] gives negative zero, which Rust prints with its
+  sign, so -0.3 °C read `-0°C` and -18 °C read `-0°F`. In the app it was
+  an oddity; in `virga now`, whose output scripts parse, it was a string no
+  thermometer produces. Every temperature the app prints now rounds through
+  one helper that drops the sign (#81).
 
 ## [0.6.0] - 2026-09-07
 
