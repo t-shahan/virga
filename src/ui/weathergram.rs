@@ -397,7 +397,15 @@ fn full_tracks_render(
                 && let Some(speed) = hour.wind_kph
             {
                 let text = format!("{:.0}", unit.speed(speed));
-                if centre + 1 + text.chars().count() as u16 <= plot.plot_x + plot.plot_width {
+                let cells = text.chars().count() as u16;
+                // The next even hour's arrow sits two columns on, so the
+                // digits get the cells between: one per hour at the
+                // narrowest tier, which holds a single digit. A speed that
+                // does not fit is left off rather than clipped — `↑2↑` for
+                // 20 km/h told the reader the wind was 2.
+                let before_next_arrow = cells < 2 * window.cell_width;
+                let inside_plot = centre + 1 + cells <= plot.plot_x + plot.plot_width;
+                if before_next_arrow && inside_plot {
                     put_text(frame, centre + 1, wind_y, &text, palette.muted);
                 }
             }
@@ -694,6 +702,62 @@ mod tests {
                 "off-cadence hour at {x} should carry the rail"
             );
         }
+    }
+
+    /// The wind row at `x` across the plot's twelve one-cell columns, as
+    /// the narrow full layout draws it.
+    fn narrow_wind_row(wind_kph: f64) -> Vec<String> {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in weather.hourly.iter_mut() {
+            hour.wind_kph = Some(wind_kph);
+            hour.wind_dir_deg = Some(0.0);
+        }
+        let width = 40;
+        assert_eq!(window_for(width, 0, 192).cell_width, 1);
+        let buffer = rendered_buffer_in(
+            &weather,
+            width,
+            FULL_ROWS,
+            0,
+            Theme::default().palette(),
+            Unit::Metric,
+        );
+        (10..22)
+            .map(|x| buffer[(x, FULL_WIND_Y)].symbol().to_string())
+            .collect()
+    }
+
+    /// At one cell per hour the six-hour tick's speed starts beside its
+    /// arrow and the next even hour's arrow lands two cells on, so a
+    /// two-digit speed lost its second digit and the row read `↑2↑`: the
+    /// screen said the wind was 2. A speed that cannot fit before the next
+    /// arrow is left off; the inspector carries the exact figure.
+    #[test]
+    fn a_narrow_full_layout_never_draws_a_truncated_wind_speed() {
+        let row = narrow_wind_row(20.0);
+        let digits: Vec<&String> = row
+            .iter()
+            .filter(|cell| cell.chars().all(|c| c.is_ascii_digit()) && !cell.is_empty())
+            .collect();
+        assert!(
+            digits.is_empty(),
+            "a two-digit speed was drawn into one cell: {row:?}"
+        );
+        assert!(
+            row.iter().any(|cell| cell == "\u{2191}"),
+            "the arrows still draw: {row:?}"
+        );
+    }
+
+    /// The same layout still labels a speed that does fit, or the narrow
+    /// row would lose every figure rather than only the wide ones.
+    #[test]
+    fn a_narrow_full_layout_still_draws_a_one_digit_wind_speed() {
+        let row = narrow_wind_row(5.0);
+        assert!(
+            row.iter().any(|cell| cell == "5"),
+            "a one-digit speed fits beside its arrow: {row:?}"
+        );
     }
 
     /// Timestamps that will not parse cannot anchor the cadence to the

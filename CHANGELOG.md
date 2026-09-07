@@ -12,6 +12,16 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The weathergram no longer clips a wind speed against the next arrow. At
+  36 to 68 columns each hour is one cell wide, and a two-digit speed on a
+  six-hour tick ran into the arrow two cells on, so a steady 20 km/h read
+  `↑2↑` and the screen said the wind was 2. A speed that cannot fit before
+  the next arrow is now left off that row; the inspector still carries the
+  exact figure for the selected hour, and wider terminals are unchanged
+  (#76).
+
 ## [0.6.0] - 2026-09-07
 
 ### Added
