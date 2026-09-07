@@ -30,6 +30,25 @@ refuse to publish a version this file does not describe.
 - A fetch that fails while a forecast is showing leaves it up, marked
   `refresh failed, r to retry` in the error colour, and prints the reason
   after exit. The error popup remains for a launch with nothing to show.
+
+- The classic hourly view's inspector is the weathergram's inspector, drawn
+  with a different hero and different readings, rather than a copy of it.
+  Two things the copy did differently are gone with it: it kept the city
+  whole and dropped the condition when the border ran short, where the
+  weathergram clips the city and keeps the condition, and its "next rain"
+  line skipped over an hour the provider had not reported instead of
+  saying so. Its border titles also sit one cell in from the corner now,
+  as every other pane's do.
+### Fixed
+
+- The classic hourly view and the week strip no longer report a window the
+  provider did not fully answer as a dry one. The "24 h total" and "wet
+  hours" rows summed whatever hours had a reading and called the rest
+  dry, so a dropped precipitation series read as "none expected" and
+  "0 of 24"; the strip's daily totals did the same with a dash. All three
+  now say the total is unavailable, the way the weathergram's inspector
+  already did.
+
 - The Homebrew tap is now
   [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga), so
   the install command reads as the app's name twice rather than once each of
