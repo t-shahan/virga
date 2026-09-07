@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/t-shahan/virga"
 readme = "README.md"
 # An allow-list rather than an `exclude`, because an exclude list drifts: the
-# old one named `docs/superpowers/` and nothing else, so the crate shipped the
+# old one named a single docs directory and nothing else, so the crate shipped the
 # agent config, the workflows, the install script and the release scripts,
 # none of which build anything. A new top-level directory now stays out of
 # the tarball until someone says otherwise. `tests/` is here because the
