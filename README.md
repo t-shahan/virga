@@ -14,7 +14,7 @@ It is powered by Open-Meteo and requires no account or API key.
 *Virga* is precipitation that evaporates before it reaches the ground. It is
 also, most weeks, what the weathergram charts.
 
-<img width="2000" height="1275" alt="CleanShot2026-08-12at19 00 55-ezgif com-speed" src="https://github.com/user-attachments/assets/0a773e11-df73-4cc3-9a75-f3bad3cbc727" />
+https://github.com/user-attachments/assets/5044c045-0f86-448c-9000-19c9fe541134
 
 ## Contents
 
