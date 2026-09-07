@@ -14,6 +14,13 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- The weathergram no longer clips a wind speed against the next arrow.
+  Below 45 columns each hour is one cell wide, and a two-digit speed on a
+  six-hour tick ran into the arrow two cells on, so a steady 20 km/h read
+  `↑2↑` and the screen said the wind was 2. A speed that cannot fit before
+  the next arrow is now left off that row; the inspector still carries the
+  exact figure for the selected hour, and wider terminals are unchanged
+  (#76).
 - A save that cannot take its lock, the state file's or the forecast
   cache's, is refused rather than written anyway. Only a platform with no
   advisory locks at all may save unserialized; an I/O error or a kernel
