@@ -20,14 +20,22 @@ concurrency:
 
 jobs:
   claude-review:
-    # Branches in this repository only, for the reason claude.yml gives: a
-    # `pull_request` event from a fork runs without secrets, so the OAuth
-    # token would be empty and the job could only fail, leaving a red check
-    # on every external contribution that had nothing to do with the change.
-    # Skipping says so quietly. `pull_request_target` would carry the secret
-    # but also runs the workflow with write access against untrusted code,
-    # which is a larger surface than a repository this size needs.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Branches in this repository, opened by a person. A `pull_request` event
+    # from a fork runs without secrets, so the OAuth token would be empty and
+    # the job could only fail, leaving a red check on every external
+    # contribution that had nothing to do with the change. A bot's pull
+    # request fails for a different reason: the action refuses a non-human
+    # actor unless it is on an allow-list, and Dependabot's events see only
+    # Dependabot secrets besides. Every red run of this workflow so far was
+    # one of those, on the release-notes branch or a claude[bot] push.
+    # Skipping says so quietly.
+    #
+    # `pull_request_target` would carry the secret, but into a job that
+    # checks out the fork's head and lets the agent run its build scripts
+    # and tests, which puts the token in reach of the code under review.
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     permissions:
       contents: read
