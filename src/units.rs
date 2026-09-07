@@ -36,6 +36,17 @@ impl Unit {
             Unit::Imperial => c_to_f(celsius),
         }
     }
+
+    /// The temperature as the whole number every display prints it as.
+    ///
+    /// Not merely `temp(..).round()`: a reading in (-0.5, 0) rounds to
+    /// negative zero, and `{:.0}` prints that as `-0`. No thermometer says
+    /// `-0°`, and a script parsing `virga now` may treat it as a value
+    /// distinct from `0`. Adding `0.0` is the standard way to lose the sign,
+    /// since `-0.0 + 0.0` is `+0.0` under IEEE 754.
+    pub fn temp_rounded(self, celsius: f64) -> f64 {
+        self.temp(celsius).round() + 0.0
+    }
     pub fn temp_symbol(self) -> &'static str {
         match self {
             Unit::Metric => "°C",
@@ -180,6 +191,30 @@ mod tests {
             Unit::Imperial.snow(2.54) > Unit::Imperial.precip(2.54),
             "a centimetre is not a millimetre"
         );
+    }
+
+    /// The trap is the half-degree below zero: -0.3 °C is -0.3 °C, and
+    /// -17.6 °C is -0.32 °F, and both used to print as `-0`.
+    #[test]
+    fn a_temperature_just_below_zero_rounds_to_zero_not_negative_zero() {
+        for (unit, celsius) in [(Unit::Metric, -0.3), (Unit::Imperial, -17.6)] {
+            let rounded = unit.temp_rounded(celsius);
+            assert!(
+                !rounded.is_sign_negative(),
+                "{unit:?} {celsius} gave {rounded}"
+            );
+            assert_eq!(format!("{rounded:.0}"), "0", "{unit:?} {celsius}");
+        }
+    }
+
+    /// Rounding must not otherwise change the answer: a reading that is
+    /// genuinely below zero keeps its sign.
+    #[test]
+    fn rounding_keeps_a_real_negative_and_the_conversion() {
+        assert_eq!(Unit::Metric.temp_rounded(-0.5), -1.0);
+        assert_eq!(Unit::Metric.temp_rounded(-2.6), -3.0);
+        assert_eq!(Unit::Imperial.temp_rounded(-40.0), -40.0);
+        assert_eq!(Unit::Imperial.temp_rounded(21.5), 71.0);
     }
 
     #[test]

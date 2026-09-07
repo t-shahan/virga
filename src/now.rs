@@ -69,11 +69,13 @@ fn conditions(weather: &Weather, unit: Unit) -> Option<String> {
     match (current.temp_c, current.feels_like_c) {
         (Some(temp), Some(feels)) => parts.push(format!(
             "{:.0}{sym}, feels like {:.0}{sym}",
-            unit.temp(temp),
-            unit.temp(feels)
+            unit.temp_rounded(temp),
+            unit.temp_rounded(feels)
         )),
-        (Some(temp), None) => parts.push(format!("{:.0}{sym}", unit.temp(temp))),
-        (None, Some(feels)) => parts.push(format!("feels like {:.0}{sym}", unit.temp(feels))),
+        (Some(temp), None) => parts.push(format!("{:.0}{sym}", unit.temp_rounded(temp))),
+        (None, Some(feels)) => {
+            parts.push(format!("feels like {:.0}{sym}", unit.temp_rounded(feels)))
+        }
         (None, None) => {}
     }
     if let Some(wind) = current.wind_kph {
@@ -99,8 +101,8 @@ fn outlook(weather: &Weather, unit: Unit) -> Option<String> {
     let sym = unit.temp_symbol();
     let mut parts = vec![format!(
         "{:.0}{sym} / {:.0}{sym}",
-        unit.temp(day.high_c),
-        unit.temp(day.low_c)
+        unit.temp_rounded(day.high_c),
+        unit.temp_rounded(day.low_c)
     )];
     // The chance is the number people plan around; the amount steps in only
     // when the chance is missing and something is actually forecast to fall.
@@ -213,6 +215,24 @@ mod tests {
              77°F, feels like 79°F · wind 6 mph\n\
              Today: 72°F / 54°F · rain 10% · UV 6 · sun 06:00–20:00"
         );
+    }
+
+    /// A reading in (-0.5, 0) used to print as `-0°`, which no thermometer
+    /// says and which a script parsing the line may treat as a value distinct
+    /// from `0`. Imperial has the same trap one conversion away: -17.6 °C is
+    /// -0.32 °F.
+    #[test]
+    fn a_reading_just_below_zero_prints_as_zero_not_negative_zero() {
+        let mut weather = Weather::fixture(5, 2);
+        weather.current.temp_c = Some(-0.3);
+        weather.current.feels_like_c = Some(-17.6);
+
+        let metric = report("Berlin, Germany", &weather, Unit::Metric);
+        assert!(metric.contains("\n0°C, feels like -18°C"), "{metric}");
+
+        let imperial = report("Berlin, Germany", &weather, Unit::Imperial);
+        assert!(imperial.contains("\n31°F, feels like 0°F"), "{imperial}");
+        assert!(!imperial.contains("-0"), "{imperial}");
     }
 
     /// The live reading rides the conditions line: "now" is the question, so

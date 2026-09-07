@@ -134,14 +134,14 @@ pub(super) fn current_area_render(
     // The block font already has a '-' glyph, so a missing reading renders as
     // "--" at the same scale rather than collapsing the layout.
     let temp = if showing_today {
-        weather
-            .current
-            .temp_c
-            .map_or_else(|| "--".to_string(), |c| format!("{:.0}", unit.temp(c)))
+        weather.current.temp_c.map_or_else(
+            || "--".to_string(),
+            |c| format!("{:.0}", unit.temp_rounded(c)),
+        )
     } else {
         day.map_or_else(
             || "--".to_string(),
-            |d| format!("{:.0}", unit.temp(d.high_c)),
+            |d| format!("{:.0}", unit.temp_rounded(d.high_c)),
         )
     };
 
@@ -208,12 +208,16 @@ fn detail_lines(
     let feels = if showing_today {
         weather.current.feels_like_c.map_or_else(
             || UNKNOWN.to_string(),
-            |c| format!("{:.0}{sym}", unit.temp(c)),
+            |c| format!("{:.0}{sym}", unit.temp_rounded(c)),
         )
     } else {
         match (day.feels_max_c, day.feels_min_c) {
             (Some(hi), Some(lo)) => {
-                format!("{:.0}{sym} / {:.0}{sym}", unit.temp(hi), unit.temp(lo))
+                format!(
+                    "{:.0}{sym} / {:.0}{sym}",
+                    unit.temp_rounded(hi),
+                    unit.temp_rounded(lo)
+                )
             }
             _ => UNKNOWN.to_string(),
         }
@@ -243,8 +247,8 @@ fn high_low(day: &DailyForecast, unit: Unit) -> String {
     let sym = unit.temp_symbol();
     format!(
         "{:.0}{sym} / {:.0}{sym}",
-        unit.temp(day.high_c),
-        unit.temp(day.low_c)
+        unit.temp_rounded(day.high_c),
+        unit.temp_rounded(day.low_c)
     )
 }
 

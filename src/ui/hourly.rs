@@ -108,7 +108,7 @@ pub(super) fn hourly_render(frame: &mut Frame, app: &App, palette: Palette, area
 fn hero_temperature(hour: Option<&HourlyForecast>, unit: Unit) -> Hero<'static> {
     let value = hour.and_then(|h| h.temp_c).map_or_else(
         || "--".to_string(),
-        |temp| format!("{:.0}", unit.temp(temp)),
+        |temp| format!("{:.0}", unit.temp_rounded(temp)),
     );
     Hero {
         value,
@@ -137,7 +137,7 @@ fn detail_lines(
 fn feels_line(hour: Option<&HourlyForecast>, unit: Unit) -> String {
     hour.and_then(|h| h.feels_like_c).map_or_else(
         || UNKNOWN.to_string(),
-        |c| format!("{:.0}{}", unit.temp(c), unit.temp_symbol()),
+        |c| format!("{:.0}{}", unit.temp_rounded(c), unit.temp_symbol()),
     )
 }
 
