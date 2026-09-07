@@ -220,7 +220,17 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     ));
     let file =
         std::fs::File::create(&lock).with_context(|| format!("create {}", lock.display()))?;
-    tolerate_unsupported(file.lock()).with_context(|| format!("lock {}", lock.display()))?;
+    // std wraps `flock` in a plain `cvt`, not the retrying `cvt_r`, so a
+    // signal landing while the call blocks comes back as `Interrupted`
+    // rather than being retried the way `read_exact` would. Interrupted
+    // means "ask again", not "refused".
+    let locked = loop {
+        match file.lock() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            outcome => break outcome,
+        }
+    };
+    tolerate_unsupported(locked).with_context(|| format!("lock {}", lock.display()))?;
     Ok(file)
 }
 
@@ -230,8 +240,9 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
 /// never save at all, and an unserialized save beats none. Every other
 /// failure — an I/O error, no locks left in the kernel table, a permission
 /// refused — leaves the lock unheld while the save goes ahead, and two
-/// writers racing silently is exactly what the lock exists to prevent. This
-/// used to be `let _ = file.lock()`, which tolerated all of them alike.
+/// writers racing silently is exactly what the lock exists to prevent.
+/// This guards the forecast cache as well as the state file, since both
+/// take their lock here.
 fn tolerate_unsupported(locked: std::io::Result<()>) -> std::io::Result<()> {
     match locked {
         Err(error) if error.kind() == std::io::ErrorKind::Unsupported => Ok(()),
@@ -865,9 +876,9 @@ mod tests {
         );
     }
 
-    /// Only a platform that cannot lock at all may save unserialized. Any
-    /// other refusal — the kernel out of locks, an I/O error, a permission
-    /// denied — is the race the lock exists for, and must stop the save.
+    /// The tolerated and refused kinds, see `tolerate_unsupported`. A real
+    /// lock failure cannot be induced portably, so the rule is tested on
+    /// its own.
     #[test]
     fn only_an_unsupported_lock_is_tolerated() {
         use std::io::{Error, ErrorKind};
@@ -879,7 +890,6 @@ mod tests {
             ErrorKind::PermissionDenied,
             ErrorKind::Other,
             ErrorKind::WouldBlock,
-            ErrorKind::Interrupted,
         ] {
             let refused = tolerate_unsupported(Err(Error::from(kind)));
             assert_eq!(
@@ -888,6 +898,25 @@ mod tests {
                 "{kind:?} was tolerated"
             );
         }
+    }
+
+    /// Nothing pinned that a refusal inside `exclusive` reaches the caller
+    /// at all. A directory where the lock file should be is the one failure
+    /// every platform can stage.
+    #[test]
+    fn a_lock_file_that_cannot_be_created_refuses_the_save() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        std::fs::create_dir(test.path().join("state.json.lock")).unwrap();
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        let error = save_location(&path, &berlin).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("state.json.lock"),
+            "{error:#}"
+        );
+        assert!(!path.exists(), "the save went ahead without the lock");
     }
 
     /// Both halves survive a stampede: every save reads under the same

@@ -14,11 +14,12 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
-- A save that cannot take the state file's lock is refused rather than
-  written anyway. Only a platform with no advisory locks at all may save
-  unserialized; an I/O error, a kernel out of locks, or a permission
-  refused used to be waved through the same way, and two writers could
-  then race silently, which is the one thing the lock is for (#83).
+- A save that cannot take its lock, the state file's or the forecast
+  cache's, is refused rather than written anyway. Only a platform with no
+  advisory locks at all may save unserialized; an I/O error, a kernel out
+  of locks, or a permission refused used to be waved through the same
+  way, and two writers could then race silently, which is the one thing
+  the lock is for (#83).
 
 ## [0.6.0] - 2026-09-07
 
