@@ -220,18 +220,25 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     ));
     let file =
         std::fs::File::create(&lock).with_context(|| format!("create {}", lock.display()))?;
-    // std wraps `flock` in a plain `cvt`, not the retrying `cvt_r`, so a
-    // signal landing while the call blocks comes back as `Interrupted`
-    // rather than being retried the way `read_exact` would. Interrupted
-    // means "ask again", not "refused".
-    let locked = loop {
-        match file.lock() {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            outcome => break outcome,
-        }
-    };
-    tolerate_unsupported(locked).with_context(|| format!("lock {}", lock.display()))?;
+    tolerate_unsupported(retry_interrupted(|| file.lock()))
+        .with_context(|| format!("lock {}", lock.display()))?;
     Ok(file)
+}
+
+/// `attempt`, again until it says something other than `Interrupted`.
+///
+/// std wraps `flock` in a plain `cvt`, not the retrying `cvt_r`, so a
+/// signal landing while the call blocks comes back as `Interrupted` rather
+/// than being retried the way `read_exact` would. Interrupted means "ask
+/// again", not "refused". Unbounded like `cvt_r`: every retry blocks again,
+/// so spinning would take a signal on every single wait.
+fn retry_interrupted(mut attempt: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            outcome => return outcome,
+        }
+    }
 }
 
 /// Which lock failures a save may proceed past.
@@ -898,6 +905,35 @@ mod tests {
                 "{kind:?} was tolerated"
             );
         }
+    }
+
+    /// A signal during the blocking lock is "ask again", and only that:
+    /// the retry stops at the first other answer, refusal or success.
+    #[test]
+    fn an_interrupted_lock_is_asked_again_and_any_other_answer_stands() {
+        use std::io::{Error, ErrorKind};
+
+        let mut answers = vec![
+            Ok(()),
+            Err(Error::from(ErrorKind::Interrupted)),
+            Err(Error::from(ErrorKind::Interrupted)),
+        ];
+        let mut asked = 0;
+        let outcome = retry_interrupted(|| {
+            asked += 1;
+            answers.pop().expect("asked past the scripted answers")
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(asked, 3, "two interruptions, then the lock");
+
+        let mut answers = vec![Ok(()), Err(Error::from(ErrorKind::Other))];
+        let mut asked = 0;
+        let outcome = retry_interrupted(|| {
+            asked += 1;
+            answers.pop().expect("asked past the scripted answers")
+        });
+        assert_eq!(outcome.map_err(|error| error.kind()), Err(ErrorKind::Other));
+        assert_eq!(asked, 1, "a refusal is not asked again");
     }
 
     /// Nothing pinned that a refusal inside `exclusive` reaches the caller
