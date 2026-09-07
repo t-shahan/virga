@@ -207,7 +207,8 @@ fn surviving_document(path: &Path) -> Result<Option<StateDocument>> {
 /// protocol, because it cannot go stale: the OS releases it when the
 /// holding process exits, however it exits, and here when the returned
 /// handle drops. A platform that cannot lock (std returns unsupported on
-/// some) gets the unserialized behavior rather than losing saves entirely.
+/// some) gets the unserialized behavior rather than losing saves entirely;
+/// any other failure refuses the save, see `tolerate_unsupported`.
 pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     let parent = path.parent().context("state path has no parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -219,8 +220,23 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     ));
     let file =
         std::fs::File::create(&lock).with_context(|| format!("create {}", lock.display()))?;
-    let _ = file.lock();
+    tolerate_unsupported(file.lock()).with_context(|| format!("lock {}", lock.display()))?;
     Ok(file)
+}
+
+/// Which lock failures a save may proceed past.
+///
+/// Only `Unsupported`: a platform without advisory locks would otherwise
+/// never save at all, and an unserialized save beats none. Every other
+/// failure — an I/O error, no locks left in the kernel table, a permission
+/// refused — leaves the lock unheld while the save goes ahead, and two
+/// writers racing silently is exactly what the lock exists to prevent. This
+/// used to be `let _ = file.lock()`, which tolerated all of them alike.
+fn tolerate_unsupported(locked: std::io::Result<()>) -> std::io::Result<()> {
+    match locked {
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => Ok(()),
+        other => other,
+    }
 }
 
 pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> {
@@ -847,6 +863,31 @@ mod tests {
             body.as_bytes(),
             "the newer document was modified"
         );
+    }
+
+    /// Only a platform that cannot lock at all may save unserialized. Any
+    /// other refusal — the kernel out of locks, an I/O error, a permission
+    /// denied — is the race the lock exists for, and must stop the save.
+    #[test]
+    fn only_an_unsupported_lock_is_tolerated() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(tolerate_unsupported(Ok(())).is_ok());
+        assert!(tolerate_unsupported(Err(Error::from(ErrorKind::Unsupported))).is_ok());
+
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+            ErrorKind::WouldBlock,
+            ErrorKind::Interrupted,
+        ] {
+            let refused = tolerate_unsupported(Err(Error::from(kind)));
+            assert_eq!(
+                refused.map_err(|error| error.kind()),
+                Err(kind),
+                "{kind:?} was tolerated"
+            );
+        }
     }
 
     /// Both halves survive a stampede: every save reads under the same
