@@ -12,7 +12,7 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.6.0]
+## [0.6.0] - 2026-09-07
 
 ### Added
 
