@@ -219,13 +219,13 @@ mod tests {
 
     /// A reading in (-0.5, 0) used to print as `-0°`, which no thermometer
     /// says and which a script parsing the line may treat as a value distinct
-    /// from `0`. Imperial has the same trap one conversion away: -17.6 °C is
-    /// -0.32 °F.
+    /// from `0`. Imperial has the same trap one conversion away: -18 °C is
+    /// -0.4 °F.
     #[test]
     fn a_reading_just_below_zero_prints_as_zero_not_negative_zero() {
         let mut weather = Weather::fixture(5, 2);
         weather.current.temp_c = Some(-0.3);
-        weather.current.feels_like_c = Some(-17.6);
+        weather.current.feels_like_c = Some(-18.0);
 
         let metric = report("Berlin, Germany", &weather, Unit::Metric);
         assert!(metric.contains("\n0°C, feels like -18°C"), "{metric}");

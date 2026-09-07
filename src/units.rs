@@ -39,13 +39,17 @@ impl Unit {
 
     /// The temperature as the whole number every display prints it as.
     ///
-    /// Not merely `temp(..).round()`: a reading in (-0.5, 0) rounds to
+    /// Not merely `temp(..)` under `{:.0}`: a reading in (-0.5, 0] rounds to
     /// negative zero, and `{:.0}` prints that as `-0`. No thermometer says
     /// `-0°`, and a script parsing `virga now` may treat it as a value
     /// distinct from `0`. Adding `0.0` is the standard way to lose the sign,
     /// since `-0.0 + 0.0` is `+0.0` under IEEE 754.
+    ///
+    /// Ties round to even, not away from zero, because that is what `{:.0}`
+    /// has always done here and Open-Meteo reports tenths: `f64::round`
+    /// would have moved every `.5` reading a degree from where 0.6.0 put it.
     pub fn temp_rounded(self, celsius: f64) -> f64 {
-        self.temp(celsius).round() + 0.0
+        self.temp(celsius).round_ties_even() + 0.0
     }
     pub fn temp_symbol(self) -> &'static str {
         match self {
@@ -193,11 +197,18 @@ mod tests {
         );
     }
 
-    /// The trap is the half-degree below zero: -0.3 °C is -0.3 °C, and
-    /// -17.6 °C is -0.32 °F, and both used to print as `-0`.
+    /// The trap is the half-degree below zero in whichever scale is shown:
+    /// -0.3 °C in metric, and -18 °C in imperial, which is -0.4 °F. Both
+    /// used to print as `-0`. A negative-zero reading itself, which JSON can
+    /// carry, is the same trap without the rounding.
     #[test]
     fn a_temperature_just_below_zero_rounds_to_zero_not_negative_zero() {
-        for (unit, celsius) in [(Unit::Metric, -0.3), (Unit::Imperial, -17.6)] {
+        for (unit, celsius) in [
+            (Unit::Metric, -0.3),
+            (Unit::Metric, -0.5),
+            (Unit::Metric, -0.0),
+            (Unit::Imperial, -18.0),
+        ] {
             let rounded = unit.temp_rounded(celsius);
             assert!(
                 !rounded.is_sign_negative(),
@@ -207,14 +218,21 @@ mod tests {
         }
     }
 
-    /// Rounding must not otherwise change the answer: a reading that is
-    /// genuinely below zero keeps its sign.
+    /// Only the sign of zero changes. A reading genuinely below zero keeps
+    /// its sign, the conversion still applies, and a tie still rounds to
+    /// even the way `{:.0}` always has, so 22.5 stays `22` rather than
+    /// moving to `23` when the helper took over.
     #[test]
-    fn rounding_keeps_a_real_negative_and_the_conversion() {
-        assert_eq!(Unit::Metric.temp_rounded(-0.5), -1.0);
+    fn rounding_keeps_a_real_negative_the_conversion_and_the_tie_rule() {
+        assert_eq!(Unit::Metric.temp_rounded(-0.6), -1.0);
         assert_eq!(Unit::Metric.temp_rounded(-2.6), -3.0);
         assert_eq!(Unit::Imperial.temp_rounded(-40.0), -40.0);
         assert_eq!(Unit::Imperial.temp_rounded(21.5), 71.0);
+        for (value, printed) in [(22.5, "22"), (23.5, "24"), (2.5, "2"), (-2.5, "-2")] {
+            let rounded = Unit::Metric.temp_rounded(value);
+            assert_eq!(format!("{rounded:.0}"), printed, "{value}");
+            assert_eq!(format!("{value:.0}"), printed, "the rule `{{:.0}}` uses");
+        }
     }
 
     #[test]
