@@ -217,7 +217,7 @@ mod tests {
         );
     }
 
-    /// A reading in (-0.5, 0) used to print as `-0°`, which no thermometer
+    /// A reading in [-0.5, 0] used to print as `-0°`, which no thermometer
     /// says and which a script parsing the line may treat as a value distinct
     /// from `0`. Imperial has the same trap one conversion away: -18 °C is
     /// -0.4 °F.

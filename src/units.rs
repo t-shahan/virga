@@ -39,7 +39,7 @@ impl Unit {
 
     /// The temperature as the whole number every display prints it as.
     ///
-    /// Not merely `temp(..)` under `{:.0}`: a reading in (-0.5, 0] rounds to
+    /// Not merely `temp(..)` under `{:.0}`: a reading in [-0.5, 0] rounds to
     /// negative zero, and `{:.0}` prints that as `-0`. No thermometer says
     /// `-0°`, and a script parsing `virga now` may treat it as a value
     /// distinct from `0`. Adding `0.0` is the standard way to lose the sign,
