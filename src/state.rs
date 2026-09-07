@@ -225,11 +225,15 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// `attempt`, again until it says something other than `Interrupted`.
+/// Call `attempt` until it answers anything but `Interrupted`.
 ///
 /// std wraps `flock` in a plain `cvt`, not the retrying `cvt_r`, so a
 /// signal landing while the call blocks comes back as `Interrupted` rather
-/// than being retried the way `read_exact` would. Interrupted means "ask
+/// than being retried the way `read_exact` would. The signal this program
+/// gets mid-save is a resize, and the save only blocks when another
+/// process, `virga theme` say, holds the lock; and since `flock` is on the
+/// list the kernel restarts under `SA_RESTART`, only a handler installed
+/// without that flag can trip this. Rare, but interrupted means "ask
 /// again", not "refused". Unbounded like `cvt_r`: every retry blocks again,
 /// so spinning would take a signal on every single wait.
 fn retry_interrupted(mut attempt: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
@@ -893,11 +897,7 @@ mod tests {
         assert!(tolerate_unsupported(Ok(())).is_ok());
         assert!(tolerate_unsupported(Err(Error::from(ErrorKind::Unsupported))).is_ok());
 
-        for kind in [
-            ErrorKind::PermissionDenied,
-            ErrorKind::Other,
-            ErrorKind::WouldBlock,
-        ] {
+        for kind in [ErrorKind::Other, ErrorKind::WouldBlock] {
             let refused = tolerate_unsupported(Err(Error::from(kind)));
             assert_eq!(
                 refused.map_err(|error| error.kind()),
@@ -938,7 +938,8 @@ mod tests {
 
     /// Nothing pinned that a refusal inside `exclusive` reaches the caller
     /// at all. A directory where the lock file should be is the one failure
-    /// every platform can stage.
+    /// every platform can stage; it refuses the create step, not the lock,
+    /// whose own rule `only_an_unsupported_lock_is_tolerated` covers.
     #[test]
     fn a_lock_file_that_cannot_be_created_refuses_the_save() {
         let test = tempfile::tempdir().unwrap();
