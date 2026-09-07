@@ -3,12 +3,6 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 # A push supersedes the review of the head it replaced: two reviews of one
 # pull request racing each other comment on a diff one of them no longer
@@ -20,14 +14,15 @@ concurrency:
 
 jobs:
   claude-review:
-    # Branches in this repository, opened by a person. A `pull_request` event
+    # Branches in this repository, pushed by a person. A `pull_request` event
     # from a fork runs without secrets, so the OAuth token would be empty and
     # the job could only fail, leaving a red check on every external
-    # contribution that had nothing to do with the change. A bot's pull
-    # request fails for a different reason: the action refuses a non-human
-    # actor unless it is on an allow-list, and Dependabot's events see only
-    # Dependabot secrets besides. Every red run of this workflow so far was
-    # one of those, on the release-notes branch or a claude[bot] push.
+    # contribution that had nothing to do with the change. A push by a bot
+    # fails for a different reason: the action refuses a non-human actor
+    # unless it is on an allow-list, and Dependabot's events see only
+    # Dependabot secrets besides. It is the actor the action checks, so it
+    # is the event's sender that is tested here, not who opened the pull
+    # request: a bot pushing to a person's branch is refused the same way.
     # Skipping says so quietly.
     #
     # `pull_request_target` would carry the secret, but into a job that
@@ -35,7 +30,7 @@ jobs:
     # and tests, which puts the token in reach of the code under review.
     if: |
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.type != 'Bot'
+      github.event.sender.type != 'Bot'
     runs-on: ubuntu-latest
     permissions:
       contents: read

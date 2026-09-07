@@ -4,11 +4,11 @@
 
 ## Review focus
 
-<!-- Claude reviews a pull request opened by a person from a branch in this
-     repository on its own, against the requirements in CLAUDE.md: security,
-     panics and error handling, readability, test coverage, cross-platform
-     input. You do not have to ask for that. From a fork the check is skipped
-     and the review happens when a maintainer looks.
+<!-- Claude reviews, unprompted, a pull request a person pushes from a
+     branch in this repository, against the requirements in CLAUDE.md:
+     security, panics and error handling, readability, test coverage,
+     cross-platform input. You do not have to ask for that. From a fork the
+     check is skipped and the review happens when a maintainer looks.
 
      What it cannot reconstruct from the diff is where the risk actually sits.
      Say that here.

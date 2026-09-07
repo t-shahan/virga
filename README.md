@@ -450,9 +450,10 @@ and say where the review should look hardest, because that is the part a
 reviewer cannot reconstruct from the diff. Either way, Claude reviews a pull
 request that a person opens from a branch in this repository against the
 requirements in [`CLAUDE.md`](CLAUDE.md), so the section directs the review
-rather than triggering it. A pull request from a fork, or one a bot opens,
-runs without what the review needs, so the check is skipped there rather
-than failed; the review happens when a maintainer looks.
+rather than triggering it. A pull request from a fork runs without the
+secret the review needs, and a push by a bot is one the review declines to
+act on, so the check is skipped in both cases rather than failed; the review
+happens when a maintainer looks.
 
 Mentioning `@claude` is a separate thing and always optional. It hands the
 work to the interactive agent, which answers questions and can run the cargo
