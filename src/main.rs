@@ -676,6 +676,7 @@ fn run(
         });
     }
     events::spawn_worker(request_rx, message_tx, cache_path);
+    let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
@@ -776,6 +777,7 @@ fn run(
                 Event::Key(key) => {
                     // Keys that mean nothing on this screen — and every key
                     // release — leave no mark, so they do not even cost a redraw.
+                    let key = held_keys.observe(key);
                     if let Some(action) = input::action_for(key, app.screen) {
                         dirty = true;
 

@@ -41,6 +41,12 @@ refuse to publish a version this file does not describe.
   as every other pane's do.
 ### Fixed
 
+- Holding a key on Windows no longer fires it over and over. The Windows
+  console reports a held key as a stream of presses rather than as
+  repeats, so the filter that stops a held `t` from cycling through every
+  theme, or a held `p` from flapping the hourly screen, never saw them.
+  A second press with no release in between now counts as the repeat it
+  is. Arrows and typing still repeat, as they should.
 - The classic hourly view and the week strip no longer report a window the
   provider did not fully answer as a dry one. The "24 h total" and "wet
   hours" rows summed whatever hours had a reading and called the rest
