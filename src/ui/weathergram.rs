@@ -727,29 +727,33 @@ mod tests {
             .collect()
     }
 
-    /// At one cell per hour the six-hour tick's speed starts beside its
-    /// arrow and the next even hour's arrow lands two cells on, so a
-    /// two-digit speed lost its second digit and the row read `↑2↑`: the
-    /// screen said the wind was 2. A speed that cannot fit before the next
-    /// arrow is left off; the inspector carries the exact figure.
-    #[test]
-    fn a_narrow_full_layout_never_draws_a_truncated_wind_speed() {
-        let row = narrow_wind_row(20.0);
-        let expected: Vec<String> = (0..12)
+    /// The narrow wind row with `speed` in the cell after the six-hour
+    /// tick and nothing else but the even-hour arrows.
+    fn arrows_with_tick_speed(speed: &str) -> Vec<String> {
+        let mut row: Vec<String> = (0..12)
             .map(|x| if x % 2 == 0 { "\u{2191}" } else { " " }.to_string())
             .collect();
-        assert_eq!(row, expected, "a two-digit speed was drawn into one cell");
+        row[7] = speed.to_string();
+        row
     }
 
-    /// The same layout still labels a speed that does fit, or the narrow
-    /// row would lose every figure rather than only the wide ones.
+    /// At one cell per hour a speed fits only when it is one digit, see the
+    /// fit rule in `full_tracks_render`; a wider one is left off whole.
+    #[test]
+    fn a_narrow_full_layout_never_draws_a_truncated_wind_speed() {
+        assert_eq!(
+            narrow_wind_row(20.0),
+            arrows_with_tick_speed(" "),
+            "a two-digit speed was drawn into one cell"
+        );
+    }
+
+    /// The same layout still labels a speed that does fit, at its own tick
+    /// and nowhere else, or the narrow row would lose every figure rather
+    /// than only the wide ones.
     #[test]
     fn a_narrow_full_layout_still_draws_a_one_digit_wind_speed() {
-        let row = narrow_wind_row(5.0);
-        assert!(
-            row.iter().any(|cell| cell == "5"),
-            "a one-digit speed fits beside its arrow: {row:?}"
-        );
+        assert_eq!(narrow_wind_row(5.0), arrows_with_tick_speed("5"));
     }
 
     /// Timestamps that will not parse cannot anchor the cadence to the
