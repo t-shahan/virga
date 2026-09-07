@@ -14,6 +14,14 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **A key reference behind `?`.** Pressing `?` on either weather screen
+  opens a card listing every binding for that screen; the next key closes
+  it — including `q` and Esc, which close it without also quitting.
+- **`,` switches the key bar between hinting and naming everything.** The
+  short hint plus `?` card is the default; `,` swaps it for the
+  always-visible list of every binding the bar carried before, with no
+  card behind `?` in that style since there is nothing left for it to
+  hold. The choice is persisted the same way a startup theme is.
 - **The app opens on the last forecast.** With a remembered city, the first
   frame is the forecast from the previous launch, read from a `forecast.json`
   beside `state.json`, with `as of 17:52 · updating` on the border until the
@@ -24,6 +32,12 @@ refuse to publish a version this file does not describe.
 
 ### Changed
 
+- The key bar at the bottom of the screen is now a short hint — quit, back
+  where there is one, and `?` for everything else — so it never wraps onto
+  a second row at the widths the app runs at, and the row it used to take
+  goes back to the chart. Pressing `t` still names the palette it landed
+  on in the hint while that answer is fresh. The search screen keeps its
+  own short legend, and `?` remains ordinary text there.
 - `r` keeps the forecast on screen while its replacement is fetched instead
   of replacing the screen with the loading popup. Choosing a city still
   shows the popup, since the forecast on screen describes somewhere else.
@@ -39,6 +53,7 @@ refuse to publish a version this file does not describe.
   line skipped over an hour the provider had not reported instead of
   saying so. Its border titles also sit one cell in from the corner now,
   as every other pane's do.
+
 ### Fixed
 
 - Holding a key on Windows no longer fires it over and over. The Windows

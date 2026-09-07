@@ -182,9 +182,9 @@ Uninstalling from source takes the *package* name, `virga-tui`, not the binary
 name.
 
 Removing the binary leaves the two files Virga writes: a `state.json` holding
-the last location you chose and, if you set one, your startup theme, and a
-`forecast.json` holding the last forecast it fetched. Both live in the
-platform's per-user state directory:
+the last location you chose and, if you set them, your startup theme and key
+bar style, and a `forecast.json` holding the last forecast it fetched. Both
+live in the platform's per-user state directory:
 
 | Platform | Directory |
 |---|---|
@@ -199,7 +199,7 @@ platform's per-user state directory:
 | Key | Action |
 |---|---|
 | `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
-| `↑` `↓` | Hourly screen: back / forward a day, keeping the time of day |
+| `↑` `↓` | Back / forward a day — keeping the time of day, on the hourly screen |
 | `n` / `Home` | Jump back to now |
 | `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
 | `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
@@ -207,6 +207,8 @@ platform's per-user state directory:
 | `r` | Refetch the current location |
 | `u` | Toggle metric / imperial |
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
+| `?` | Every key for the current screen, on a card — any key closes it |
+| `,` | Switch the bar between hinting at `?` and naming every binding itself — persisted, like the theme |
 | `q` / `Esc` / `Ctrl-C` | Quit |
 
 The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
@@ -481,9 +483,9 @@ still publishes and only the tap update is skipped, with a warning.
 
 - There is no general configuration file. Every launch fetches fresh weather;
   the previous launch's forecast is shown, labelled with its age, only until
-  the fetch answers, and only when it is under a day old. The startup theme
-  and location are persisted, and units follow `VIRGA_UNITS` at startup and
-  last for the session.
+  the fetch answers, and only when it is under a day old. The startup theme,
+  key bar style, and location are persisted, and units follow `VIRGA_UNITS`
+  at startup and last for the session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
@@ -534,9 +536,10 @@ the launch-time request is not made at all.
 
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
-chose it or it was detected — and, if you set one with `virga theme`, the name
-of your startup theme. Your IP address is never written to disk — the resolved
-city is. It does not store weather responses, searches, or history.
+chose it or it was detected — and, if you set them, the name of your startup
+theme (with `virga theme`) and your key bar style (with `,`). Your IP address
+is never written to disk — the resolved city is. It does not store weather
+responses, searches, or history.
 Weather and air-quality requests send the location coordinates to Open-Meteo;
 city searches submit their search text to its geocoder. Open-Meteo's
 free-service logs may retain IP addresses and coordinates for 90 days. See

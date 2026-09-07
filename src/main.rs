@@ -1,6 +1,6 @@
 use crate::app::{
-    ActiveLocation, App, CachedWeather, Fetch, HourlyView, LocationSource, Remembered, Screen,
-    Startup,
+    ActiveLocation, App, CachedWeather, Fetch, HourlyView, KeyHintStyle, LocationSource,
+    Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
@@ -178,40 +178,48 @@ fn main() -> Result<()> {
         eprintln!("{warning}");
     }
 
-    let (startup, state_path, cache_path, persisted_theme) = match state::path() {
-        Ok(path) => {
-            let (persisted, warning) = load_persisted(&path);
-            if let Some(warning) = warning {
-                eprintln!("{warning}");
-            }
-            let cache_path = caching.then(|| cache::path_beside(&path));
-            let mut startup = startup_location(persisted.remembered, detect);
-            // Only a remembered place has a forecast worth opening on; the
-            // fallback city is nobody's, and a detection may land anywhere.
-            if let Some(cache_path) = &cache_path
-                && startup.source != LocationSource::Fallback
-            {
-                let (cached, warning) = load_cached(cache_path, &startup.location);
+    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style) =
+        match state::path() {
+            Ok(path) => {
+                let (persisted, warning) = load_persisted(&path);
                 if let Some(warning) = warning {
                     eprintln!("{warning}");
                 }
-                startup.cached = cached;
+                let cache_path = caching.then(|| cache::path_beside(&path));
+                let mut startup = startup_location(persisted.remembered, detect);
+                // Only a remembered place has a forecast worth opening on; the
+                // fallback city is nobody's, and a detection may land anywhere.
+                if let Some(cache_path) = &cache_path
+                    && startup.source != LocationSource::Fallback
+                {
+                    let (cached, warning) = load_cached(cache_path, &startup.location);
+                    if let Some(warning) = warning {
+                        eprintln!("{warning}");
+                    }
+                    startup.cached = cached;
+                }
+                (
+                    startup,
+                    Some(path),
+                    cache_path,
+                    persisted.theme,
+                    persisted.key_hint_style,
+                )
             }
-            (startup, Some(path), cache_path, persisted.theme)
-        }
-        // Nowhere to remember a location is not a reason to stop working out
-        // where the user is: the two are unrelated, and a user with no writable
-        // state directory still deserves their own city.
-        Err(error) => {
-            eprintln!("virga: could not determine where to remember location: {error:#}");
-            (startup_location(None, detect), None, None, None)
-        }
-    };
+            // Nowhere to remember a location is not a reason to stop working out
+            // where the user is: the two are unrelated, and a user with no writable
+            // state directory still deserves their own city.
+            Err(error) => {
+                eprintln!("virga: could not determine where to remember location: {error:#}");
+                (startup_location(None, detect), None, None, None, None)
+            }
+        };
 
     let theme = startup_theme(
         std::env::var("VIRGA_THEME").ok().as_deref(),
         persisted_theme,
     );
+    let key_hint_style = persisted_key_hint_style.unwrap_or_default();
     let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
     if let Some(warning) = warning {
         eprintln!("{warning}");
@@ -231,6 +239,7 @@ fn main() -> Result<()> {
             theme,
             unit,
             color_depth,
+            key_hint_style,
         },
         state_path.as_deref(),
         cache_path,
@@ -402,6 +411,18 @@ fn accept_message(
     // A message either keeps something or complains about something; it cannot
     // do both, so there is no ordering to get wrong here.
     (outcome.request, outcome.warning.or(save_warning))
+}
+
+/// Write a `,` press down the moment it happens, the same way a chosen
+/// location is. Turns a write failure into a warning rather than letting it
+/// interrupt the loop — the style still took effect for the session either
+/// way, so a full state directory should not stop the app from responding to
+/// the key that just changed it.
+fn persist_key_hint_style(state_path: Option<&Path>, style: KeyHintStyle) -> Option<String> {
+    let path = state_path?;
+    state::save_key_hint_style(path, style)
+        .err()
+        .map(|error| format!("virga: could not save the key hint style: {error:#}"))
 }
 
 fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
@@ -638,6 +659,7 @@ struct Opening {
     theme: Theme,
     unit: Unit,
     color_depth: ColorDepth,
+    key_hint_style: KeyHintStyle,
 }
 
 impl Opening {
@@ -646,6 +668,7 @@ impl Opening {
         app.theme = self.theme;
         app.unit = self.unit;
         app.color_depth = self.color_depth;
+        app.key_hint_style = self.key_hint_style;
         app
     }
 }
@@ -778,11 +801,19 @@ fn run(
                     // Keys that mean nothing on this screen — and every key
                     // release — leave no mark, so they do not even cost a redraw.
                     let key = held_keys.observe(key);
-                    if let Some(action) = input::action_for(key, app.screen) {
+                    if let Some(action) =
+                        input::action_for(key, app.screen, app.key_hint_style, app.help_visible)
+                    {
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {
                             dispatch(&request_tx, &mut app, request)?;
+                        }
+                        if let Some(style) = app.take_key_hint_style_save() {
+                            retain_first_warning(
+                                warning,
+                                persist_key_hint_style(state_path, style),
+                            );
                         }
                         if app.should_quit {
                             // A message already in the queue — above all the
@@ -961,12 +992,14 @@ mod tests {
             theme: Theme::Nord,
             unit: Unit::Metric,
             color_depth: crate::theme::ColorDepth::Ansi256,
+            key_hint_style: KeyHintStyle::Full,
         }
         .into_app();
 
         assert_eq!(app.theme, Theme::Nord);
         assert_eq!(app.unit, Unit::Metric);
         assert_eq!(app.color_depth, crate::theme::ColorDepth::Ansi256);
+        assert_eq!(app.key_hint_style, KeyHintStyle::Full);
     }
 
     /// The clean-repaint trigger: composition moves when the screen or the
@@ -1280,6 +1313,29 @@ mod tests {
 
         assert!(warning.contains("could not remember location"));
         assert!(warning.contains("create"));
+    }
+
+    #[test]
+    fn a_toggled_key_hint_style_is_persisted() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+
+        assert_eq!(
+            persist_key_hint_style(Some(&path), KeyHintStyle::Full),
+            None
+        );
+        assert_eq!(
+            state::load_from(&path).unwrap().key_hint_style,
+            Some(KeyHintStyle::Full)
+        );
+    }
+
+    /// Nowhere to write is not a reason to stop responding to the key that
+    /// changed the style — it still took effect for the session, and there is
+    /// simply nothing to persist it to.
+    #[test]
+    fn without_a_state_path_the_toggle_is_a_silent_no_op() {
+        assert_eq!(persist_key_hint_style(None, KeyHintStyle::Full), None);
     }
 
     #[test]
