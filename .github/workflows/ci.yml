@@ -88,12 +88,14 @@ jobs:
         # The manifest's `include` list is an allow-list, so a new top-level
         # directory cannot slip in; this guards against the list itself being
         # widened back to something that ships the agent config, the
-        # workflows, or the install script to crates.io.
+        # workflows, or the install script to crates.io. An allow-list here
+        # too, for the same reason: a block-list of today's stowaways would
+        # miss tomorrow's. The two extra names are Cargo's own additions.
         run: |
           list=$(cargo package --locked --list)
           grep -qx LICENSE-MIT <<<"$list"
           grep -qx LICENSE-APACHE <<<"$list"
-          if grep -E '^(\.claude|\.codex|\.agents|\.github|scripts|docs)/|^(install\.sh|CLAUDE\.md|CODE_OF_CONDUCT\.md)$' <<<"$list"; then
+          if grep -vE '^(src|tests)/|^(Cargo\.toml|Cargo\.lock|Cargo\.toml\.orig|\.cargo_vcs_info\.json|CHANGELOG\.md|README\.md|LICENSE-APACHE|LICENSE-MIT)$' <<<"$list"; then
             echo "::error::the crate tarball carries files that are not the crate (listed above)"
             exit 1
           fi

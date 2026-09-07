@@ -13,8 +13,9 @@ readme = "README.md"
 # the tarball until someone says otherwise. `tests/` is here because the
 # unit tests `include_str!` the fixtures; `cargo package` verifies only a
 # plain build, so nothing would notice them missing until someone ran
-# `cargo test` on the published source. `Cargo.lock` ships regardless of
-# this list and is named for the reader, not for Cargo.
+# `cargo test` on the published source. The manifest, the lock file of a
+# binary crate, and the file the `readme` key names ship whether or not this
+# list says so; they are named for the reader, not for Cargo.
 include = [
     "src/",
     "tests/",
