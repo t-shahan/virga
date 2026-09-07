@@ -1,3 +1,6 @@
 /target
 /.worktrees
 /.superpowers
+# vhs writes the README demo here; the tape is committed, the render is not.
+/demo.mp4
+/demo.gif
