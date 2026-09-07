@@ -14,6 +14,14 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- The install script's advice for putting `~/.local/bin` on `PATH` now
+  fits the shell it is talking to. It used to print an `export` line
+  aimed at `~/.<shell>rc`, which is a file fish never reads, in a syntax
+  fish rejects, and on macOS the wrong file for bash, whose login shells
+  read `~/.bash_profile`. Fish is told `fish_add_path`, zsh and bash are
+  pointed at the file their shell actually sources, and a shell the script
+  does not know gets the `export` line with no file named rather than a
+  guess (#68).
 - The forecast table shows the condition emoji in a terminal narrower than
   44 columns. The narrowest tier was declared one cell short of its own
   rows, so the emoji that ends every row was dropped there and first
