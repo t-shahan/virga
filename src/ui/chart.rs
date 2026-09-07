@@ -36,8 +36,8 @@ pub(super) fn chart_area_render(
         .title(
             Line::from(format!(
                 "Daily Highs · {:.0}–{:.0}{}",
-                unit.temp(coolest_all),
-                unit.temp(warmest_all),
+                unit.temp_rounded(coolest_all),
+                unit.temp_rounded(warmest_all),
                 unit.temp_symbol(),
             ))
             .fg(palette.muted),
