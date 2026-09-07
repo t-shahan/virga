@@ -20,12 +20,14 @@ concurrency:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+    # Branches in this repository only, for the reason claude.yml gives: a
+    # `pull_request` event from a fork runs without secrets, so the OAuth
+    # token would be empty and the job could only fail, leaving a red check
+    # on every external contribution that had nothing to do with the change.
+    # Skipping says so quietly. `pull_request_target` would carry the secret
+    # but also runs the workflow with write access against untrusted code,
+    # which is a larger surface than a repository this size needs.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read

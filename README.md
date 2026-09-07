@@ -448,8 +448,11 @@ cargo package --locked
 Opening a pull request fills in a template. Keep its `Review focus` section
 and say where the review should look hardest, because that is the part a
 reviewer cannot reconstruct from the diff. Claude reviews every pull request
-either way, against the requirements in [`CLAUDE.md`](CLAUDE.md), so the
-section directs the review rather than triggering it.
+from a branch in this repository either way, against the requirements in
+[`CLAUDE.md`](CLAUDE.md), so the section directs the review rather than
+triggering it. A pull request from a fork runs without the secret the review
+needs, so the check is skipped there rather than failed; the review happens
+when a maintainer looks.
 
 Mentioning `@claude` is a separate thing and always optional. It hands the
 work to the interactive agent, which answers questions and can run the cargo
