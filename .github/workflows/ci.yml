@@ -162,7 +162,10 @@ jobs:
       # install.sh is piped straight from the repository into strangers'
       # shells, which makes it the least appropriate file here to leave
       # unlinted. shellcheck ships preinstalled on the runner image.
-      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh
+      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh scripts/check-path-advice.sh
+      # The one branch of install.sh that can run without a release behind
+      # it: the PATH advice, one arm per shell.
+      - run: ./scripts/check-path-advice.sh
 
   actionlint:
     name: actionlint
