@@ -1,3 +1,4 @@
-# Review requests go to the maintainer automatically once there is a
-# second contributor; until then this line is inert.
+# GitHub asks @t-shahan to review every pull request someone else opens:
+# Dependabot's, the release-notes one, and a second contributor's when one
+# appears.
 * @t-shahan

@@ -1,9 +1,9 @@
 # Security
 
-Virga parses JSON it did not write, from Open-Meteo and from GitHub's release
-endpoint, writes files into your config directory, and ships an install
-script that people pipe into `sh`. Those are the places a report is most
-likely to be about.
+Virga parses JSON it did not write, from Open-Meteo, asks GitHub which
+release is newest, writes files into your config directory, and ships an
+install script that people pipe into `sh`. Those are the places a report is
+most likely to be about.
 
 ## Reporting a vulnerability
 
@@ -18,8 +18,10 @@ that.
 
 ## Supported versions
 
-Fixes go into the newest release only. There is no long-term branch, and
-`virga update` or a re-run of the install script is the upgrade path.
+Fixes go into the newest release only. There is no long-term branch.
+`virga update` says whether a newer release exists and how your install
+gets it; the install script, `brew upgrade`, or a fresh download is the
+upgrade.
 
 ## What counts
 
