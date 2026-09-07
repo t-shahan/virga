@@ -26,10 +26,11 @@ pub(crate) enum Invocation {
     Theme(Option<String>),
     /// Check whether a newer release exists and say how to get it.
     Update,
-    /// A recognized command given arguments it does not take. Strict where
-    /// `--help --version` is lenient, because here the extra words could
-    /// carry an intention — `update --install` asks for something this
-    /// command will not do, and silently checking instead would be a lie.
+    /// A recognized command given arguments, or an option, it does not
+    /// take. Strict where `--help --version` is lenient, because here the
+    /// extra words could carry an intention — `update --install` asks for
+    /// something this command will not do, and silently checking instead
+    /// would be a lie.
     Usage(String),
     /// An argument that means nothing to us. Carried rather than reported here
     /// so the caller owns the exit code and the stream it is written to.
@@ -59,20 +60,8 @@ where
     match argument.as_ref() {
         "-V" | "--version" | "version" => Invocation::Version,
         "-h" | "--help" | "help" => Invocation::Help,
-        "now" => {
-            let city = arguments
-                .map(|argument| argument.as_ref().to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Invocation::Now((!city.is_empty()).then_some(city))
-        }
-        "theme" => {
-            let name = arguments
-                .map(|argument| argument.as_ref().to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Invocation::Theme((!name.is_empty()).then_some(name))
-        }
+        "now" => rest_of_line("now", arguments).map_or_else(|answer| answer, Invocation::Now),
+        "theme" => rest_of_line("theme", arguments).map_or_else(|answer| answer, Invocation::Theme),
         "update" => match arguments.next() {
             None => Invocation::Update,
             Some(extra) => Invocation::Usage(format!(
@@ -82,6 +71,39 @@ where
         },
         other => Invocation::Unknown(other.to_string()),
     }
+}
+
+/// Everything after `command`, joined with spaces so a multi-word city or
+/// theme needs no quoting; `None` when there is nothing after it. The
+/// error is the invocation to answer with instead.
+///
+/// A first word beginning with `-` is not joined. `virga now --help` is a
+/// question about the command, not a city called "--help", and answering
+/// it with a network geocode that fails "no city matched" tells the user
+/// nothing about what they asked; it gets the help, the same as `--help`
+/// alone does, and any other option is a usage error. A later word may
+/// still begin with a dash: nothing here is an option, so it is part of
+/// the name.
+fn rest_of_line<I, S>(command: &str, arguments: I) -> Result<Option<String>, Invocation>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let words: Vec<String> = arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect();
+    match words.first().map(String::as_str) {
+        Some("-h" | "--help") => return Err(Invocation::Help),
+        Some(first) if first.starts_with('-') => {
+            return Err(Invocation::Usage(format!(
+                "{command} takes no options, and {first:?} is one"
+            )));
+        }
+        _ => {}
+    }
+    let joined = words.join(" ");
+    Ok((!joined.is_empty()).then_some(joined))
 }
 
 /// The `--help` text, also reused as the usage line under an argument error.
@@ -219,6 +241,38 @@ mod tests {
             panic!("extra arguments after update were not a usage error");
         };
         assert!(complaint.contains("--install"));
+    }
+
+    /// `virga now --help` used to geocode the string "--help" and fail with
+    /// "no city matched", which answers nothing the user asked. A request
+    /// for help gets the help; any other leading dash is a usage error.
+    #[test]
+    fn an_option_after_now_or_theme_is_answered_not_looked_up() {
+        for command in ["now", "theme"] {
+            for help in ["--help", "-h"] {
+                assert_eq!(
+                    parse_args([command, help]),
+                    Invocation::Help,
+                    "{command} {help}"
+                );
+            }
+            for option in ["--version", "-v", "--city=paris"] {
+                let Invocation::Usage(complaint) = parse_args([command, option]) else {
+                    panic!("{command} {option} was not a usage error");
+                };
+                assert!(complaint.contains(option), "{complaint}");
+            }
+        }
+    }
+
+    /// Only the first word decides: a dash later in the line is part of the
+    /// name, since nothing after `now` or `theme` is an option.
+    #[test]
+    fn a_dash_inside_a_name_is_still_the_name() {
+        assert_eq!(
+            parse_args(["now", "winston", "-", "salem"]),
+            Invocation::Now(Some("winston - salem".to_string()))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Virga
 
 A terminal weather app in Rust. It reads Open-Meteo over the network, renders
-with Ratatui, and persists a small amount of state to the user's config
+with Ratatui, and persists a small amount of state to the user's state
 directory. `src/ui/` draws, `src/weather/` fetches and parses, and the files
 at the top of `src/` hold the app loop, input, state, and CLI.
 
@@ -54,9 +54,9 @@ the violation is a general quality problem rather than a specific bug.
 
 ### Security
 
-Virga parses JSON it did not write, from Open-Meteo and from GitHub's release
-endpoint, and it writes files into the user's config directory. Review must
-check:
+Virga parses JSON it did not write, from Open-Meteo and from ipapi.co, reads
+a redirect header from GitHub to learn the newest release, and writes files
+into the user's state directory. Review must check:
 
 - Every outbound HTTP call sets a timeout. A hung socket freezes the interface.
 - Responses are size-bounded before being read into memory.

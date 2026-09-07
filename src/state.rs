@@ -207,7 +207,8 @@ fn surviving_document(path: &Path) -> Result<Option<StateDocument>> {
 /// protocol, because it cannot go stale: the OS releases it when the
 /// holding process exits, however it exits, and here when the returned
 /// handle drops. A platform that cannot lock (std returns unsupported on
-/// some) gets the unserialized behavior rather than losing saves entirely.
+/// some) gets the unserialized behavior rather than losing saves entirely;
+/// any other failure refuses the save, see `tolerate_unsupported`.
 pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     let parent = path.parent().context("state path has no parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -219,8 +220,45 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
     ));
     let file =
         std::fs::File::create(&lock).with_context(|| format!("create {}", lock.display()))?;
-    let _ = file.lock();
+    tolerate_unsupported(retry_interrupted(|| file.lock()))
+        .with_context(|| format!("lock {}", lock.display()))?;
     Ok(file)
+}
+
+/// Call `attempt` until it answers anything but `Interrupted`.
+///
+/// std wraps `flock` in a plain `cvt`, not the retrying `cvt_r`, so a
+/// signal landing while the call blocks comes back as `Interrupted` rather
+/// than being retried the way `read_exact` would. The signal this program
+/// gets mid-save is a resize, and the save only blocks when another
+/// process, `virga theme` say, holds the lock; and since `flock` is on the
+/// list the kernel restarts under `SA_RESTART`, only a handler installed
+/// without that flag can trip this. Rare, but interrupted means "ask
+/// again", not "refused". Unbounded like `cvt_r`: every retry blocks again,
+/// so spinning would take a signal on every single wait.
+fn retry_interrupted(mut attempt: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Which lock failures a save may proceed past.
+///
+/// Only `Unsupported`: a platform without advisory locks would otherwise
+/// never save at all, and an unserialized save beats none. Tolerating any
+/// other failure — an I/O error, no locks left in the kernel table — would
+/// leave the lock unheld while the save went ahead, and two writers racing
+/// silently is exactly what the lock exists to prevent. This guards the
+/// forecast cache as well as the state file, since both take their lock
+/// here.
+fn tolerate_unsupported(locked: std::io::Result<()>) -> std::io::Result<()> {
+    match locked {
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => Ok(()),
+        other => other,
+    }
 }
 
 pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> {
@@ -847,6 +885,75 @@ mod tests {
             body.as_bytes(),
             "the newer document was modified"
         );
+    }
+
+    /// The tolerated and refused kinds, see `tolerate_unsupported`. A real
+    /// lock failure cannot be induced portably, so the rule is tested on
+    /// its own.
+    #[test]
+    fn only_an_unsupported_lock_is_tolerated() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(tolerate_unsupported(Ok(())).is_ok());
+        assert!(tolerate_unsupported(Err(Error::from(ErrorKind::Unsupported))).is_ok());
+
+        for kind in [ErrorKind::Other, ErrorKind::WouldBlock] {
+            let refused = tolerate_unsupported(Err(Error::from(kind)));
+            assert_eq!(
+                refused.map_err(|error| error.kind()),
+                Err(kind),
+                "{kind:?} was tolerated"
+            );
+        }
+    }
+
+    /// A signal during the blocking lock is "ask again", and only that:
+    /// the retry stops at the first other answer, refusal or success.
+    #[test]
+    fn an_interrupted_lock_is_asked_again_and_any_other_answer_stands() {
+        use std::io::{Error, ErrorKind};
+
+        let mut answers = vec![
+            Ok(()),
+            Err(Error::from(ErrorKind::Interrupted)),
+            Err(Error::from(ErrorKind::Interrupted)),
+        ];
+        let mut asked = 0;
+        let outcome = retry_interrupted(|| {
+            asked += 1;
+            answers.pop().expect("asked past the scripted answers")
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(asked, 3, "two interruptions, then the lock");
+
+        let mut answers = vec![Ok(()), Err(Error::from(ErrorKind::Other))];
+        let mut asked = 0;
+        let outcome = retry_interrupted(|| {
+            asked += 1;
+            answers.pop().expect("asked past the scripted answers")
+        });
+        assert_eq!(outcome.map_err(|error| error.kind()), Err(ErrorKind::Other));
+        assert_eq!(asked, 1, "a refusal is not asked again");
+    }
+
+    /// Nothing pinned that a refusal inside `exclusive` reaches the caller
+    /// at all. A directory where the lock file should be is the one failure
+    /// every platform can stage; it refuses the create step, not the lock,
+    /// whose own rule `only_an_unsupported_lock_is_tolerated` covers.
+    #[test]
+    fn a_lock_file_that_cannot_be_created_refuses_the_save() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        std::fs::create_dir(test.path().join("state.json.lock")).unwrap();
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        let error = save_location(&path, &berlin).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("state.json.lock"),
+            "{error:#}"
+        );
+        assert!(!path.exists(), "the save went ahead without the lock");
     }
 
     /// Both halves survive a stampede: every save reads under the same
