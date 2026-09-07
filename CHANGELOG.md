@@ -14,6 +14,10 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- The forecast table shows the condition emoji in a terminal narrower than
+  44 columns. The narrowest tier was declared one cell short of its own
+  rows, so the emoji that ends every row was dropped there and first
+  appeared once the rain and wind columns did (#77).
 - The weathergram no longer clips a wind speed against the next arrow.
   Below 45 columns each hour is one cell wide, and a two-digit speed on a
   six-hour tick ran into the arrow two cells on, so a steady 20 km/h read

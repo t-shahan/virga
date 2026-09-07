@@ -145,7 +145,12 @@ const _: () = assert!(TABLE_MINIMAL < TABLE_COMPACT);
 const _: () = assert!(TABLE_COMPACT < TABLE_FULL);
 
 /// Rendered width of the table at each level of detail, emoji included.
-const TABLE_MINIMAL: u16 = 26;
+/// Each is the row's exact cell count, and the count has to be exact: the
+/// emoji is a wide grapheme at the row's end, and a tier one cell short
+/// does not clip it but drops it whole, silently, at every width the tier
+/// covers. The minimal row is 22 cells of text, three of padding and the
+/// two-cell emoji.
+pub(super) const TABLE_MINIMAL: u16 = 27;
 const TABLE_COMPACT: u16 = 42;
 pub(super) const TABLE_FULL: u16 = 68;
 
@@ -187,37 +192,123 @@ mod tests {
         assert_eq!(clock("short"), "short");
     }
 
-    /// Each detail level must fit inside the width that selects it, or the
-    /// table would be clipped at exactly the size meant to accommodate it.
-    #[test]
-    fn renders_at_every_detail_level_without_clipping() {
+    /// Renders the table into a terminal `width` cells wide and returns its
+    /// rows as plain text, which is what a reader who cannot use colour is
+    /// left with. Row 0 is the border; the header is row 1.
+    fn rendered_rows(width: u16, selected: usize) -> Vec<String> {
         let w = Weather::fixture(22, 14);
-        for width in [TABLE_MINIMAL, TABLE_COMPACT, TABLE_FULL, 100, 200] {
-            let mut t = Terminal::new(TestBackend::new(width, 14)).unwrap();
-            t.draw(|f| forecast_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
-                .unwrap();
-        }
-    }
-
-    /// Renders the table and returns its rows as plain text, which is what a
-    /// reader who cannot use colour is left with.
-    fn rows_without_colour(selected: usize) -> Vec<String> {
-        let w = Weather::fixture(22, 14);
-        let mut t = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut t = Terminal::new(TestBackend::new(width, 14)).unwrap();
         t.draw(|f| forecast_area_render(f, &w, palette(), f.area(), Unit::Imperial, selected))
             .unwrap();
 
         let buf = t.backend().buffer();
         (0..14)
-            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect())
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
     }
 
-    /// Which row a given index lands on depends on today's real date, so this
-    /// asserts the relationship between selection and marker rather than any
-    /// particular weekday.
+    /// The border takes a cell each side, so a tier is exercised at exactly
+    /// the inner width that selects it by asking for two more.
+    fn rows_at_inner_width(inner: u16) -> Vec<String> {
+        rendered_rows(inner + 2, 14)
+    }
+
+    /// The data rows: every one carries a temperature, and nothing else does.
+    fn data_rows(rows: &[String]) -> impl Iterator<Item = &String> {
+        rows.iter().filter(|row| row.contains('°'))
+    }
+
+    /// Widths past every tier only add margin: the full tier's last column
+    /// and the emoji are still there.
+    #[test]
+    fn renders_at_generous_widths() {
+        for width in [100, 200] {
+            let rows = rendered_rows(width, 14);
+            assert!(rows[1].contains("sunset"), "{:?}", rows[1]);
+            for row in data_rows(&rows) {
+                assert!(row.contains(emoji(0)), "width {width}: {row:?}");
+            }
+        }
+    }
+
+    /// Every tier constant counts the emoji as two cells, and a glyph that
+    /// measured wider would be dropped whole again with every other test
+    /// green, since the fixture only ever shows a clear sky. So every code
+    /// the table can receive, known or not, is rendered and measured.
+    #[test]
+    fn every_condition_emoji_is_two_cells_wide() {
+        for code in 0..=u8::MAX {
+            let glyph = emoji(code);
+            let mut t = Terminal::new(TestBackend::new(6, 1)).unwrap();
+            t.draw(|f| f.render_widget(Paragraph::new(format!("{glyph}x")), f.area()))
+                .unwrap();
+            assert_eq!(
+                t.backend().buffer()[(2, 0)].symbol(),
+                "x",
+                "code {code}: {glyph:?} is not two cells wide"
+            );
+        }
+    }
+
+    /// The issue: the minimal tier was declared one cell narrower than its
+    /// rows, so the emoji ending every row was dropped at every width the
+    /// tier covers and first appeared at the compact tier. Each tier is
+    /// checked at exactly its own width for every column it promises and
+    /// for the emoji on every data row, not merely for surviving the render.
+    #[test]
+    fn every_detail_level_shows_every_column_it_promises_at_its_own_width() {
+        let clear_sky = emoji(0);
+        for (inner, promised) in [
+            (TABLE_MINIMAL, &["day", "high", "low"][..]),
+            (TABLE_COMPACT, &["day", "high", "low", "rain", "wind"][..]),
+            (
+                TABLE_FULL,
+                &[
+                    "day", "high", "low", "rain", "wind", "uv", "sunrise", "sunset",
+                ][..],
+            ),
+        ] {
+            let rows = rows_at_inner_width(inner);
+            let header = &rows[1];
+            for column in promised {
+                assert!(
+                    header.contains(column),
+                    "no {column} column at inner width {inner}: {header:?}"
+                );
+            }
+            assert!(data_rows(&rows).count() >= 8, "{rows:#?}");
+            for row in data_rows(&rows) {
+                assert!(
+                    row.contains(clear_sky),
+                    "the condition emoji is dropped at inner width {inner}: {row:?}"
+                );
+            }
+        }
+    }
+
+    /// One cell below a tier the table falls to the tier beneath, whole,
+    /// rather than clipping the wider one.
+    #[test]
+    fn one_cell_short_of_a_tier_falls_back_to_the_tier_beneath() {
+        for (inner, lost, kept) in [
+            (TABLE_COMPACT - 1, "rain", "low"),
+            (TABLE_FULL - 1, "uv", "rain"),
+        ] {
+            let rows = rows_at_inner_width(inner);
+            assert!(!rows[1].contains(lost), "{:?}", rows[1]);
+            assert!(rows[1].contains(kept), "{:?}", rows[1]);
+            for row in data_rows(&rows) {
+                assert!(row.contains(emoji(0)), "inner width {inner}: {row:?}");
+            }
+        }
+    }
+
+    /// The marker's row follows from the fixture's fixed dates and today
+    /// index, but the tests below assert the relationship between selection
+    /// and marker rather than a particular row, so a fixture change cannot
+    /// break them.
     fn marked_row(selected: usize) -> usize {
-        let rows = rows_without_colour(selected);
+        let rows = rendered_rows(100, selected);
         let marked: Vec<usize> = rows
             .iter()
             .enumerate()
@@ -271,7 +362,7 @@ mod tests {
             "the selected past day should lead the list"
         );
 
-        let rows = rows_without_colour(12);
+        let rows = rendered_rows(100, 12);
         let today = rows
             .iter()
             .position(|r| r.contains("Today"))
@@ -288,7 +379,7 @@ mod tests {
     #[test]
     fn the_window_keeps_its_size_when_it_slides() {
         let rows_at = |selected: usize| {
-            rows_without_colour(selected)
+            rendered_rows(100, selected)
                 .iter()
                 .filter(|r| !r.trim().is_empty())
                 .count()
@@ -302,7 +393,7 @@ mod tests {
     /// so a marked row's columns have to line up with an unmarked one's.
     #[test]
     fn the_marker_does_not_shift_the_columns() {
-        let rows = rows_without_colour(16);
+        let rows = rendered_rows(100, 16);
         let marked = rows.iter().find(|r| r.contains('>')).expect("a marked row");
         let plain = rows
             .iter()
