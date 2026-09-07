@@ -93,7 +93,7 @@ fn detail_lines(
 
     let temperature = hour.and_then(|h| h.temp_c).map_or_else(
         || UNKNOWN.to_string(),
-        |c| format!("{:.0}{}", unit.temp(c), unit.temp_symbol()),
+        |c| format!("{:.0}{}", unit.temp_rounded(c), unit.temp_symbol()),
     );
 
     vec![

@@ -134,14 +134,14 @@ pub(super) fn current_area_render(
     // The block font already has a '-' glyph, so a missing reading renders as
     // "--" at the same scale rather than collapsing the layout.
     let temp = if showing_today {
-        weather
-            .current
-            .temp_c
-            .map_or_else(|| "--".to_string(), |c| format!("{:.0}", unit.temp(c)))
+        weather.current.temp_c.map_or_else(
+            || "--".to_string(),
+            |c| format!("{:.0}", unit.temp_rounded(c)),
+        )
     } else {
         day.map_or_else(
             || "--".to_string(),
-            |d| format!("{:.0}", unit.temp(d.high_c)),
+            |d| format!("{:.0}", unit.temp_rounded(d.high_c)),
         )
     };
 
@@ -208,12 +208,16 @@ fn detail_lines(
     let feels = if showing_today {
         weather.current.feels_like_c.map_or_else(
             || UNKNOWN.to_string(),
-            |c| format!("{:.0}{sym}", unit.temp(c)),
+            |c| format!("{:.0}{sym}", unit.temp_rounded(c)),
         )
     } else {
         match (day.feels_max_c, day.feels_min_c) {
             (Some(hi), Some(lo)) => {
-                format!("{:.0}{sym} / {:.0}{sym}", unit.temp(hi), unit.temp(lo))
+                format!(
+                    "{:.0}{sym} / {:.0}{sym}",
+                    unit.temp_rounded(hi),
+                    unit.temp_rounded(lo)
+                )
             }
             _ => UNKNOWN.to_string(),
         }
@@ -243,8 +247,8 @@ fn high_low(day: &DailyForecast, unit: Unit) -> String {
     let sym = unit.temp_symbol();
     format!(
         "{:.0}{sym} / {:.0}{sym}",
-        unit.temp(day.high_c),
-        unit.temp(day.low_c)
+        unit.temp_rounded(day.high_c),
+        unit.temp_rounded(day.low_c)
     )
 }
 
@@ -511,6 +515,44 @@ mod tests {
     /// Below a certain width even the day alone exceeds the border.
     fn summary_fits_nowhere(width: u16) -> bool {
         title_room(width) < "Fri, Aug 21".len()
+    }
+
+    /// A reading in [-0.5, 0] used to reach the pane as `-0`. The helper is
+    /// tested on its own; this pins that the pane's own sites call it.
+    #[test]
+    fn a_reading_just_below_zero_never_renders_as_negative_zero() {
+        use crate::app::App;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // The pane opens in imperial, where -18 °C is -0.4 °F: the same
+        // trap one conversion away.
+        let just_below_zero = || {
+            let mut weather = Weather::fixture(22, 14);
+            weather.current.temp_c = Some(-18.0);
+            weather.current.feels_like_c = Some(-18.0);
+            weather.daily[14].high_c = -18.0;
+            weather.daily[14].low_c = -18.0;
+            weather.daily[14].feels_max_c = Some(-18.0);
+            weather.daily[14].feels_min_c = Some(-18.0);
+            weather
+        };
+        let weather = just_below_zero();
+        let mut app = App::new();
+        app.weather = Fetch::Ready(just_below_zero());
+        app.selected_day = 14;
+
+        let mut t = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        t.draw(|f| current_area_render(f, &app, &weather, palette(), f.area()))
+            .unwrap();
+        let buf = t.backend().buffer();
+        let text: String = (0..12)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+
+        assert!(!text.contains("-0°"), "{text}");
+        assert!(text.contains("feels like  0°F"), "{text}");
+        assert!(text.contains("high / low  0°F / 0°F"), "{text}");
     }
 
     /// The budget is arithmetic; this checks what ratatui actually draws.
