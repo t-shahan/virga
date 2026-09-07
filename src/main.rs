@@ -1,6 +1,6 @@
 use crate::app::{
-    ActiveLocation, App, Fetch, HourlyView, KeyHintStyle, LocationSource, Remembered, Screen,
-    Startup,
+    ActiveLocation, App, CachedWeather, Fetch, HourlyView, KeyHintStyle, LocationSource,
+    Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
@@ -11,12 +11,13 @@ use ratatui::backend::{Backend, ClearType};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
 use ratatui::{DefaultTerminal, Terminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 mod app;
+mod cache;
 mod cli;
 mod events;
 mod input;
@@ -172,28 +173,47 @@ fn main() -> Result<()> {
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
+    let (caching, warning) = caching_enabled(std::env::var("VIRGA_CACHE").ok().as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
 
-    let (startup, state_path, persisted_theme, persisted_key_hint_style) = match state::path() {
-        Ok(path) => {
-            let (persisted, warning) = load_persisted(&path);
-            if let Some(warning) = warning {
-                eprintln!("{warning}");
+    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style) =
+        match state::path() {
+            Ok(path) => {
+                let (persisted, warning) = load_persisted(&path);
+                if let Some(warning) = warning {
+                    eprintln!("{warning}");
+                }
+                let cache_path = caching.then(|| cache::path_beside(&path));
+                let mut startup = startup_location(persisted.remembered, detect);
+                // Only a remembered place has a forecast worth opening on; the
+                // fallback city is nobody's, and a detection may land anywhere.
+                if let Some(cache_path) = &cache_path
+                    && startup.source != LocationSource::Fallback
+                {
+                    let (cached, warning) = load_cached(cache_path, &startup.location);
+                    if let Some(warning) = warning {
+                        eprintln!("{warning}");
+                    }
+                    startup.cached = cached;
+                }
+                (
+                    startup,
+                    Some(path),
+                    cache_path,
+                    persisted.theme,
+                    persisted.key_hint_style,
+                )
             }
-            (
-                startup_location(persisted.remembered, detect),
-                Some(path),
-                persisted.theme,
-                persisted.key_hint_style,
-            )
-        }
-        // Nowhere to remember a location is not a reason to stop working out
-        // where the user is: the two are unrelated, and a user with no writable
-        // state directory still deserves their own city.
-        Err(error) => {
-            eprintln!("virga: could not determine where to remember location: {error:#}");
-            (startup_location(None, detect), None, None, None)
-        }
-    };
+            // Nowhere to remember a location is not a reason to stop working out
+            // where the user is: the two are unrelated, and a user with no writable
+            // state directory still deserves their own city.
+            Err(error) => {
+                eprintln!("virga: could not determine where to remember location: {error:#}");
+                (startup_location(None, detect), None, None, None, None)
+            }
+        };
 
     let theme = startup_theme(
         std::env::var("VIRGA_THEME").ok().as_deref(),
@@ -222,6 +242,7 @@ fn main() -> Result<()> {
             key_hint_style,
         },
         state_path.as_deref(),
+        cache_path,
         check_updates,
         &mut warning,
         &mut notice,
@@ -254,6 +275,21 @@ fn load_persisted(path: &Path) -> (state::Persisted, Option<String>) {
     }
 }
 
+/// Read the forecast cache, folding every complaint into one warning, the
+/// way `load_persisted` does: a cache that cannot be read costs a spinner,
+/// never a launch.
+fn load_cached(path: &Path, location: &ActiveLocation) -> (Option<CachedWeather>, Option<String>) {
+    match cache::load(path, location, chrono::Local::now()) {
+        Ok(cached) => (cached, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "virga: could not read the last forecast: {error:#}"
+            )),
+        ),
+    }
+}
+
 /// How the app should open, given what was remembered and whether detection
 /// is allowed to run.
 ///
@@ -270,17 +306,20 @@ fn startup_location(remembered: Option<Remembered>, detect: bool) -> Startup {
             location,
             source: LocationSource::Chosen,
             detect: false,
+            cached: None,
         },
         // Yesterday's detection is this launch's answer only if today's fails.
         Some(Remembered { location, source }) => Startup {
             location,
             source,
             detect,
+            cached: None,
         },
         None => Startup {
             location: ActiveLocation::default(),
             source: LocationSource::Fallback,
             detect,
+            cached: None,
         },
     }
 }
@@ -313,6 +352,25 @@ fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
             true,
             Some(format!(
                 "virga: VIRGA_GEOIP={value:?} is not on or off; leaving location detection on."
+            )),
+        ),
+    }
+}
+
+/// Whether the last forecast is kept on disk and opened on, given whatever
+/// `VIRGA_CACHE` was set to. The same grammar and the same forgiveness as
+/// the other two switches.
+fn caching_enabled(requested: Option<&str>) -> (bool, Option<String>) {
+    let Some(value) = requested else {
+        return (true, None);
+    };
+
+    match switch(value) {
+        Some(enabled) => (enabled, None),
+        None => (
+            true,
+            Some(format!(
+                "virga: VIRGA_CACHE={value:?} is not on or off; leaving the forecast cache on."
             )),
         ),
     }
@@ -619,6 +677,7 @@ fn run(
     mut terminal: DefaultTerminal,
     opening: Opening,
     state_path: Option<&Path>,
+    cache_path: Option<PathBuf>,
     check_updates: bool,
     warning: &mut Option<String>,
     notice: &mut Option<String>,
@@ -639,7 +698,7 @@ fn run(
             update::notice(&current, &latest)
         });
     }
-    events::spawn_worker(request_rx, message_tx);
+    events::spawn_worker(request_rx, message_tx, cache_path);
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
@@ -713,6 +772,7 @@ fn run(
         // message arrives, so an idle app costs no CPU instead of ten frames a
         // second.
         let animating = matches!(app.weather, Fetch::Loading)
+            || app.is_refreshing()
             || matches!(app.results, Fetch::Loading)
             || matches!(app.screen, Screen::Search);
 
@@ -925,6 +985,7 @@ mod tests {
                 location: ActiveLocation::default(),
                 source: LocationSource::Fallback,
                 detect: false,
+                cached: None,
             },
             theme: Theme::Nord,
             unit: Unit::Metric,
@@ -1134,6 +1195,17 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_switch_reads_like_the_others() {
+        assert_eq!(caching_enabled(None), (true, None));
+        assert_eq!(caching_enabled(Some("off")), (false, None));
+        assert_eq!(caching_enabled(Some("ON")), (true, None));
+
+        let (enabled, warning) = caching_enabled(Some("maybe"));
+        assert!(enabled);
+        assert!(warning.unwrap().contains("VIRGA_CACHE"));
+    }
+
+    #[test]
     fn an_unusable_update_value_warns_and_leaves_the_check_on() {
         let (enabled, warning) = checks_enabled(Some("maybe"));
 
@@ -1177,6 +1249,7 @@ mod tests {
             location: ActiveLocation::default(),
             source: LocationSource::Fallback,
             detect: true,
+            cached: None,
         });
         let Request::Detect { id } = app.startup_request() else {
             panic!("a first run must detect")
@@ -1217,6 +1290,7 @@ mod tests {
             location: ActiveLocation::default(),
             source: LocationSource::Fallback,
             detect: false,
+            cached: None,
         });
         let message = loaded(app.startup_request());
 
