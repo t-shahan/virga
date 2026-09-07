@@ -56,6 +56,15 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- `virga update` recognises a Homebrew install on an Intel Mac. The binary
+  there is reached through a symlink in `/usr/local/bin`, and judged by the
+  link alone it looked like the install script's work, so the advice was to
+  run the script over Homebrew's own link. The link is followed first now,
+  and only a whole path component called `Cellar`, `homebrew` or
+  `.linuxbrew` counts, so a checkout of the tap is not mistaken for a
+  Homebrew install either. A Cargo install reached through a symlinked
+  `~/.cargo` is recognised as Cargo's, not the script's, for the same
+  reason.
 - Holding a key on Windows no longer fires it over and over. The Windows
   console reports a held key as a stream of presses rather than as
   repeats, so the filter that stops a held `t` from cycling through every
