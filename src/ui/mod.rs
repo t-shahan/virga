@@ -76,6 +76,10 @@ const MIN_HEIGHT: u16 = 12;
 // The hourly weathergram's floor sits above the app's, never below it. The
 // app-wide check runs first, so a lower screen floor could never be reached.
 const _: () = assert!(hourly::MIN_WIDTH >= MIN_WIDTH);
+// And the narrowest table fits inside the narrowest terminal the app accepts,
+// border included, or its emoji would be dropped on the smallest screens the
+// app claims to support.
+const _: () = assert!(MIN_WIDTH >= forecast::TABLE_MINIMAL + 2);
 /// The canvas the weather screens render inside. Past the width where the
 /// widest content fits — the 48-hour weathergram, the forecast table beside
 /// its chart — broader boxes only detach titles and controls from the
