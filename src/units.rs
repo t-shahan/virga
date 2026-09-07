@@ -47,7 +47,7 @@ impl Unit {
     ///
     /// Ties round to even, not away from zero, because that is what `{:.0}`
     /// has always done here and Open-Meteo reports tenths: `f64::round`
-    /// would have moved every `.5` reading a degree from where 0.6.0 put it.
+    /// would have moved every `.5` reading a degree from where it was.
     pub fn temp_rounded(self, celsius: f64) -> f64 {
         self.temp(celsius).round_ties_even() + 0.0
     }

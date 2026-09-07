@@ -517,6 +517,44 @@ mod tests {
         title_room(width) < "Fri, Aug 21".len()
     }
 
+    /// A reading in [-0.5, 0] used to reach the pane as `-0`. The helper is
+    /// tested on its own; this pins that the pane's own sites call it.
+    #[test]
+    fn a_reading_just_below_zero_never_renders_as_negative_zero() {
+        use crate::app::App;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // The pane opens in imperial, where -18 °C is -0.4 °F: the same
+        // trap one conversion away.
+        let just_below_zero = || {
+            let mut weather = Weather::fixture(22, 14);
+            weather.current.temp_c = Some(-18.0);
+            weather.current.feels_like_c = Some(-18.0);
+            weather.daily[14].high_c = -18.0;
+            weather.daily[14].low_c = -18.0;
+            weather.daily[14].feels_max_c = Some(-18.0);
+            weather.daily[14].feels_min_c = Some(-18.0);
+            weather
+        };
+        let weather = just_below_zero();
+        let mut app = App::new();
+        app.weather = Fetch::Ready(just_below_zero());
+        app.selected_day = 14;
+
+        let mut t = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        t.draw(|f| current_area_render(f, &app, &weather, palette(), f.area()))
+            .unwrap();
+        let buf = t.backend().buffer();
+        let text: String = (0..12)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+
+        assert!(!text.contains("-0°"), "{text}");
+        assert!(text.contains("feels like  0°F"), "{text}");
+        assert!(text.contains("high / low  0°F / 0°F"), "{text}");
+    }
+
     /// The budget is arithmetic; this checks what ratatui actually draws.
     #[test]
     fn rendered_border_keeps_the_day_and_never_overlaps() {

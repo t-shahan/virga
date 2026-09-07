@@ -473,6 +473,15 @@ mod tests {
         assert_eq!(missing.value, "--");
         assert_eq!(missing.suffix, "°C");
 
+        // Just below zero rounds to zero, not to a signed zero the block
+        // font would draw as a dash and a nought.
+        let mut below_zero = dry_hours(1);
+        below_zero[0].temp_c = Some(-0.3);
+        assert_eq!(
+            hero_temperature(below_zero.first(), Unit::Metric).value,
+            "0"
+        );
+
         // And on screen: the digits, then the symbol on the middle row.
         let app = app_showing(hours, 0);
         let text = rendered(100, 24, &app);
