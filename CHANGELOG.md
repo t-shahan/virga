@@ -14,6 +14,17 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- A letter typed with Control or Alt held no longer lands in the city
+  search. Ctrl-U, Ctrl-W and Ctrl-A are the line-editing keys people reach
+  for by habit, and each inserted its bare letter instead. Those chords now
+  do nothing there. Ctrl-C still quits, Shift still types a capital, and
+  AltGr still types the accented and currency characters it reaches on
+  Windows, where the console reports it as Control and Alt together (#82).
+- `virga now --help` and `virga theme --help` print the help instead of
+  looking up a city or theme called `--help`. The first was a network
+  round trip that ended in "no city matched", which answered nothing the
+  user asked. Any other option after those commands is a usage error, as
+  it already was after `update` (#82).
 - A temperature just below zero no longer prints as `-0°`. Rounding a
   reading in [-0.5, 0] gives negative zero, which Rust prints with its
   sign, so -0.3 °C read `-0°C` and -18 °C read `-0°F`. In the app it was
