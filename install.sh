@@ -156,15 +156,43 @@ else
     say "installed virga $version to $INSTALL_DIR/virga, but it would not run here."
 fi
 
+# --- is it reachable --------------------------------------------------------
+
+# The line to run so the next terminal finds the binary, chosen by the
+# user's shell. Guessing `~/.<shell>rc` from the shell's name got two common
+# cases wrong: fish neither reads `~/.fishrc` nor accepts `export`, and a
+# login shell on macOS reads `~/.bash_profile`, not `~/.bashrc`, so bash
+# users there were told to edit a file Terminal.app never sources. A shell
+# this does not know gets the `export` line with no file named, which is
+# less than ideal but never wrong.
+#
+# `$PATH` must reach the rc file literally; expanding it here would freeze
+# today's PATH into it. shellcheck's SC2016 warns about exactly that, and
+# the single quotes are the point.
+path_advice() {
+    # shellcheck disable=SC2016
+    export_line='export PATH="'"$INSTALL_DIR"':$PATH"'
+    case "$(basename "${SHELL:-sh}")" in
+        fish)
+            printf '    fish_add_path %s\n' "$INSTALL_DIR" ;;
+        zsh)
+            printf "    echo '%s' >> ~/.zshrc\n" "$export_line" ;;
+        bash)
+            if [ "$(uname -s)" = Darwin ]; then
+                printf "    echo '%s' >> ~/.bash_profile\n" "$export_line"
+            else
+                printf "    echo '%s' >> ~/.bashrc\n" "$export_line"
+            fi ;;
+        *)
+            printf '    %s\n' "$export_line" ;;
+    esac
+}
+
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)
         printf '\n'
         say "$INSTALL_DIR is not on your PATH. Add it with:"
-        # $PATH must reach the user's rc file literally; expanding it here
-        # would freeze today's PATH into it.
-        # shellcheck disable=SC2016
-        printf '\n    echo '"'"'export PATH="%s:$PATH"'"'"' >> ~/.%src\n\n' \
-            "$INSTALL_DIR" "$(basename "${SHELL:-sh}")"
+        printf '\n%s\n' "$(path_advice)"
         ;;
 esac
