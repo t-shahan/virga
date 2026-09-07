@@ -1,4 +1,4 @@
-# GitHub asks @t-shahan to review every pull request someone else opens:
-# Dependabot's, the release-notes one, and a second contributor's when one
-# appears.
+# So a second contributor's pull request is not missed: GitHub asks the
+# owner to review every non-draft pull request someone else opens. Today
+# that is Dependabot's and the release-notes bot's.
 * @t-shahan
