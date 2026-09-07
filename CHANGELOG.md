@@ -24,6 +24,14 @@ refuse to publish a version this file does not describe.
 
 ### Changed
 
+- The classic hourly view's inspector is the weathergram's inspector, drawn
+  with a different hero and different readings, rather than a copy of it.
+  Two things the copy did differently are gone with it: it kept the city
+  whole and dropped the condition when the border ran short, where the
+  weathergram clips the city and keeps the condition, and its "next rain"
+  line skipped over an hour the provider had not reported instead of
+  saying so. Its border titles also sit one cell in from the corner now,
+  as every other pane's do.
 - The Homebrew tap is now
   [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga), so
   the install command reads as the app's name twice rather than once each of

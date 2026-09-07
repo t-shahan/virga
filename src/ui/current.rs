@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::theme::Palette;
 use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
+use crate::ui::pane::{bottom_titles, compass, detail_line};
 use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
 use crate::units::Unit;
 use crate::weather::code::{aqi_label, description};
@@ -315,12 +316,6 @@ fn comparison(weather: &Weather, day: &DailyForecast, unit: Unit) -> String {
     }
 }
 
-/// Sixteen points is more precision than a daily dominant direction deserves.
-fn compass(degrees: f64) -> &'static str {
-    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-    POINTS[(((degrees % 360.0 + 360.0) % 360.0 / 45.0).round() as usize) % 8]
-}
-
 fn duration(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64 / 60;
     format!("{}h {}m", total / 60, total % 60)
@@ -362,26 +357,6 @@ fn top_titles(
     }
 
     (truncate(&name, available), None, None)
-}
-
-/// Comparison left, day right. The day is what changes as you arrow around, so
-/// it is never the one sacrificed.
-fn bottom_titles(summary: &str, when: &str, width: u16) -> (Option<String>, String) {
-    let available = title_room(width);
-    let len = |s: &str| s.chars().count();
-
-    if !summary.is_empty() && len(summary) + TITLE_GUTTER + len(when) <= available {
-        return (Some(summary.to_string()), when.to_string());
-    }
-
-    (None, when.to_string())
-}
-
-fn detail_line(label: &str, value: &str, palette: Palette) -> Line<'static> {
-    Line::from(vec![
-        Span::from(format!("{label:<12}")).fg(palette.muted),
-        Span::from(value.to_string()).fg(palette.text),
-    ])
 }
 
 #[cfg(test)]
@@ -498,26 +473,6 @@ mod tests {
         let (_, condition, aqi) = top_titles(CITY, "Drizzle", None, 120);
         assert_eq!(condition.as_deref(), Some("Drizzle"));
         assert_eq!(aqi, None);
-    }
-
-    /// The day is what changes as you arrow around, so it is never sacrificed.
-    #[test]
-    fn bottom_keeps_the_day_and_drops_the_comparison() {
-        let long = "17°F above the 22-day average";
-
-        let (summary, when) = bottom_titles(long, "Fri, Aug 21", 120);
-        assert_eq!(summary.as_deref(), Some(long));
-        assert_eq!(when, "Fri, Aug 21");
-
-        let (summary, when) = bottom_titles(long, "Fri, Aug 21", 40);
-        assert_eq!(summary, None);
-        assert_eq!(when, "Fri, Aug 21");
-    }
-
-    #[test]
-    fn bottom_omits_an_empty_comparison() {
-        let (summary, _) = bottom_titles("", "Today", 120);
-        assert_eq!(summary, None);
     }
 
     /// Both border rows carry two titles drawn onto the same line, so neither
@@ -732,25 +687,6 @@ mod tests {
             rain_line(&w.daily[1], Unit::Imperial),
             "47% · 1.00 in / 3 h"
         );
-    }
-
-    #[test]
-    fn compass_maps_degrees_to_points() {
-        assert_eq!(compass(0.0), "N");
-        assert_eq!(compass(45.0), "NE");
-        assert_eq!(compass(90.0), "E");
-        assert_eq!(compass(180.0), "S");
-        assert_eq!(compass(315.0), "NW");
-    }
-
-    /// 360 must not index past the end of the table, and the API has been known
-    /// to report a hair over or under.
-    #[test]
-    fn compass_wraps_at_the_full_circle() {
-        assert_eq!(compass(360.0), "N");
-        assert_eq!(compass(359.0), "N");
-        assert_eq!(compass(720.0), "N");
-        assert_eq!(compass(-45.0), "NW");
     }
 
     #[test]
