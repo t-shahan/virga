@@ -20,10 +20,11 @@ refuse to publish a version this file does not describe.
   do nothing there. Ctrl-C still quits, Shift still types a capital, and
   AltGr still types the accented and currency characters it reaches on
   Windows, where the console reports it as Control and Alt together (#82).
-- `virga now --help` and `virga theme --help` print the usage text instead
-  of looking up a city or theme called `--help`. The first was a network
+- `virga now --help` and `virga theme --help` print the help instead of
+  looking up a city or theme called `--help`. The first was a network
   round trip that ended in "no city matched", which answered nothing the
-  user asked (#82).
+  user asked. Any other option after those commands is a usage error, as
+  it already was after `update` (#82).
 
 ## [0.6.0] - 2026-09-07
 

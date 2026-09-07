@@ -60,10 +60,8 @@ where
     match argument.as_ref() {
         "-V" | "--version" | "version" => Invocation::Version,
         "-h" | "--help" | "help" => Invocation::Help,
-        "now" => rest_of_line("now", arguments).map_or_else(Invocation::Usage, Invocation::Now),
-        "theme" => {
-            rest_of_line("theme", arguments).map_or_else(Invocation::Usage, Invocation::Theme)
-        }
+        "now" => rest_of_line("now", arguments).map_or_else(|answer| answer, Invocation::Now),
+        "theme" => rest_of_line("theme", arguments).map_or_else(|answer| answer, Invocation::Theme),
         "update" => match arguments.next() {
             None => Invocation::Update,
             Some(extra) => Invocation::Usage(format!(
@@ -76,14 +74,17 @@ where
 }
 
 /// Everything after `command`, joined with spaces so a multi-word city or
-/// theme needs no quoting; `None` when there is nothing after it.
+/// theme needs no quoting; `None` when there is nothing after it. The
+/// error is the invocation to answer with instead.
 ///
-/// A first word beginning with `-` is refused rather than joined. `virga now
-/// --help` is a question about the command, not a city called "--help", and
-/// answering it with a network geocode that fails "no city matched" tells
-/// the user nothing about what they asked. A later word may still begin
-/// with a dash: nothing here is an option, so it is part of the name.
-fn rest_of_line<I, S>(command: &str, arguments: I) -> Result<Option<String>, String>
+/// A first word beginning with `-` is not joined. `virga now --help` is a
+/// question about the command, not a city called "--help", and answering
+/// it with a network geocode that fails "no city matched" tells the user
+/// nothing about what they asked; it gets the help, the same as `--help`
+/// alone does, and any other option is a usage error. A later word may
+/// still begin with a dash: nothing here is an option, so it is part of
+/// the name.
+fn rest_of_line<I, S>(command: &str, arguments: I) -> Result<Option<String>, Invocation>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -92,10 +93,14 @@ where
         .into_iter()
         .map(|argument| argument.as_ref().to_string())
         .collect();
-    if let Some(first) = words.first()
-        && first.starts_with('-')
-    {
-        return Err(format!("{command} takes no options, and {first:?} is one"));
+    match words.first().map(String::as_str) {
+        Some("-h" | "--help") => return Err(Invocation::Help),
+        Some(first) if first.starts_with('-') => {
+            return Err(Invocation::Usage(format!(
+                "{command} takes no options, and {first:?} is one"
+            )));
+        }
+        _ => {}
     }
     let joined = words.join(" ");
     Ok((!joined.is_empty()).then_some(joined))
@@ -239,13 +244,19 @@ mod tests {
     }
 
     /// `virga now --help` used to geocode the string "--help" and fail with
-    /// "no city matched", which answers nothing the user asked. A leading
-    /// dash is a question about the command, and the usage text is the
-    /// answer.
+    /// "no city matched", which answers nothing the user asked. A request
+    /// for help gets the help; any other leading dash is a usage error.
     #[test]
-    fn an_option_after_now_or_theme_is_a_usage_error_not_a_name() {
+    fn an_option_after_now_or_theme_is_answered_not_looked_up() {
         for command in ["now", "theme"] {
-            for option in ["--help", "-h", "--version"] {
+            for help in ["--help", "-h"] {
+                assert_eq!(
+                    parse_args([command, help]),
+                    Invocation::Help,
+                    "{command} {help}"
+                );
+            }
+            for option in ["--version", "-v", "--city=paris"] {
                 let Invocation::Usage(complaint) = parse_args([command, option]) else {
                     panic!("{command} {option} was not a usage error");
                 };

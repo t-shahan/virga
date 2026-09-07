@@ -216,11 +216,7 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Esc => Some(Action::Back),
             KeyCode::Enter => Some(Action::Submit),
             KeyCode::Backspace => Some(Action::Backspace),
-            // A letter under Control or Alt is a chord, not text: Ctrl-U,
-            // Ctrl-W and Alt-anything are the line-editing keys people reach
-            // for by habit, and inserting a literal `u` or `w` for them
-            // helps nobody. Shift is not a chord — it is how a capital
-            // letter arrives — and neither, see `is_chord`, is AltGr.
+            // A chord is not text; `is_chord` says which modifiers make one.
             KeyCode::Char(_) if is_chord(key.modifiers) => None,
             KeyCode::Char(c) => Some(Action::Insert(c)),
             KeyCode::Up => Some(Action::PrevResult),
@@ -230,13 +226,19 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
     }
 }
 
-/// Control or Alt alone makes a letter a chord. Both together are AltGr:
-/// the Windows console reports a third-level glyph — `ł`, `€`, `@` on a
-/// Polish or German layout — as left Control plus right Alt, and crossterm
-/// passes that on as `CONTROL | ALT` with the glyph already in the char.
-/// Refusing it would make "Łódź" untypeable on the one screen whose job is
-/// typing a city. A deliberate Ctrl-Alt-letter is nobody's line-editing
-/// habit, so typing it is the safe side to land on.
+/// Control or Alt alone makes a letter a chord: Ctrl-U, Ctrl-W and
+/// Alt-anything are the line-editing keys people reach for by habit, and
+/// inserting a literal `u` or `w` for them helps nobody. Shift is not a
+/// chord; it is how a capital letter arrives.
+///
+/// Both together is typed, because on Windows that pair is AltGr: the
+/// console reports a third-level glyph — `ł`, `€`, `@` on a Polish or
+/// German layout — as left Control plus right Alt, and crossterm passes it
+/// on as `CONTROL | ALT` with the glyph already in the char. Refusing it
+/// would make "Łódź" untypeable on the one screen whose job is typing a
+/// city. On Unix the same pair is a real Ctrl-Alt-letter chord, and it is
+/// typed anyway: nobody's line-editing habit binds one, so that is the
+/// cheaper side to be wrong on.
 fn is_chord(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL) != modifiers.contains(KeyModifiers::ALT)
 }
@@ -705,6 +707,10 @@ mod tests {
                 "{c}"
             );
         }
+        // A plain letter under the same pair is a real chord on Unix and is
+        // typed anyway; a "fix" for that would take Windows AltGr with it.
+        let key = KeyEvent::new(KeyCode::Char('u'), altgr);
+        assert_eq!(action_for(key, Screen::Search), Some(Action::Insert('u')));
         // The capital in "Łódź" is AltGr with Shift held, which the console
         // reports as all three; an equality test on the pair would drop it.
         let key = KeyEvent::new(KeyCode::Char('\u{141}'), altgr | KeyModifiers::SHIFT);
