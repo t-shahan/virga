@@ -12,6 +12,33 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **The app opens on the last forecast.** With a remembered city, the first
+  frame is the forecast from the previous launch, read from a `forecast.json`
+  beside `state.json`, with `as of 17:52 · updating` on the border until the
+  fresh one replaces it in place. A forecast over 24 hours old, or for
+  another city, is not shown, and `VIRGA_CACHE=off` keeps the file off disk.
+  Launch used to open on a spinner and wait the whole of a network round
+  trip, half a second warm and up to two cold (#54).
+
+### Changed
+
+- `r` keeps the forecast on screen while its replacement is fetched instead
+  of replacing the screen with the loading popup. Choosing a city still
+  shows the popup, since the forecast on screen describes somewhere else.
+- A fetch that fails while a forecast is showing leaves it up, marked
+  `refresh failed, r to retry` in the error colour, and prints the reason
+  after exit. The error popup remains for a launch with nothing to show.
+
+- The classic hourly view's inspector is the weathergram's inspector, drawn
+  with a different hero and different readings, rather than a copy of it.
+  Two things the copy did differently are gone with it: it kept the city
+  whole and dropped the condition when the border ran short, where the
+  weathergram clips the city and keeps the condition, and its "next rain"
+  line skipped over an hour the provider had not reported instead of
+  saying so. Its border titles also sit one cell in from the corner now,
+  as every other pane's do.
 ### Fixed
 
 - Holding a key on Windows no longer fires it over and over. The Windows
@@ -20,8 +47,13 @@ refuse to publish a version this file does not describe.
   theme, or a held `p` from flapping the hourly screen, never saw them.
   A second press with no release in between now counts as the repeat it
   is. Arrows and typing still repeat, as they should.
-
-### Changed
+- The classic hourly view and the week strip no longer report a window the
+  provider did not fully answer as a dry one. The "24 h total" and "wet
+  hours" rows summed whatever hours had a reading and called the rest
+  dry, so a dropped precipitation series read as "none expected" and
+  "0 of 24"; the strip's daily totals did the same with a dash. All three
+  now say the total is unavailable, the way the weathergram's inspector
+  already did.
 
 - The Homebrew tap is now
   [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga), so

@@ -2,20 +2,22 @@ use crate::app::{App, Fetch, HourlyView, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 mod axis;
 mod bars;
 mod chart;
+mod classic;
 mod condition_symbol;
 mod current;
 mod digits;
 mod forecast;
 mod hourly;
+mod inspector;
 mod legend;
-mod precip;
+mod pane;
 mod precip_chart;
 mod precip_week;
 mod precipitation;
@@ -23,11 +25,11 @@ mod search;
 mod weathergram;
 
 use chart::chart_area_render;
+use classic::classic_render;
 use current::current_area_render;
 use forecast::forecast_area_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
-use precip::precip_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
@@ -214,7 +216,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
                     too_small_render(frame, content, area, needs, palette);
                 }
                 HourlyView::Weathergram => hourly_render(frame, app, palette, content),
-                HourlyView::Classic => precip_render(frame, app, palette, content),
+                HourlyView::Classic => classic_render(frame, app, palette, content),
             },
             Fetch::Loading => popup_render(
                 frame,
@@ -333,6 +335,84 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
     )
 }
 
+/// What the forecast on screen is besides fresh, for the left of a pane's
+/// bottom border: read from disk, waiting to be replaced, or left in place
+/// by a refresh that failed. `None` for a live forecast with nothing
+/// pending, when that corner belongs to its usual sentence.
+pub(super) struct StatusMark {
+    pub text: String,
+    pub color: Color,
+    /// No wording fit beside the right-hand title and the mark is a
+    /// failure, which outranks it: the caller shows this in that title's
+    /// place rather than not at all.
+    pub alone: bool,
+}
+
+/// Fitted, not fixed: the longest wording that sits beside `beside` within
+/// `width`'s title room is the one returned, and the optional parts give
+/// way before the fact itself — the age first, then the retry hint. A
+/// narrow terminal used to drop the whole mark instead, which showed a
+/// stale or unrefreshed forecast as a fresh one at exactly the sizes with
+/// the least room for doubt. A failure the corner still cannot hold comes
+/// back `alone`: it takes the error colour and outranks even the title on
+/// the right, because a forecast that could not be replaced is the one
+/// fact the user must not miss.
+pub(super) fn status_mark(
+    app: &App,
+    palette: Palette,
+    width: u16,
+    beside: &str,
+) -> Option<StatusMark> {
+    let aged = |text: String| match &app.shown.as_of {
+        Some(as_of) => format!("as of {as_of} · {text}"),
+        None => text,
+    };
+    let (candidates, color, must_show) = if app.shown.refresh_failed {
+        let retry = "refresh failed, r to retry".to_string();
+        (
+            vec![
+                aged(retry.clone()),
+                retry,
+                "refresh failed".to_string(),
+                "failed".to_string(),
+            ],
+            palette.error,
+            true,
+        )
+    } else if app.is_refreshing() {
+        let updating = format!("{} updating", spinner(app.tick));
+        (vec![aged(updating.clone()), updating], palette.muted, false)
+    } else if let Some(as_of) = &app.shown.as_of {
+        (vec![format!("as of {as_of}")], palette.muted, false)
+    } else {
+        return None;
+    };
+
+    let room = title_room(width);
+    let len = |text: &str| text.chars().count();
+    if let Some(text) = candidates
+        .iter()
+        .find(|text| len(text) + TITLE_GUTTER + len(beside) <= room)
+    {
+        return Some(StatusMark {
+            text: text.clone(),
+            color,
+            alone: false,
+        });
+    }
+    if !must_show {
+        return None;
+    }
+    let shortest = candidates.into_iter().next_back()?;
+    Some(StatusMark {
+        // Only reachable below the minimum size, where the size warning has
+        // replaced most of the interface; a clipped mark still beats none.
+        text: truncate(&shortest, room),
+        color,
+        alone: true,
+    })
+}
+
 fn spinner(tick: usize) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES[(tick / 2) % FRAMES.len()]
@@ -397,6 +477,54 @@ mod tests {
         }
     }
 
+    /// The two hourly renderings now share one inspector, so `v` has to
+    /// keep it in place at the narrowest terminal that stacks the panes as
+    /// well as one wide enough to lay them side by side. Driven through the
+    /// action rather than by setting the view, so the toggle itself is what
+    /// is under test.
+    #[test]
+    fn pressing_v_keeps_the_shared_inspector_at_36_and_100_columns() {
+        for width in [36u16, 100] {
+            let mut app = ready(Screen::Hourly);
+            let height = 24;
+
+            let weathergram =
+                symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert!(
+                weathergram.contains("Hourly weather · next"),
+                "{width}:\n{weathergram}"
+            );
+            assert!(
+                weathergram.contains("feels like"),
+                "{width}:\n{weathergram}"
+            );
+            assert!(
+                weathergram.contains("Sun 2 Aug, 12:00 AM"),
+                "{width}:\n{weathergram}"
+            );
+
+            app.on_action(crate::input::Action::ToggleHourlyView);
+            let classic = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert!(
+                classic.contains("Precipitation · next"),
+                "{width}:\n{classic}"
+            );
+            assert!(classic.contains("wet hours"), "{width}:\n{classic}");
+            assert!(
+                classic.contains("Sun 2 Aug, 12:00 AM"),
+                "{width}:\n{classic}"
+            );
+            assert!(!classic.contains("Hourly weather"), "{width}:\n{classic}");
+
+            app.on_action(crate::input::Action::ToggleHourlyView);
+            let back = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert_eq!(
+                back, weathergram,
+                "{width}: the second press did not restore the weathergram"
+            );
+        }
+    }
+
     fn ready(screen: Screen) -> App {
         let mut app = App::new();
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
@@ -410,6 +538,7 @@ mod tests {
             location: crate::app::ActiveLocation::default(),
             source: crate::app::LocationSource::Fallback,
             detect: true,
+            cached: None,
         });
         let _ = app.startup_request();
         app.screen = screen;
@@ -417,6 +546,23 @@ mod tests {
     }
 
     /// A newer release's news has arrived and nothing has been pressed since.
+    /// A launch that found a forecast on disk: the app opened on it and the
+    /// fetch that will replace it is out.
+    fn cached(screen: Screen) -> App {
+        let mut app = App::with_startup(crate::app::Startup {
+            location: crate::app::ActiveLocation::default(),
+            source: crate::app::LocationSource::Chosen,
+            detect: false,
+            cached: Some(crate::app::CachedWeather {
+                weather: Weather::fixture(22, 14),
+                as_of: "17:52".to_string(),
+            }),
+        });
+        let _ = app.startup_request();
+        app.screen = screen;
+        app
+    }
+
     fn noticed(screen: Screen) -> App {
         let mut app = ready(screen);
         app.update_notice = Some(
@@ -893,6 +1039,142 @@ mod tests {
         let roomy = symbols(&drawn(&app, probe(), width, fits + 1), width, fits + 1).join("\n");
         assert!(roomy.contains("update:"), "{roomy}");
         assert!(roomy.contains("feels like"), "{roomy}");
+    }
+
+    /// A forecast read from disk is weather, not a spinner, and it says
+    /// when it is from and that a fresh one is coming, in the muted colour.
+    #[test]
+    fn a_cached_forecast_is_drawn_with_its_age_while_updating() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let app = cached(screen);
+            let buffer = drawn(&app, probe(), 100, 30);
+            let text = symbols(&buffer, 100, 30).join("\n");
+            assert!(text.contains("feels like"), "{screen:?}:\n{text}");
+            assert!(!text.contains("Loading"), "{screen:?}:\n{text}");
+            assert!(text.contains("as of 17:52 · "), "{screen:?}:\n{text}");
+            assert!(text.contains(" updating"), "{screen:?}:\n{text}");
+
+            let row = symbols(&buffer, 100, 30)
+                .into_iter()
+                .position(|row| row.contains("as of 17:52"))
+                .unwrap();
+            let column = symbols(&buffer, 100, 30)[row].find("as of").unwrap();
+            assert_eq!(
+                buffer[(column as u16, row as u16)].fg,
+                probe().muted,
+                "{screen:?}: the mark wears the muted colour"
+            );
+        }
+    }
+
+    /// The mark leaves with the fresh forecast, and the comparison sentence
+    /// gets its corner back.
+    #[test]
+    fn a_live_forecast_carries_no_mark() {
+        let app = ready(Screen::Weather);
+        let text = symbols(&drawn(&app, probe(), 100, 30), 100, 30).join("\n");
+        assert!(!text.contains("as of"), "{text}");
+        assert!(!text.contains("updating"), "{text}");
+    }
+
+    /// A refresh that fails leaves the forecast up and says so in the error
+    /// colour, on both screens, rather than trading it for a popup.
+    #[test]
+    fn a_failed_refresh_keeps_the_forecast_and_marks_it_in_the_error_colour() {
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let mut app = ready(screen);
+            let request = app.startup_request();
+            let crate::events::Request::Fetch { id, .. } = request else {
+                panic!("not a fetch")
+            };
+            let _ = app.on_message(crate::events::Message::LoadFailed {
+                id,
+                error: "no route to host".to_string(),
+            });
+
+            let buffer = drawn(&app, probe(), 100, 30);
+            let rows = symbols(&buffer, 100, 30);
+            let text = rows.join("\n");
+            assert!(text.contains("feels like"), "{screen:?}:\n{text}");
+            assert!(!text.contains("Error"), "{screen:?}:\n{text}");
+            assert!(
+                text.contains("refresh failed, r to retry"),
+                "{screen:?}:\n{text}"
+            );
+            let row = rows
+                .iter()
+                .position(|r| r.contains("refresh failed"))
+                .unwrap();
+            let column = rows[row].find("refresh failed").unwrap();
+            assert_eq!(buffer[(column as u16, row as u16)].fg, probe().error);
+        }
+    }
+
+    /// At the floor there is no room for the mark beside the day, and the
+    /// day is what keeps its place, as the comparison already yields to it.
+    #[test]
+    fn the_mark_degrades_but_never_vanishes_at_the_minimum_width() {
+        let app = cached(Screen::Weather);
+        let text = symbols(&drawn(&app, probe(), MIN_WIDTH, 20), MIN_WIDTH, 20).join("\n");
+        assert!(text.contains("Today"), "{text}");
+        assert!(text.contains("feels like"), "{text}");
+        assert!(
+            text.contains("updating"),
+            "the floor hid that a fetch is out: {text}"
+        );
+    }
+
+    /// The failure has to survive narrowing too — the sizes with the least
+    /// room are exactly the ones with the least room for doubt about what
+    /// is on screen. The wording gives way, the fact does not.
+    #[test]
+    fn a_failed_cached_refresh_stays_marked_at_narrow_widths() {
+        // 24 rows, not 20: below 36x21 the hourly screen is its size
+        // warning, and a screen with no weather on it has nothing to mark.
+        for (screen, width, height) in [
+            (Screen::Weather, MIN_WIDTH, 20),
+            (Screen::Weather, 50, 20),
+            (Screen::Hourly, 50, 24),
+        ] {
+            let mut app = cached(screen);
+            let request = app.startup_request();
+            let crate::events::Request::Fetch { id, .. } = request else {
+                panic!("not a fetch")
+            };
+            let _ = app.on_message(crate::events::Message::LoadFailed {
+                id,
+                error: "no route to host".to_string(),
+            });
+
+            let text = symbols(&drawn(&app, probe(), width, height), width, height).join("\n");
+            assert!(
+                text.contains("failed"),
+                "{screen:?} at {width} hid the failure: {text}"
+            );
+        }
+    }
+
+    /// The classic hourly view is the same forecast, so it carries the same
+    /// marks — it had none at all when the mark lived only on the
+    /// weathergram's inspector.
+    #[test]
+    fn the_classic_hourly_view_carries_the_mark_too() {
+        let mut app = cached(Screen::Hourly);
+        app.hourly_view = HourlyView::Classic;
+        let text = symbols(&drawn(&app, probe(), 100, 30), 100, 30).join("\n");
+        assert!(text.contains("as of 17:52"), "{text}");
+        assert!(text.contains("updating"), "{text}");
+
+        let request = app.startup_request();
+        let crate::events::Request::Fetch { id, .. } = request else {
+            panic!("not a fetch")
+        };
+        let _ = app.on_message(crate::events::Message::LoadFailed {
+            id,
+            error: "no route to host".to_string(),
+        });
+        let text = symbols(&drawn(&app, probe(), 100, 30), 100, 30).join("\n");
+        assert!(text.contains("refresh failed"), "{text}");
     }
 
     #[test]

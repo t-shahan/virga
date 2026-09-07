@@ -22,6 +22,7 @@
 
 use crate::theme::Palette;
 use crate::ui::axis::{clock, put_right, put_styled, put_text};
+use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
 use crate::units::Unit;
 use crate::weather::model::HourlyForecast;
 use chrono::{NaiveDateTime, Timelike};
@@ -92,6 +93,9 @@ const NOTHING: Step = Step::solid(0, MISSING);
 /// Hours with no reading at all. Distinct from a dry hour, which draws the
 /// faintest step of the ramp rather than nothing.
 const MISSING: &str = " ";
+/// A day's total when an hour of it went unreported. Short, because the
+/// totals column is eight cells; distinct from the dash, which means dry.
+const UNREPORTED: &str = "n/a";
 
 /// Columns the day name takes: a marker, the longest name, and a space. Sized
 /// from `TODAY` rather than from a weekday abbreviation, which is what the
@@ -333,27 +337,19 @@ fn shade(chance: Option<u8>) -> &'static Step {
 }
 
 /// The day's forecast accumulation. A dry day says so with a dash rather than
-/// with `0.00 in`, which reads as a measurement rather than as an absence.
+/// with `0.00 in`, which reads as a measurement rather than as an absence,
+/// and a day with an hour the provider did not report says neither: a sum
+/// with a hole in it is not a total. Hours outside the window — the empty
+/// slots of a partial first day — are not holes, and are skipped.
 fn day_total(day: &Day, unit: Unit) -> String {
-    let total: f64 = day
-        .hours
-        .iter()
-        .flatten()
-        .filter_map(|(_, hour)| hour.precip_mm)
-        .sum();
-
-    if total <= 0.0 {
-        return "—".to_string();
+    let reported = day.hours.iter().flatten().map(|(_, hour)| *hour);
+    let total = aggregate(reported, unit);
+    if total == PrecipitationAggregate::Unavailable {
+        return UNREPORTED.to_string();
     }
-
-    let value = unit.precip(total);
-    let decimals = unit.precip_decimals();
-    let quantum = 0.1_f64.powi(decimals as i32);
-
-    if value < quantum / 2.0 {
-        return format!("<{quantum:.decimals$} {}", unit.precip_label());
-    }
-    format!("{value:.decimals$} {}", unit.precip_label())
+    total
+        .positive_text(unit, " ")
+        .unwrap_or_else(|| "—".to_string())
 }
 
 #[cfg(test)]
@@ -484,6 +480,34 @@ mod tests {
         assert_eq!(day_total(&days[0], Unit::Imperial), "—");
     }
 
+    /// A partial first day has empty slots before the window opens. Those are
+    /// hours that were never asked about, not hours that went unanswered, so
+    /// a dry evening is still a dash.
+    #[test]
+    fn a_partial_first_day_is_totalled_over_the_hours_it_has() {
+        let series = hours(30, 18);
+        let days = group_by_day(&series);
+        assert_eq!(day_total(&days[0], Unit::Imperial), "—");
+    }
+
+    /// An hour the provider did not report leaves the day without a total.
+    /// Summing the rest and printing a dash would call a dropped series dry.
+    #[test]
+    fn a_day_with_an_unreported_hour_has_no_total() {
+        let mut series = hours(48, 0);
+        series[3].precip_mm = None;
+        series[30].precip_mm = Some(6.35);
+        series[31].precip_mm = None;
+        let days = group_by_day(&series);
+
+        assert_eq!(day_total(&days[0], Unit::Imperial), UNREPORTED);
+        assert_eq!(day_total(&days[1], Unit::Imperial), UNREPORTED);
+        assert!(
+            UNREPORTED.len() as u16 <= TOTAL_WIDTH,
+            "the marker must fit the totals column"
+        );
+    }
+
     #[test]
     fn a_days_total_adds_its_hours_up() {
         let mut series = hours(48, 0);
@@ -498,11 +522,19 @@ mod tests {
 
     fn rendered(width: u16, height: u16, selected: usize) -> String {
         let weather = Weather::fixture(22, 14);
-        let days = group_by_day(weather.forecast_hours());
+        rendered_days(
+            width,
+            height,
+            &group_by_day(weather.forecast_hours()),
+            selected,
+        )
+    }
+
+    fn rendered_days(width: u16, height: u16, days: &[Day], selected: usize) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| {
-                precip_week_render(f, &days, palette(), f.area(), Unit::Imperial, selected);
+                precip_week_render(f, days, palette(), f.area(), Unit::Imperial, selected);
             })
             .unwrap();
 
@@ -520,6 +552,62 @@ mod tests {
     fn column_of(line: &str, needle: &str) -> usize {
         let byte = line.find(needle).expect("needle should be rendered");
         line[..byte].chars().count()
+    }
+
+    /// Two days, one hour of each unreported: the first otherwise dry, the
+    /// second otherwise wet. Neither has a total to print.
+    fn holed_days() -> Vec<HourlyForecast> {
+        let mut series = hours(48, 0);
+        series[3].precip_mm = None;
+        series[30].precip_mm = Some(6.35);
+        series[31].precip_mm = None;
+        series
+    }
+
+    fn row_named<'a>(text: &'a str, name: &str) -> &'a str {
+        text.lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("no {name} row:\n{text}"))
+    }
+
+    /// The marker has to reach the screen, not just `day_total`: a dry day
+    /// with a hole in it draws `n/a` where the dash would go, and a wet day
+    /// with a hole draws it where the sum would go. Checked at the narrowest
+    /// width that still shows totals, one column an hour, and at the wide
+    /// canvas ceiling.
+    #[test]
+    fn an_unreported_hour_renders_as_no_total_at_narrow_and_wide_widths() {
+        let series = holed_days();
+        let days = group_by_day(&series);
+
+        for width in [MIN_WIDTH + TOTAL_GAP + TOTAL_WIDTH, 68, 120] {
+            let text = rendered_days(width, 11, &days, 3);
+            let dry = row_named(&text, TODAY);
+            let wet = row_named(&text, "Tue");
+
+            assert!(dry.contains(UNREPORTED), "at {width}: {dry:?}");
+            assert!(
+                !dry.contains('—'),
+                "at {width}, a hole read as dry: {dry:?}"
+            );
+            assert!(wet.contains(UNREPORTED), "at {width}: {wet:?}");
+            assert!(
+                !wet.contains(" in"),
+                "at {width}, a hole was summed around: {wet:?}"
+            );
+        }
+    }
+
+    /// Where the width rules hide the totals column, the marker goes with it
+    /// rather than landing in the grid.
+    #[test]
+    fn a_hidden_totals_column_takes_its_marker_with_it() {
+        let series = holed_days();
+        let days = group_by_day(&series);
+        let text = rendered_days(87, 11, &days, 3);
+
+        assert!(!text.contains(UNREPORTED), "{text}");
+        assert!(text.contains("12a"), "the grid should still draw:\n{text}");
     }
 
     /// The first row is the day you are standing in, and naming it costs the
