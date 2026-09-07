@@ -96,9 +96,9 @@ pub(super) fn forecast_area_render(
         let mut row = format!(
             "{marker} {:<5}{:>5.0}{}{:>6.0}{}",
             day,
-            unit.temp(d.high_c),
+            unit.temp_rounded(d.high_c),
             unit.temp_symbol(),
-            unit.temp(d.low_c),
+            unit.temp_rounded(d.low_c),
             unit.temp_symbol(),
         );
 

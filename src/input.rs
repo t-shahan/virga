@@ -216,12 +216,31 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Esc => Some(Action::Back),
             KeyCode::Enter => Some(Action::Submit),
             KeyCode::Backspace => Some(Action::Backspace),
+            // A chord is not text; `is_chord` says which modifiers make one.
+            KeyCode::Char(_) if is_chord(key.modifiers) => None,
             KeyCode::Char(c) => Some(Action::Insert(c)),
             KeyCode::Up => Some(Action::PrevResult),
             KeyCode::Down => Some(Action::NextResult),
             _ => None,
         },
     }
+}
+
+/// Control or Alt alone makes a letter a chord: Ctrl-U, Ctrl-W and
+/// Alt-anything are the line-editing keys people reach for by habit, and
+/// inserting a literal `u` or `w` for them helps nobody. Shift is not a
+/// chord; it is how a capital letter arrives.
+///
+/// Both together is typed, because on Windows that pair is AltGr: the
+/// console reports a third-level glyph — `ł`, `€`, `@` on a Polish or
+/// German layout — as left Control plus right Alt, and crossterm passes it
+/// on as `CONTROL | ALT` with the glyph already in the char. Refusing it
+/// would make "Łódź" untypeable on the one screen whose job is typing a
+/// city. On Unix the same pair is a real Ctrl-Alt-letter chord, and it is
+/// typed anyway: nobody's line-editing habit binds one, so that is the
+/// cheaper side to be wrong on.
+fn is_chord(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL) != modifiers.contains(KeyModifiers::ALT)
 }
 
 /// `?` opens the reference only in `Hint` style — in `Full` style the bar
@@ -649,6 +668,64 @@ mod tests {
                 "{extra:?}"
             );
         }
+    }
+
+    /// Ctrl-U, Ctrl-W, Ctrl-A and Alt-anything are line-editing chords by
+    /// habit. Typing the bare letter for them is wrong in every terminal, so
+    /// they mean nothing here until they mean something.
+    #[test]
+    fn control_and_alt_letters_are_not_typed_into_the_search() {
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ] {
+            for c in ['u', 'w', 'a', 'x'] {
+                let key = KeyEvent::new(KeyCode::Char(c), modifiers);
+                assert_eq!(
+                    action_for(key, Screen::Search),
+                    None,
+                    "{modifiers:?}+{c} was typed"
+                );
+            }
+        }
+    }
+
+    /// The Windows console reports an AltGr glyph as Control plus Alt with
+    /// the translated character already in the event, so that pairing is
+    /// text, not a chord: the accented and currency characters of every
+    /// European layout arrive this way and nothing else can type them.
+    #[test]
+    fn an_altgr_glyph_is_still_text_on_the_search_screen() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        for c in ['\u{142}', '\u{20ac}', '@'] {
+            let key = KeyEvent::new(KeyCode::Char(c), altgr);
+            assert_eq!(
+                action_for(key, Screen::Search),
+                Some(Action::Insert(c)),
+                "{c}"
+            );
+        }
+        // A plain letter under the same pair is a real chord on Unix and is
+        // typed anyway; a "fix" for that would take Windows AltGr with it.
+        let key = KeyEvent::new(KeyCode::Char('u'), altgr);
+        assert_eq!(action_for(key, Screen::Search), Some(Action::Insert('u')));
+        // The capital in "Łódź" is AltGr with Shift held, which the console
+        // reports as all three; an equality test on the pair would drop it.
+        let key = KeyEvent::new(KeyCode::Char('\u{141}'), altgr | KeyModifiers::SHIFT);
+        assert_eq!(
+            action_for(key, Screen::Search),
+            Some(Action::Insert('\u{141}'))
+        );
+    }
+
+    /// Shift is how a capital letter arrives, not a chord, so it must keep
+    /// typing — "New York" needs both.
+    #[test]
+    fn a_shifted_letter_is_still_text_on_the_search_screen() {
+        let key = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        assert_eq!(action_for(key, Screen::Search), Some(Action::Insert('N')));
     }
 
     /// Plain `c` on the search screen is a letter, not a quit.

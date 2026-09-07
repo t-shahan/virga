@@ -131,8 +131,8 @@ jobs:
           \`$LAST\` shipped, and the commits below have not. A \`$BUMP\` bump puts
           the next release at **$NEXT**.
 
-          This branch renames CHANGELOG.md's \`## [Unreleased]\` heading to
-          \`## [$NEXT]\` and moves the link references. **The section is empty of
+          This branch opens an empty \`## [$NEXT]\` section in CHANGELOG.md under
+          \`## [Unreleased]\` and adds its link reference. **The section is empty of
           prose. Write it here.** The heading is deliberately undated;
           \`scripts/release.sh\` stamps the date when it runs.
 

@@ -21,6 +21,28 @@ refuse to publish a version this file does not describe.
   the next arrow is now left off that row; the inspector still carries the
   exact figure for the selected hour, and wider terminals are unchanged
   (#76).
+- A save that cannot take its lock, the state file's or the forecast
+  cache's, is refused rather than written anyway. Only a platform with no
+  advisory locks at all may save unserialized; an I/O error or a kernel
+  out of locks used to be waved through the same way, and two writers
+  could then race silently, which is the one thing the lock is for (#83).
+- A letter typed with Control or Alt held no longer lands in the city
+  search. Ctrl-U, Ctrl-W and Ctrl-A are the line-editing keys people reach
+  for by habit, and each inserted its bare letter instead. Those chords now
+  do nothing there. Ctrl-C still quits, Shift still types a capital, and
+  AltGr still types the accented and currency characters it reaches on
+  Windows, where the console reports it as Control and Alt together (#82).
+- `virga now --help` and `virga theme --help` print the help instead of
+  looking up a city or theme called `--help`. The first was a network
+  round trip that ended in "no city matched", which answered nothing the
+  user asked. Any other option after those commands is a usage error, as
+  it already was after `update` (#82).
+- A temperature just below zero no longer prints as `-0°`. Rounding a
+  reading in [-0.5, 0] gives negative zero, which Rust prints with its
+  sign, so -0.3 °C read `-0°C` and -18 °C read `-0°F`. In the app it was
+  an oddity; in `virga now`, whose output scripts parse, it was a string no
+  thermometer produces. Every temperature the app prints now rounds through
+  one helper that drops the sign (#81).
 
 ## [0.6.0] - 2026-09-07
 
