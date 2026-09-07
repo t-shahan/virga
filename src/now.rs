@@ -342,6 +342,7 @@ mod tests {
             },
             daily: Vec::new(),
             today_index: 0,
+            utc_offset_secs: None,
             hourly: Vec::new(),
             now_hour: 0,
             air_quality: None,
