@@ -218,10 +218,10 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Backspace => Some(Action::Backspace),
             // A letter under Control or Alt is a chord, not text: Ctrl-U,
             // Ctrl-W and Alt-anything are the line-editing keys people reach
-            // for by habit, and inserting a literal `u` or `w` for them is
-            // the one answer that is wrong in every terminal. Shift is not a
-            // chord — it is how a capital letter arrives.
-            KeyCode::Char(_) if key.modifiers.intersects(CHORD_MODIFIERS) => None,
+            // for by habit, and inserting a literal `u` or `w` for them
+            // helps nobody. Shift is not a chord — it is how a capital
+            // letter arrives — and neither, see `is_chord`, is AltGr.
+            KeyCode::Char(_) if is_chord(key.modifiers) => None,
             KeyCode::Char(c) => Some(Action::Insert(c)),
             KeyCode::Up => Some(Action::PrevResult),
             KeyCode::Down => Some(Action::NextResult),
@@ -230,8 +230,16 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
     }
 }
 
-/// The modifiers that turn a letter into a chord rather than text.
-const CHORD_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::ALT);
+/// Control or Alt alone makes a letter a chord. Both together are AltGr:
+/// the Windows console reports a third-level glyph — `ł`, `€`, `@` on a
+/// Polish or German layout — as left Control plus right Alt, and crossterm
+/// passes that on as `CONTROL | ALT` with the glyph already in the char.
+/// Refusing it would make "Łódź" untypeable on the one screen whose job is
+/// typing a city. A deliberate Ctrl-Alt-letter is nobody's line-editing
+/// habit, so typing it is the safe side to land on.
+fn is_chord(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL) != modifiers.contains(KeyModifiers::ALT)
+}
 
 /// `?` opens the reference only in `Hint` style — in `Full` style the bar
 /// already names everything, so there is nothing behind the card to open,
@@ -679,6 +687,22 @@ mod tests {
                     "{modifiers:?}+{c} was typed"
                 );
             }
+        }
+    }
+
+    /// The Windows console reports an AltGr glyph as Control plus Alt with
+    /// the translated character already in the event, so that pairing is
+    /// text, not a chord: the accented and currency characters of every
+    /// European layout arrive this way and nothing else can type them.
+    #[test]
+    fn an_altgr_glyph_is_still_text_on_the_search_screen() {
+        for c in ['\u{142}', '\u{20ac}', '@'] {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL | KeyModifiers::ALT);
+            assert_eq!(
+                action_for(key, Screen::Search),
+                Some(Action::Insert(c)),
+                "{c}"
+            );
         }
     }
 

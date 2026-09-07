@@ -26,7 +26,8 @@ pub(crate) enum Invocation {
     Theme(Option<String>),
     /// Check whether a newer release exists and say how to get it.
     Update,
-    /// A recognized command given arguments it does not take. Strict where
+    /// A recognized command given arguments, or an option, it does not
+    /// take. Strict where
     /// `--help --version` is lenient, because here the extra words could
     /// carry an intention — `update --install` asks for something this
     /// command will not do, and silently checking instead would be a lie.
@@ -94,9 +95,7 @@ where
     if let Some(first) = words.first()
         && first.starts_with('-')
     {
-        return Err(format!(
-            "{command} takes no options, and {first:?} looks like one"
-        ));
+        return Err(format!("{command} takes no options, and {first:?} is one"));
     }
     let joined = words.join(" ");
     Ok((!joined.is_empty()).then_some(joined))
