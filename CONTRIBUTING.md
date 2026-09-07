@@ -13,12 +13,12 @@ around `release.sh` that the README leaves out.
 
 1. Find the `release-notes` pull request that
    [`release-pr.yml`](.github/workflows/release-pr.yml) opens once a
-   `feat`, `fix`, `perf` or breaking change has landed since the last tag.
-   It opens an empty `## [X.Y.Z]` section under `## [Unreleased]` and
-   lists the commits since the last tag in its body. Write the notes into
-   the branch as a user would read them, then merge. A release with only
-   `docs` or `chore` commits gets no such pull request, so open the
-   section by hand.
+   `feat`, `fix`, `perf` or breaking change (a `!` after the type, or a
+   `BREAKING CHANGE:` footer) has landed since the last full release. It
+   opens an empty `## [X.Y.Z]` section under `## [Unreleased]` and lists
+   those commits in its body. Write the notes into the branch as a user
+   would read them, then merge. A release with only `docs` or `chore`
+   commits gets no such pull request, so open the section by hand.
 2. On an up-to-date `main` with a clean tree, run
    `./scripts/release.sh X.Y.Z`; the README's
    [Cutting a release](README.md#cutting-a-release) says what it does. It
@@ -30,8 +30,7 @@ around `release.sh` that the README leaves out.
 4. Confirm the release page lists all five archives and `SHA256SUMS`. For a
    full release with the `TAP_KEY` secret set, confirm too that a
    `virga X.Y.Z` commit landed on
-   [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga);
-   without the secret the run warns and skips the tap.
+   [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga).
 
 A prerelease (`X.Y.Z-rc1`) never touches the tap. It also borrows the final
 version's changelog section and currently stamps a date on it, which the
