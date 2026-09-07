@@ -398,11 +398,11 @@ fn full_tracks_render(
             {
                 let text = format!("{:.0}", unit.speed(speed));
                 let cells = text.chars().count() as u16;
-                // The next even hour's arrow sits two columns on, so the
-                // digits get the cells between: one per hour at the
-                // narrowest tier, which holds a single digit. A speed that
-                // does not fit is left off rather than clipped — `↑2↑` for
-                // 20 km/h told the reader the wind was 2.
+                // The next even hour's arrow sits two hour-columns on, so
+                // the digits get the cells between: one at the narrowest
+                // tier, which holds a single digit. A speed that does not
+                // fit is left off rather than clipped — `↑2↑` for 20 km/h
+                // told the reader the wind was 2.
                 let before_next_arrow = cells < 2 * window.cell_width;
                 let inside_plot = centre + 1 + cells <= plot.plot_x + plot.plot_width;
                 if before_next_arrow && inside_plot {
@@ -704,8 +704,8 @@ mod tests {
         }
     }
 
-    /// The wind row at `x` across the plot's twelve one-cell columns, as
-    /// the narrow full layout draws it.
+    /// The wind row across the plot's twelve one-cell columns, as the
+    /// narrow full layout draws it.
     fn narrow_wind_row(wind_kph: f64) -> Vec<String> {
         let mut weather = Weather::fixture(22, 14);
         for hour in weather.hourly.iter_mut() {
@@ -735,18 +735,10 @@ mod tests {
     #[test]
     fn a_narrow_full_layout_never_draws_a_truncated_wind_speed() {
         let row = narrow_wind_row(20.0);
-        let digits: Vec<&String> = row
-            .iter()
-            .filter(|cell| cell.chars().all(|c| c.is_ascii_digit()) && !cell.is_empty())
+        let expected: Vec<String> = (0..12)
+            .map(|x| if x % 2 == 0 { "\u{2191}" } else { " " }.to_string())
             .collect();
-        assert!(
-            digits.is_empty(),
-            "a two-digit speed was drawn into one cell: {row:?}"
-        );
-        assert!(
-            row.iter().any(|cell| cell == "\u{2191}"),
-            "the arrows still draw: {row:?}"
-        );
+        assert_eq!(row, expected, "a two-digit speed was drawn into one cell");
     }
 
     /// The same layout still labels a speed that does fit, or the narrow
@@ -840,6 +832,24 @@ mod tests {
         );
         assert_eq!(buffer[(13, FULL_WIND_Y)].symbol(), "2", "tick speed digits");
         assert_eq!(buffer[(14, FULL_WIND_Y)].symbol(), "0", "tick speed digits");
+
+        // Two cells per hour leaves three before the next arrow, so a
+        // three-digit gale still labels its tick; a rule that allowed only
+        // one cell per hour-column would drop it.
+        for hour in weather.hourly.iter_mut() {
+            hour.wind_kph = Some(100.0);
+        }
+        let gale = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
+        let digits: String = (13..16).map(|x| gale[(x, FULL_WIND_Y)].symbol()).collect();
+        assert_eq!(
+            digits, "100",
+            "a three-digit speed fits at two cells per hour"
+        );
+        assert_eq!(
+            gale[(16, FULL_WIND_Y)].symbol(),
+            "↑",
+            "and stops short of the next arrow"
+        );
 
         let beside = rendered_buffer_in(&weather, 80, FULL_ROWS, 1, palette, Unit::Metric);
         assert_eq!(
