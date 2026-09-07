@@ -218,11 +218,35 @@ mod tests {
         rows.iter().filter(|row| row.contains('°'))
     }
 
-    /// Widths past every tier only add margin; they still have to render.
+    /// Widths past every tier only add margin: the full tier's last column
+    /// and the emoji are still there.
     #[test]
     fn renders_at_generous_widths() {
         for width in [100, 200] {
-            assert!(!rendered_rows(width, 14).is_empty());
+            let rows = rendered_rows(width, 14);
+            assert!(rows[1].contains("sunset"), "{:?}", rows[1]);
+            for row in data_rows(&rows) {
+                assert!(row.contains(emoji(0)), "width {width}: {row:?}");
+            }
+        }
+    }
+
+    /// Every tier constant counts the emoji as two cells, and a glyph that
+    /// measured wider would be dropped whole again with every other test
+    /// green, since the fixture only ever shows a clear sky. So every code
+    /// the table can receive, known or not, is rendered and measured.
+    #[test]
+    fn every_condition_emoji_is_two_cells_wide() {
+        for code in 0..=u8::MAX {
+            let glyph = emoji(code);
+            let mut t = Terminal::new(TestBackend::new(6, 1)).unwrap();
+            t.draw(|f| f.render_widget(Paragraph::new(format!("{glyph}x")), f.area()))
+                .unwrap();
+            assert_eq!(
+                t.backend().buffer()[(2, 0)].symbol(),
+                "x",
+                "code {code}: {glyph:?} is not two cells wide"
+            );
         }
     }
 
