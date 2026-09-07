@@ -6,7 +6,22 @@ description = "A responsive terminal weather app with an adaptive hourly weather
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/t-shahan/virga"
 readme = "README.md"
-exclude = ["docs/superpowers/"]
+# An allow-list rather than an `exclude`, because an exclude list drifts: the
+# old one named `docs/superpowers/` and nothing else, so the crate shipped the
+# agent config, the workflows, the install script and the release scripts,
+# none of which build anything. A new top-level directory now stays out of
+# the tarball until someone says otherwise. The fixtures are here because
+# the tests `include_str!` them, and `cargo package` builds the tests.
+include = [
+    "src/",
+    "tests/fixtures/",
+    "Cargo.toml",
+    "Cargo.lock",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+]
 # Not the edition floor of 1.85: ratatui 0.30.2 and ratatui-core 0.1.2 both
 # declare 1.88.0, and a dependency graph's minimum is not the same thing as
 # edition support. 1.89 is this crate's own ask: `File::lock`, which
