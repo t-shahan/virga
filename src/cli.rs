@@ -111,6 +111,8 @@ Environment:
   VIRGA_UNITS   `metric` or `imperial`, for `now` and the app's first frame
   VIRGA_GEOIP   Set to `off` to skip the IP location lookup
   VIRGA_UPDATE  Set to `off` to skip the startup release check
+  VIRGA_CACHE   Set to `off` to keep the last forecast off disk and open on
+                a spinner instead of it
 
 Weather, air quality and geocoding come from Open-Meteo. No account or API key
 is required. <{repository}>",

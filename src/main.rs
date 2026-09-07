@@ -1,5 +1,6 @@
 use crate::app::{
-    ActiveLocation, App, Fetch, HourlyView, LocationSource, Remembered, Screen, Startup,
+    ActiveLocation, App, CachedWeather, Fetch, HourlyView, KeyHintStyle, LocationSource,
+    Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
 use crate::events::{Message, Request};
@@ -10,12 +11,13 @@ use ratatui::backend::{Backend, ClearType};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
 use ratatui::{DefaultTerminal, Terminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 mod app;
+mod cache;
 mod cli;
 mod events;
 mod input;
@@ -171,32 +173,53 @@ fn main() -> Result<()> {
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
+    let (caching, warning) = caching_enabled(std::env::var("VIRGA_CACHE").ok().as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
 
-    let (startup, state_path, persisted_theme) = match state::path() {
-        Ok(path) => {
-            let (persisted, warning) = load_persisted(&path);
-            if let Some(warning) = warning {
-                eprintln!("{warning}");
+    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style) =
+        match state::path() {
+            Ok(path) => {
+                let (persisted, warning) = load_persisted(&path);
+                if let Some(warning) = warning {
+                    eprintln!("{warning}");
+                }
+                let cache_path = caching.then(|| cache::path_beside(&path));
+                let mut startup = startup_location(persisted.remembered, detect);
+                // Only a remembered place has a forecast worth opening on; the
+                // fallback city is nobody's, and a detection may land anywhere.
+                if let Some(cache_path) = &cache_path
+                    && startup.source != LocationSource::Fallback
+                {
+                    let (cached, warning) = load_cached(cache_path, &startup.location);
+                    if let Some(warning) = warning {
+                        eprintln!("{warning}");
+                    }
+                    startup.cached = cached;
+                }
+                (
+                    startup,
+                    Some(path),
+                    cache_path,
+                    persisted.theme,
+                    persisted.key_hint_style,
+                )
             }
-            (
-                startup_location(persisted.remembered, detect),
-                Some(path),
-                persisted.theme,
-            )
-        }
-        // Nowhere to remember a location is not a reason to stop working out
-        // where the user is: the two are unrelated, and a user with no writable
-        // state directory still deserves their own city.
-        Err(error) => {
-            eprintln!("virga: could not determine where to remember location: {error:#}");
-            (startup_location(None, detect), None, None)
-        }
-    };
+            // Nowhere to remember a location is not a reason to stop working out
+            // where the user is: the two are unrelated, and a user with no writable
+            // state directory still deserves their own city.
+            Err(error) => {
+                eprintln!("virga: could not determine where to remember location: {error:#}");
+                (startup_location(None, detect), None, None, None, None)
+            }
+        };
 
     let theme = startup_theme(
         std::env::var("VIRGA_THEME").ok().as_deref(),
         persisted_theme,
     );
+    let key_hint_style = persisted_key_hint_style.unwrap_or_default();
     let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
     if let Some(warning) = warning {
         eprintln!("{warning}");
@@ -216,8 +239,10 @@ fn main() -> Result<()> {
             theme,
             unit,
             color_depth,
+            key_hint_style,
         },
         state_path.as_deref(),
+        cache_path,
         check_updates,
         &mut warning,
         &mut notice,
@@ -250,6 +275,21 @@ fn load_persisted(path: &Path) -> (state::Persisted, Option<String>) {
     }
 }
 
+/// Read the forecast cache, folding every complaint into one warning, the
+/// way `load_persisted` does: a cache that cannot be read costs a spinner,
+/// never a launch.
+fn load_cached(path: &Path, location: &ActiveLocation) -> (Option<CachedWeather>, Option<String>) {
+    match cache::load(path, location, chrono::Local::now()) {
+        Ok(cached) => (cached, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "virga: could not read the last forecast: {error:#}"
+            )),
+        ),
+    }
+}
+
 /// How the app should open, given what was remembered and whether detection
 /// is allowed to run.
 ///
@@ -266,17 +306,20 @@ fn startup_location(remembered: Option<Remembered>, detect: bool) -> Startup {
             location,
             source: LocationSource::Chosen,
             detect: false,
+            cached: None,
         },
         // Yesterday's detection is this launch's answer only if today's fails.
         Some(Remembered { location, source }) => Startup {
             location,
             source,
             detect,
+            cached: None,
         },
         None => Startup {
             location: ActiveLocation::default(),
             source: LocationSource::Fallback,
             detect,
+            cached: None,
         },
     }
 }
@@ -309,6 +352,25 @@ fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
             true,
             Some(format!(
                 "virga: VIRGA_GEOIP={value:?} is not on or off; leaving location detection on."
+            )),
+        ),
+    }
+}
+
+/// Whether the last forecast is kept on disk and opened on, given whatever
+/// `VIRGA_CACHE` was set to. The same grammar and the same forgiveness as
+/// the other two switches.
+fn caching_enabled(requested: Option<&str>) -> (bool, Option<String>) {
+    let Some(value) = requested else {
+        return (true, None);
+    };
+
+    match switch(value) {
+        Some(enabled) => (enabled, None),
+        None => (
+            true,
+            Some(format!(
+                "virga: VIRGA_CACHE={value:?} is not on or off; leaving the forecast cache on."
             )),
         ),
     }
@@ -349,6 +411,18 @@ fn accept_message(
     // A message either keeps something or complains about something; it cannot
     // do both, so there is no ordering to get wrong here.
     (outcome.request, outcome.warning.or(save_warning))
+}
+
+/// Write a `,` press down the moment it happens, the same way a chosen
+/// location is. Turns a write failure into a warning rather than letting it
+/// interrupt the loop — the style still took effect for the session either
+/// way, so a full state directory should not stop the app from responding to
+/// the key that just changed it.
+fn persist_key_hint_style(state_path: Option<&Path>, style: KeyHintStyle) -> Option<String> {
+    let path = state_path?;
+    state::save_key_hint_style(path, style)
+        .err()
+        .map(|error| format!("virga: could not save the key hint style: {error:#}"))
 }
 
 fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
@@ -490,7 +564,7 @@ fn check_for_update() -> Result<String> {
     let current = update::Release::parse(env!("CARGO_PKG_VERSION"))
         .context("parse this binary's own version")?;
     let latest = update::Release::parse(&update::latest_tag(update::RELEASES_URL)?)?;
-    let exe = std::env::current_exe().ok();
+    let exe = update::running_binary();
     let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
     let method = update::install_method(exe.as_deref(), home.as_deref(), cfg!(windows));
     Ok(update::report(&current, &latest, &method))
@@ -585,6 +659,7 @@ struct Opening {
     theme: Theme,
     unit: Unit,
     color_depth: ColorDepth,
+    key_hint_style: KeyHintStyle,
 }
 
 impl Opening {
@@ -593,6 +668,7 @@ impl Opening {
         app.theme = self.theme;
         app.unit = self.unit;
         app.color_depth = self.color_depth;
+        app.key_hint_style = self.key_hint_style;
         app
     }
 }
@@ -601,6 +677,7 @@ fn run(
     mut terminal: DefaultTerminal,
     opening: Opening,
     state_path: Option<&Path>,
+    cache_path: Option<PathBuf>,
     check_updates: bool,
     warning: &mut Option<String>,
     notice: &mut Option<String>,
@@ -621,7 +698,8 @@ fn run(
             update::notice(&current, &latest)
         });
     }
-    events::spawn_worker(request_rx, message_tx);
+    events::spawn_worker(request_rx, message_tx, cache_path);
+    let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
@@ -695,6 +773,7 @@ fn run(
         // message arrives, so an idle app costs no CPU instead of ten frames a
         // second.
         let animating = matches!(app.weather, Fetch::Loading)
+            || app.is_refreshing()
             || matches!(app.results, Fetch::Loading)
             || matches!(app.screen, Screen::Search);
 
@@ -721,11 +800,20 @@ fn run(
                 Event::Key(key) => {
                     // Keys that mean nothing on this screen — and every key
                     // release — leave no mark, so they do not even cost a redraw.
-                    if let Some(action) = input::action_for(key, app.screen) {
+                    let key = held_keys.observe(key);
+                    if let Some(action) =
+                        input::action_for(key, app.screen, app.key_hint_style, app.help_visible)
+                    {
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {
                             dispatch(&request_tx, &mut app, request)?;
+                        }
+                        if let Some(style) = app.take_key_hint_style_save() {
+                            retain_first_warning(
+                                warning,
+                                persist_key_hint_style(state_path, style),
+                            );
                         }
                         if app.should_quit {
                             // A message already in the queue — above all the
@@ -899,16 +987,19 @@ mod tests {
                 location: ActiveLocation::default(),
                 source: LocationSource::Fallback,
                 detect: false,
+                cached: None,
             },
             theme: Theme::Nord,
             unit: Unit::Metric,
             color_depth: crate::theme::ColorDepth::Ansi256,
+            key_hint_style: KeyHintStyle::Full,
         }
         .into_app();
 
         assert_eq!(app.theme, Theme::Nord);
         assert_eq!(app.unit, Unit::Metric);
         assert_eq!(app.color_depth, crate::theme::ColorDepth::Ansi256);
+        assert_eq!(app.key_hint_style, KeyHintStyle::Full);
     }
 
     /// The clean-repaint trigger: composition moves when the screen or the
@@ -1106,6 +1197,17 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_switch_reads_like_the_others() {
+        assert_eq!(caching_enabled(None), (true, None));
+        assert_eq!(caching_enabled(Some("off")), (false, None));
+        assert_eq!(caching_enabled(Some("ON")), (true, None));
+
+        let (enabled, warning) = caching_enabled(Some("maybe"));
+        assert!(enabled);
+        assert!(warning.unwrap().contains("VIRGA_CACHE"));
+    }
+
+    #[test]
     fn an_unusable_update_value_warns_and_leaves_the_check_on() {
         let (enabled, warning) = checks_enabled(Some("maybe"));
 
@@ -1149,6 +1251,7 @@ mod tests {
             location: ActiveLocation::default(),
             source: LocationSource::Fallback,
             detect: true,
+            cached: None,
         });
         let Request::Detect { id } = app.startup_request() else {
             panic!("a first run must detect")
@@ -1189,6 +1292,7 @@ mod tests {
             location: ActiveLocation::default(),
             source: LocationSource::Fallback,
             detect: false,
+            cached: None,
         });
         let message = loaded(app.startup_request());
 
@@ -1209,6 +1313,29 @@ mod tests {
 
         assert!(warning.contains("could not remember location"));
         assert!(warning.contains("create"));
+    }
+
+    #[test]
+    fn a_toggled_key_hint_style_is_persisted() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+
+        assert_eq!(
+            persist_key_hint_style(Some(&path), KeyHintStyle::Full),
+            None
+        );
+        assert_eq!(
+            state::load_from(&path).unwrap().key_hint_style,
+            Some(KeyHintStyle::Full)
+        );
+    }
+
+    /// Nowhere to write is not a reason to stop responding to the key that
+    /// changed the style — it still took effect for the session, and there is
+    /// simply nothing to persist it to.
+    #[test]
+    fn without_a_state_path_the_toggle_is_a_silent_no_op() {
+        assert_eq!(persist_key_hint_style(None, KeyHintStyle::Full), None);
     }
 
     #[test]
