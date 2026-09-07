@@ -15,16 +15,30 @@ pub(super) enum PrecipitationAggregate {
     Measured(f64),
 }
 
-pub(super) fn aggregate(hours: &[HourlyForecast], unit: Unit) -> PrecipitationAggregate {
-    if hours.is_empty() {
+/// Any run of hours, not only a slice: the week strip's days are sparse
+/// arrays, and a total over them is the same claim with the same rule.
+pub(super) fn aggregate<'a>(
+    hours: impl IntoIterator<Item = &'a HourlyForecast>,
+    unit: Unit,
+) -> PrecipitationAggregate {
+    let mut seen = false;
+    let mut total_mm = 0.0;
+    for hour in hours {
+        seen = true;
+        match hour.precip_mm {
+            Some(amount) => total_mm += amount,
+            None => return PrecipitationAggregate::Unavailable,
+        }
+    }
+    if !seen {
         return PrecipitationAggregate::Unavailable;
     }
+    classify(total_mm, unit)
+}
 
-    let Some(total_mm) = hours.iter().try_fold(0.0, |total, hour| {
-        hour.precip_mm.map(|amount| total + amount)
-    }) else {
-        return PrecipitationAggregate::Unavailable;
-    };
+/// The trace rule, stated once: a positive amount that rounds to zero at the
+/// display precision is small, not zero, and must never print as `0.00 in`.
+fn classify(total_mm: f64, unit: Unit) -> PrecipitationAggregate {
     if total_mm <= 0.0 {
         return PrecipitationAggregate::Zero;
     }
@@ -36,6 +50,15 @@ pub(super) fn aggregate(hours: &[HourlyForecast], unit: Unit) -> PrecipitationAg
     } else {
         PrecipitationAggregate::Measured(value)
     }
+}
+
+/// One positive reading at the unit's precision, under the same trace rule
+/// as a total. Every pane that prints an amount goes through here; the four
+/// copies of the quantum arithmetic this replaced agreed only by luck.
+pub(super) fn measured(mm: f64, unit: Unit) -> String {
+    classify(mm, unit)
+        .positive_text(unit, " ")
+        .unwrap_or_else(|| format!("0 {}", unit.precip_label()))
 }
 
 impl PrecipitationAggregate {
