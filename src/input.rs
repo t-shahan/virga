@@ -696,14 +696,22 @@ mod tests {
     /// European layout arrive this way and nothing else can type them.
     #[test]
     fn an_altgr_glyph_is_still_text_on_the_search_screen() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
         for c in ['\u{142}', '\u{20ac}', '@'] {
-            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL | KeyModifiers::ALT);
+            let key = KeyEvent::new(KeyCode::Char(c), altgr);
             assert_eq!(
                 action_for(key, Screen::Search),
                 Some(Action::Insert(c)),
                 "{c}"
             );
         }
+        // The capital in "Łódź" is AltGr with Shift held, which the console
+        // reports as all three; an equality test on the pair would drop it.
+        let key = KeyEvent::new(KeyCode::Char('\u{141}'), altgr | KeyModifiers::SHIFT);
+        assert_eq!(
+            action_for(key, Screen::Search),
+            Some(Action::Insert('\u{141}'))
+        );
     }
 
     /// Shift is how a capital letter arrives, not a chord, so it must keep
