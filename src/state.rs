@@ -237,12 +237,12 @@ pub(crate) fn exclusive(path: &Path) -> Result<std::fs::File> {
 /// Which lock failures a save may proceed past.
 ///
 /// Only `Unsupported`: a platform without advisory locks would otherwise
-/// never save at all, and an unserialized save beats none. Every other
-/// failure — an I/O error, no locks left in the kernel table, a permission
-/// refused — leaves the lock unheld while the save goes ahead, and two
-/// writers racing silently is exactly what the lock exists to prevent.
-/// This guards the forecast cache as well as the state file, since both
-/// take their lock here.
+/// never save at all, and an unserialized save beats none. Tolerating any
+/// other failure — an I/O error, no locks left in the kernel table — would
+/// leave the lock unheld while the save went ahead, and two writers racing
+/// silently is exactly what the lock exists to prevent. This guards the
+/// forecast cache as well as the state file, since both take their lock
+/// here.
 fn tolerate_unsupported(locked: std::io::Result<()>) -> std::io::Result<()> {
     match locked {
         Err(error) if error.kind() == std::io::ErrorKind::Unsupported => Ok(()),
