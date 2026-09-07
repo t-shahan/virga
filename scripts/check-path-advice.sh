@@ -12,8 +12,16 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-eval "$(sed -n '/^path_advice() {/,/^}/p' install.sh)"
-command -v path_advice >/dev/null || { echo "path_advice not found in install.sh" >&2; exit 1; }
+# The range must end at the function's own brace. Were the brace indented
+# away, sed would run to the end of the file and the eval would execute the
+# installer itself, so the extraction is checked before anything runs.
+extracted=$(sed -n '/^path_advice() {/,/^}/p' install.sh)
+case "$extracted" in
+    path_advice*'
+}') ;;
+    *) echo "could not lift path_advice out of install.sh by its braces" >&2; exit 1 ;;
+esac
+eval "$extracted"
 
 # A space in the directory is the case that catches an unquoted arm. Read by
 # the function `eval` brought in, which shellcheck cannot see.
