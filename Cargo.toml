@@ -10,11 +10,14 @@ readme = "README.md"
 # old one named `docs/superpowers/` and nothing else, so the crate shipped the
 # agent config, the workflows, the install script and the release scripts,
 # none of which build anything. A new top-level directory now stays out of
-# the tarball until someone says otherwise. The fixtures are here because
-# the tests `include_str!` them, and `cargo package` builds the tests.
+# the tarball until someone says otherwise. `tests/` is here because the
+# unit tests `include_str!` the fixtures; `cargo package` verifies only a
+# plain build, so nothing would notice them missing until someone ran
+# `cargo test` on the published source. `Cargo.lock` ships regardless of
+# this list and is named for the reader, not for Cargo.
 include = [
     "src/",
-    "tests/fixtures/",
+    "tests/",
     "Cargo.toml",
     "Cargo.lock",
     "CHANGELOG.md",

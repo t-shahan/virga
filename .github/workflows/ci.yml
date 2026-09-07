@@ -80,8 +80,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Verifies the crate builds from its own packaged contents, which is how
-      # a missing fixture or an untracked file gets caught before a release
-      # rather than after one.
+      # an untracked source file gets caught before a release rather than
+      # after one. Not a missing fixture: the verify step is a plain build,
+      # and the fixtures are read only under `cfg(test)`.
       - run: cargo package --locked
       - name: The package must carry both licences and nothing that is not the crate
         # The manifest's `include` list is an allow-list, so a new top-level
