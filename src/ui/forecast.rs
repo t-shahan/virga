@@ -145,7 +145,10 @@ const _: () = assert!(TABLE_MINIMAL < TABLE_COMPACT);
 const _: () = assert!(TABLE_COMPACT < TABLE_FULL);
 
 /// Rendered width of the table at each level of detail, emoji included.
-const TABLE_MINIMAL: u16 = 26;
+/// The minimal row is 22 cells of text, three of padding and a two-cell
+/// emoji; it was declared at 26 for a long while and the emoji was clipped
+/// at every width that tier covers, which is where a glyph matters most.
+const TABLE_MINIMAL: u16 = 27;
 const TABLE_COMPACT: u16 = 42;
 pub(super) const TABLE_FULL: u16 = 68;
 
@@ -197,6 +200,65 @@ mod tests {
             t.draw(|f| forecast_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
                 .unwrap();
         }
+    }
+
+    /// The table as text at a given inner width, border excluded, so a tier
+    /// can be rendered at exactly the width that selects it.
+    fn rows_at_inner_width(inner: u16) -> Vec<String> {
+        let w = Weather::fixture(22, 14);
+        let width = inner + 2;
+        let mut t = Terminal::new(TestBackend::new(width, 14)).unwrap();
+        t.draw(|f| forecast_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
+            .unwrap();
+
+        let buf = t.backend().buffer();
+        (0..14)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// The issue: the minimal tier was declared one cell narrower than its
+    /// rows, so the emoji ending every row was clipped at every width the
+    /// tier covers and first appeared at the compact tier. Narrow terminals
+    /// are where a glyph carries the most per cell, so each tier is checked
+    /// at exactly its own width for every column it promises, not merely
+    /// for surviving the render.
+    #[test]
+    fn every_detail_level_shows_every_column_it_promises_at_its_own_width() {
+        let clear_sky = emoji(0);
+        for (inner, promised) in [
+            (TABLE_MINIMAL, &["day", "high", "low"][..]),
+            (TABLE_COMPACT, &["day", "high", "low", "rain", "wind"][..]),
+            (
+                TABLE_FULL,
+                &[
+                    "day", "high", "low", "rain", "wind", "uv", "sunrise", "sunset",
+                ][..],
+            ),
+        ] {
+            let rows = rows_at_inner_width(inner);
+            let header = &rows[1];
+            for column in promised {
+                assert!(
+                    header.contains(column),
+                    "no {column} column at inner width {inner}: {header:?}"
+                );
+            }
+            let with_emoji = rows.iter().filter(|row| row.contains(clear_sky)).count();
+            assert!(
+                with_emoji >= 7,
+                "the condition emoji is clipped at inner width {inner}: {rows:#?}"
+            );
+        }
+    }
+
+    /// One cell below a tier the table falls to the tier beneath, whole,
+    /// rather than clipping the wider one.
+    #[test]
+    fn one_cell_short_of_a_tier_falls_back_to_the_tier_beneath() {
+        let rows = rows_at_inner_width(TABLE_COMPACT - 1);
+        assert!(!rows[1].contains("rain"), "{:?}", rows[1]);
+        assert!(rows.iter().any(|row| row.contains(emoji(0))), "{rows:#?}");
     }
 
     /// Renders the table and returns its rows as plain text, which is what a
