@@ -12,6 +12,16 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The classic hourly view and the week strip no longer report a window the
+  provider did not fully answer as a dry one. The "24 h total" and "wet
+  hours" rows summed whatever hours had a reading and called the rest
+  dry, so a dropped precipitation series read as "none expected" and
+  "0 of 24"; the strip's daily totals did the same with a dash. All three
+  now say the total is unavailable, the way the weathergram's inspector
+  already did.
+
 ### Changed
 
 - The Homebrew tap is now

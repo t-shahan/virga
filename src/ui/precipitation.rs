@@ -15,16 +15,24 @@ pub(super) enum PrecipitationAggregate {
     Measured(f64),
 }
 
-pub(super) fn aggregate(hours: &[HourlyForecast], unit: Unit) -> PrecipitationAggregate {
-    if hours.is_empty() {
+/// Any run of hours, not only a slice: the week strip's days are sparse
+/// arrays, and a total over them is the same claim with the same rule.
+pub(super) fn aggregate<'a>(
+    hours: impl IntoIterator<Item = &'a HourlyForecast>,
+    unit: Unit,
+) -> PrecipitationAggregate {
+    let mut seen = false;
+    let mut total_mm = 0.0;
+    for hour in hours {
+        seen = true;
+        match hour.precip_mm {
+            Some(amount) => total_mm += amount,
+            None => return PrecipitationAggregate::Unavailable,
+        }
+    }
+    if !seen {
         return PrecipitationAggregate::Unavailable;
     }
-
-    let Some(total_mm) = hours.iter().try_fold(0.0, |total, hour| {
-        hour.precip_mm.map(|amount| total + amount)
-    }) else {
-        return PrecipitationAggregate::Unavailable;
-    };
     if total_mm <= 0.0 {
         return PrecipitationAggregate::Zero;
     }
