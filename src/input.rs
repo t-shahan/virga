@@ -216,6 +216,12 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Esc => Some(Action::Back),
             KeyCode::Enter => Some(Action::Submit),
             KeyCode::Backspace => Some(Action::Backspace),
+            // A letter under Control or Alt is a chord, not text: Ctrl-U,
+            // Ctrl-W and Alt-anything are the line-editing keys people reach
+            // for by habit, and inserting a literal `u` or `w` for them is
+            // the one answer that is wrong in every terminal. Shift is not a
+            // chord — it is how a capital letter arrives.
+            KeyCode::Char(_) if key.modifiers.intersects(CHORD_MODIFIERS) => None,
             KeyCode::Char(c) => Some(Action::Insert(c)),
             KeyCode::Up => Some(Action::PrevResult),
             KeyCode::Down => Some(Action::NextResult),
@@ -223,6 +229,9 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
         },
     }
 }
+
+/// The modifiers that turn a letter into a chord rather than text.
+const CHORD_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::ALT);
 
 /// `?` opens the reference only in `Hint` style — in `Full` style the bar
 /// already names everything, so there is nothing behind the card to open,
@@ -649,6 +658,36 @@ mod tests {
                 "{extra:?}"
             );
         }
+    }
+
+    /// Ctrl-U, Ctrl-W, Ctrl-A and Alt-anything are line-editing chords by
+    /// habit. Typing the bare letter for them is wrong in every terminal, so
+    /// they mean nothing here until they mean something.
+    #[test]
+    fn control_and_alt_letters_are_not_typed_into_the_search() {
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ] {
+            for c in ['u', 'w', 'a', 'x'] {
+                let key = KeyEvent::new(KeyCode::Char(c), modifiers);
+                assert_eq!(
+                    action_for(key, Screen::Search),
+                    None,
+                    "{modifiers:?}+{c} was typed"
+                );
+            }
+        }
+    }
+
+    /// Shift is how a capital letter arrives, not a chord, so it must keep
+    /// typing — "New York" needs both.
+    #[test]
+    fn a_shifted_letter_is_still_text_on_the_search_screen() {
+        let key = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        assert_eq!(action_for(key, Screen::Search), Some(Action::Insert('N')));
     }
 
     /// Plain `c` on the search screen is a letter, not a quit.

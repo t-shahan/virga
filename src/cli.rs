@@ -59,19 +59,9 @@ where
     match argument.as_ref() {
         "-V" | "--version" | "version" => Invocation::Version,
         "-h" | "--help" | "help" => Invocation::Help,
-        "now" => {
-            let city = arguments
-                .map(|argument| argument.as_ref().to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Invocation::Now((!city.is_empty()).then_some(city))
-        }
+        "now" => rest_of_line("now", arguments).map_or_else(Invocation::Usage, Invocation::Now),
         "theme" => {
-            let name = arguments
-                .map(|argument| argument.as_ref().to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Invocation::Theme((!name.is_empty()).then_some(name))
+            rest_of_line("theme", arguments).map_or_else(Invocation::Usage, Invocation::Theme)
         }
         "update" => match arguments.next() {
             None => Invocation::Update,
@@ -82,6 +72,34 @@ where
         },
         other => Invocation::Unknown(other.to_string()),
     }
+}
+
+/// Everything after `command`, joined with spaces so a multi-word city or
+/// theme needs no quoting; `None` when there is nothing after it.
+///
+/// A first word beginning with `-` is refused rather than joined. `virga now
+/// --help` is a question about the command, not a city called "--help", and
+/// answering it with a network geocode that fails "no city matched" tells
+/// the user nothing about what they asked. A later word may still begin
+/// with a dash: nothing here is an option, so it is part of the name.
+fn rest_of_line<I, S>(command: &str, arguments: I) -> Result<Option<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let words: Vec<String> = arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect();
+    if let Some(first) = words.first()
+        && first.starts_with('-')
+    {
+        return Err(format!(
+            "{command} takes no options, and {first:?} looks like one"
+        ));
+    }
+    let joined = words.join(" ");
+    Ok((!joined.is_empty()).then_some(joined))
 }
 
 /// The `--help` text, also reused as the usage line under an argument error.
@@ -219,6 +237,32 @@ mod tests {
             panic!("extra arguments after update were not a usage error");
         };
         assert!(complaint.contains("--install"));
+    }
+
+    /// `virga now --help` used to geocode the string "--help" and fail with
+    /// "no city matched", which answers nothing the user asked. A leading
+    /// dash is a question about the command, and the usage text is the
+    /// answer.
+    #[test]
+    fn an_option_after_now_or_theme_is_a_usage_error_not_a_name() {
+        for command in ["now", "theme"] {
+            for option in ["--help", "-h", "--version"] {
+                let Invocation::Usage(complaint) = parse_args([command, option]) else {
+                    panic!("{command} {option} was not a usage error");
+                };
+                assert!(complaint.contains(option), "{complaint}");
+            }
+        }
+    }
+
+    /// Only the first word decides: a dash later in the line is part of the
+    /// name, since nothing after `now` or `theme` is an option.
+    #[test]
+    fn a_dash_inside_a_name_is_still_the_name() {
+        assert_eq!(
+            parse_args(["now", "winston", "-", "salem"]),
+            Invocation::Now(Some("winston - salem".to_string()))
+        );
     }
 
     #[test]
