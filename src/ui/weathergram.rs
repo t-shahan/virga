@@ -178,8 +178,8 @@ fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
         |(low, high)| {
             format!(
                 "{:.0}–{:.0}{}",
-                unit.temp(low),
-                unit.temp(high),
+                unit.temp_rounded(low),
+                unit.temp_rounded(high),
                 unit.temp_symbol()
             )
         },
