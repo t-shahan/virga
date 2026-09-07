@@ -16,7 +16,7 @@ use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::pane::{bottom_titles, day_and_hour, long_hour};
 use crate::ui::precip_week;
 use crate::ui::precipitation::{PrecipitationAggregate, aggregate, measured};
-use crate::ui::{TITLE_GUTTER, UNKNOWN, title_room, truncate};
+use crate::ui::{TITLE_GUTTER, UNKNOWN, status_mark, title_room, truncate};
 use crate::units::Unit;
 use crate::weather::code::description;
 use crate::weather::model::HourlyForecast;
@@ -99,7 +99,16 @@ pub(super) fn inspector_render(
     let upcoming = next_precipitation(hours);
 
     let (city, condition) = top_titles(&app.location.label, &condition, area.width);
-    let (upcoming, when) = bottom_titles(&upcoming, &when, area.width);
+    // As on the daily pane, the mark takes the left corner while there is
+    // one: a cached or unrefreshed forecast is never shown unlabelled on
+    // either hourly view, and a failure that fits nowhere else takes the
+    // hour's corner too.
+    let mark = status_mark(app, palette, area.width, &when);
+    let (upcoming, when) = match &mark {
+        Some(mark) if mark.alone => (Some(mark.text.clone()), String::new()),
+        Some(mark) => bottom_titles(&mark.text, &when, area.width),
+        None => bottom_titles(&upcoming, &when, area.width),
+    };
 
     // Titles replace border cells, so a literal space is the only reliable
     // inset across terminal emulators and box-drawing fonts.
@@ -129,12 +138,13 @@ pub(super) fn inspector_render(
         // and the weight rather than the one reserved for labels. It was muted
         // to begin with and read as chrome — the eye went straight past the one
         // line on the screen that answers "do I need a coat".
-        block = block.title_bottom(
-            Line::from(format!(" {upcoming}"))
+        let line = match mark {
+            Some(mark) => Line::from(format!(" {upcoming}")).fg(mark.color),
+            None => Line::from(format!(" {upcoming}"))
                 .bold()
-                .fg(palette.selection)
-                .left_aligned(),
-        );
+                .fg(palette.selection),
+        };
+        block = block.title_bottom(line.left_aligned());
     }
 
     let inner = block.inner(area);

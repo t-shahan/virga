@@ -72,6 +72,9 @@ The weathergram is the default; the choice lasts for the session.
   the current forecast, so today does not sit alone.
 - **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
   an adaptive horizon, and an optional weekly precipitation strip.
+- **Opens on the last forecast** — the forecast from your previous launch is
+  on screen before the network answers, marked with its age until the fresh
+  one replaces it in place.
 - **Fast navigation** — browse days or hours with the arrow keys, jump back to
   now, and inspect the selected period in detail.
 - **Starts where you are** — the opening forecast is for the city your IP
@@ -178,15 +181,16 @@ ever replaces the binary itself:
 Uninstalling from source takes the *package* name, `virga-tui`, not the binary
 name.
 
-Removing the binary leaves the one file Virga writes, a `state.json` holding
-the last location you chose and, if you set one, your startup theme. It lives
-in the platform's per-user state directory:
+Removing the binary leaves the two files Virga writes: a `state.json` holding
+the last location you chose and, if you set one, your startup theme, and a
+`forecast.json` holding the last forecast it fetched. Both live in the
+platform's per-user state directory:
 
-| Platform | Path |
+| Platform | Directory |
 |---|---|
-| macOS | `~/Library/Application Support/com.t-shahan.virga/state.json` |
-| Linux | `~/.local/state/virga/state.json` |
-| Windows | `%LOCALAPPDATA%\t-shahan\virga\data\state.json` |
+| macOS | `~/Library/Application Support/com.t-shahan.virga/` |
+| Linux | `~/.local/state/virga/` |
+| Windows | `%LOCALAPPDATA%\t-shahan\virga\data\` |
 
 [releases]: https://github.com/t-shahan/virga/releases/latest
 
@@ -391,11 +395,30 @@ VIRGA_GEOIP=off virga
 Startup is then the last location Virga knew, or New York City. An unrecognized
 value prints a warning and leaves detection on rather than refusing to run.
 
+### The first frame
+
+With a remembered city, the first frame is the forecast from your previous
+launch, read from `forecast.json` before the terminal is taken over. Its
+bottom border says when it was fetched, `as of 17:52 · updating`, and the
+fresh forecast replaces the numbers in place when it lands, usually within a
+second. A forecast more than 24 hours old, or for a different city, is not
+shown; the launch opens on a spinner as it always did. If the fetch fails the
+forecast stays, marked `refresh failed, r to retry`, rather than giving way
+to an error popup. `r` behaves the same way: the forecast stays up while its
+replacement is fetched.
+
+Set `VIRGA_CACHE=off` to keep the forecast off disk and open on a spinner:
+
+```bash
+VIRGA_CACHE=off virga
+```
+
 ## Configuration
 
 `virga theme` persists the startup palette, `VIRGA_THEME` overrides it for one
-launch, `VIRGA_GEOIP` turns location detection off, and `VIRGA_UPDATE` turns
-the startup release check off, all as described above. `VIRGA_UNITS` picks
+launch, `VIRGA_GEOIP` turns location detection off, `VIRGA_UPDATE` turns the
+startup release check off, and `VIRGA_CACHE` turns the on-disk forecast off,
+all as described above. `VIRGA_UNITS` picks
 `metric` or `imperial` — `celsius`/`c` and `fahrenheit`/`f` also answer — for
 the `virga now` report and the app's first frame alike; imperial when unset,
 which is what the app has always started in. Unit and theme changes made in
@@ -456,10 +479,11 @@ still publishes and only the tap update is skipped, with a warning.
 
 ## Limitations
 
-- There is no general configuration file, and weather is never cached. Every
-  launch fetches fresh weather; only the startup theme and location are
-  persisted, and units follow `VIRGA_UNITS` at startup and last for the
-  session.
+- There is no general configuration file. Every launch fetches fresh weather;
+  the previous launch's forecast is shown, labelled with its age, only until
+  the fetch answers, and only when it is under a day old. The startup theme
+  and location are persisted, and units follow `VIRGA_UNITS` at startup and
+  last for the session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
@@ -495,6 +519,11 @@ policy](https://ipapi.co/privacy/) for what they retain.
 
 That request is not made at all once you have chosen a city, or with
 `VIRGA_GEOIP=off` set.
+
+The last forecast fetched is written to `forecast.json` in the state
+directory, alongside the coordinates it describes and the time it was
+fetched, so the next launch can open on it. It is read by Virga alone and
+never sent anywhere. `VIRGA_CACHE=off` stops it being written or read.
 
 Checking for a newer release makes one request to GitHub's release-redirect
 endpoint at github.com, carrying nothing but the request itself: no version
