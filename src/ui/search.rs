@@ -51,6 +51,25 @@ fn disambiguators(locations: &[Location]) -> Vec<Option<String>> {
         .collect()
 }
 
+/// How many list lines to scroll past so the selected row, second line
+/// included, is the last one drawn when the list is taller than the space
+/// it got. Zero while it fits.
+///
+/// The popup asks for the height it needs, but the terminal can refuse: at
+/// 34x12, the smallest the app draws in, four rows sharing a label want
+/// nine list lines of the eight there are, and what falls off the bottom
+/// is exactly the row the arrows can still reach. Scrolling keeps every
+/// row reachable and visible at once, where trimming second lines to fit
+/// would leave the bottom rows on screen but no longer told apart.
+fn scroll_to(selected: usize, second_lines: &[Option<String>], height: u16) -> u16 {
+    let lines_through_selected = second_lines
+        .iter()
+        .take(selected.saturating_add(1))
+        .map(|second| 1 + usize::from(second.is_some()))
+        .sum::<usize>();
+    u16::try_from(lines_through_selected.saturating_sub(usize::from(height))).unwrap_or(u16::MAX)
+}
+
 pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let second_lines = match &app.results {
         Fetch::Ready(locations) => disambiguators(locations),
@@ -143,7 +162,8 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area
         Fetch::Failed(e) => vec![Line::from(format!("error: {e}")).fg(palette.error)],
     };
 
-    frame.render_widget(Paragraph::new(body), list_area);
+    let scroll = scroll_to(app.selected, &second_lines, list_area.height);
+    frame.render_widget(Paragraph::new(body).scroll((scroll, 0)), list_area);
 }
 
 #[cfg(test)]
@@ -153,6 +173,7 @@ mod tests {
     use crate::theme::Theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
 
     fn place(name: &str, admin1: &str, timezone: Option<&str>, lat: f64, lon: f64) -> Location {
         Location {
@@ -162,6 +183,7 @@ mod tests {
             lat,
             lon,
             timezone: timezone.map(str::to_string),
+            country_code: None,
             population: None,
         }
     }
@@ -169,17 +191,29 @@ mod tests {
     /// The popup drawn over a terminal of the given size, as its rows of
     /// text with the trailing blanks trimmed.
     fn drawn(locations: Vec<Location>, width: u16, height: u16) -> Vec<String> {
+        drawn_selecting(locations, 0, width, height).0
+    }
+
+    /// As `drawn`, with the cursor on the given row; also says which rows
+    /// of the terminal hold a bold cell, which only the selected row does.
+    fn drawn_selecting(
+        locations: Vec<Location>,
+        selected: usize,
+        width: u16,
+        height: u16,
+    ) -> (Vec<String>, Vec<u16>) {
         let mut app = App::new();
         app.screen = Screen::Search;
         app.query = "freder".to_string();
         app.results = Fetch::Ready(locations);
+        app.selected = selected;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let buffer = terminal
             .draw(|frame| search_render(frame, &app, Theme::default().palette(), frame.area()))
             .unwrap()
             .buffer
             .clone();
-        (0..height)
+        let rows = (0..height)
             .map(|y| {
                 (0..width)
                     .map(|x| buffer[(x, y)].symbol())
@@ -187,7 +221,11 @@ mod tests {
                     .trim_end()
                     .to_string()
             })
-            .collect()
+            .collect();
+        let bold_rows = (0..height)
+            .filter(|&y| (0..width).any(|x| buffer[(x, y)].modifier.contains(Modifier::BOLD)))
+            .collect();
+        (rows, bold_rows)
     }
 
     fn rows_with(rows: &[String], needle: &str) -> Vec<String> {
@@ -405,6 +443,62 @@ mod tests {
         let top = rows.iter().position(|row| row.contains('─')).unwrap();
         let bottom = rows.iter().rposition(|row| row.contains('─')).unwrap();
         assert_eq!(bottom - top + 1, 17, "{rows:#?}");
+    }
+
+    /// The narrowest terminal cannot grow the popup: five colliding rows
+    /// want ten list lines and get eight. The arrows still reach the fifth
+    /// row, so the list scrolls to keep the selected row and its second line
+    /// on screen, and scrolls back when the cursor returns to the top.
+    #[test]
+    fn the_selected_row_stays_on_screen_when_the_terminal_refuses_the_height() {
+        let five_alike = || -> Vec<Location> {
+            (0..5)
+                .map(|i| {
+                    place(
+                        "Frederick",
+                        "Maryland",
+                        Some(&format!("Zone/{i}")),
+                        39.0 + f64::from(i),
+                        -77.0,
+                    )
+                })
+                .collect()
+        };
+
+        let (rows, bold_rows) = drawn_selecting(five_alike(), 4, 34, 12);
+        assert_eq!(rows_with(&rows, "> Frederick").len(), 1, "{rows:#?}");
+        assert_eq!(bold_rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows_with(&rows, "Zone/4").len(), 1, "{rows:#?}");
+        // The first row scrolled off to make room; the border did not move.
+        assert!(rows_with(&rows, "Zone/0").is_empty(), "{rows:#?}");
+        assert_eq!(rows.iter().rposition(|row| row.contains('─')), Some(11));
+
+        let (rows, bold_rows) = drawn_selecting(five_alike(), 0, 34, 12);
+        assert_eq!(bold_rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows_with(&rows, "Zone/0").len(), 1, "{rows:#?}");
+        assert!(rows_with(&rows, "Zone/4").is_empty(), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_list_scrolls_only_as_far_as_the_selected_row_needs() {
+        let lines = [
+            None,
+            Some("zone".to_string()),
+            Some("zone".to_string()),
+            None,
+        ];
+
+        // Eight lines of room for six: nothing to scroll, whichever is chosen.
+        assert_eq!(scroll_to(3, &lines, 8), 0);
+        // Four lines of room: the second row ends on the third line, the
+        // third row on the fifth, the last on the sixth.
+        assert_eq!(scroll_to(0, &lines, 4), 0);
+        assert_eq!(scroll_to(1, &lines, 4), 0);
+        assert_eq!(scroll_to(2, &lines, 4), 1);
+        assert_eq!(scroll_to(3, &lines, 4), 2);
+        // No results, or a cursor past the end: nothing more to keep in view.
+        assert_eq!(scroll_to(0, &[], 4), 0);
+        assert_eq!(scroll_to(9, &lines, 4), 2);
     }
 
     #[test]
