@@ -173,10 +173,16 @@ jobs:
       # install.sh is piped straight from the repository into strangers'
       # shells, which makes it the least appropriate file here to leave
       # unlinted. shellcheck ships preinstalled on the runner image.
-      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh scripts/check-path-advice.sh
+      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh scripts/check-path-advice.sh scripts/check-release.sh
       # The one branch of install.sh that can run without a release behind
       # it: the PATH advice, one arm per shell.
       - run: ./scripts/check-path-advice.sh
+      # release.sh's branches that a real run only reaches by pushing a tag,
+      # driven in a throwaway repository with a stub cargo. Once under dash,
+      # which /bin/sh is here, and once under bash, which it is on macOS: the
+      # two differ on whether an interrupted gate still prints its undo hint.
+      - run: ./scripts/check-release.sh
+      - run: ./scripts/check-release.sh bash
 
   actionlint:
     name: actionlint
