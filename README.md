@@ -472,15 +472,15 @@ CI compiles and tests on all three platforms but never looks at a terminal,
 so a change to layout or drawing is checked by eye before it merges, in at
 least one of the terminals named under [Limitations](#limitations):
 
-- Every screen at the floor size, 34×12 and 36 columns for the hourly
+- Every screen at the floor size, 34×12 and 36×19 for the hourly
   weathergram, and at a wide one.
 - The hourly weathergram's `┬` under the current hour and `▲` under the
   selected hour sit beneath their columns at the one-, two-, and three-cell
   hour widths, and the classic chart's `┬` and `═` match.
-- The week strip's selected row stays on the shared hour axis in a terminal
-  that draws ambiguous-width glyphs two cells wide, such as one set to an East
-  Asian locale. Its `>` is ASCII for that reason; a geometric arrow ahead of
-  the grid would shift the whole row by a cell there.
+- The `▲`, `┬`, `═`, and box-drawing borders are East Asian ambiguous-width
+  glyphs. In a terminal that draws those two cells wide, such as one set to
+  an East Asian locale, the hourly views' markers still sit under their
+  columns and the week strip's rows still share one axis.
 
 ### Cutting a release
 

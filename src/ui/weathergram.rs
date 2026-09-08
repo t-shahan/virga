@@ -1050,7 +1050,7 @@ mod tests {
             "a later page presented its anchor as the current time"
         );
         assert!(
-            marker_coordinates(&buffer, width, FULL_ROWS, "┬").is_empty(),
+            marker_coordinates(&buffer, width, FULL_ROWS, NOW_MARKER).is_empty(),
             "current marker leaked onto a scrolled page"
         );
     }

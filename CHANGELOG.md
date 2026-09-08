@@ -20,10 +20,9 @@ refuse to publish a version this file does not describe.
   reading of the default palette could not tell the current hour from its
   neighbours. A `┬` now hangs under it on the marker row, the same glyph the
   classic chart uses, and the `▲` selection marker takes the cell while the
-  selection is on that hour. The week strip's selected-day marker is now an
-  ASCII `>` rather than `▸`, which is ambiguous-width and could shift the
-  selected row off the shared hour axis in terminals that draw such glyphs
-  wide (#79).
+  selection is on that hour. The week strip's selected-day marker is now the
+  same `>` the forecast table and the search screen use, rather than `▸`
+  (#79).
 
 ## [0.6.1] - 2026-09-07
 
