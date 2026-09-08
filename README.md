@@ -543,9 +543,9 @@ Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
 chose it or it was detected — and, if you set them, the name of your startup
 theme (with `virga theme`), your key bar style (with `,`), and the version of
-the last update notice you cleared. Your IP address
-is never written to disk — the resolved city is. It does not store weather
-responses, searches, or history.
+the last update notice you cleared. Your IP address is never written to disk —
+the resolved city is. It does not store weather responses, searches, or
+history.
 Weather and air-quality requests send the location coordinates to Open-Meteo;
 city searches submit their search text to its geocoder. Open-Meteo's
 free-service logs may retain IP addresses and coordinates for 90 days. See

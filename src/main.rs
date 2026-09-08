@@ -1369,11 +1369,13 @@ mod tests {
     /// The whole path from the key that clears the notice to the file: the
     /// dismissal the app hands out is written where the next launch's probe
     /// reads it, and a launch with nowhere to write clears the line for the
-    /// session and complains about nothing.
+    /// session and complains about nothing. The file holds a key hint style
+    /// first, because a dismissal alone is never written.
     #[test]
     fn a_cleared_notice_is_persisted_as_the_dismissed_release() {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
+        state::save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
         let latest = update::Release::parse("9.9.9").unwrap();
         let mut app = App::new();
         app.on_message(Message::UpdateAvailable {

@@ -706,6 +706,33 @@ mod tests {
         assert!(notice(&current, &latest, Some(&dismissed)).is_some());
     }
 
+    /// The dismissal is compared with the same rule as the update itself,
+    /// so a pre-release sits behind its bare triple on both sides: clearing
+    /// 0.7.0 covers its rc, clearing an older release does not, and a
+    /// hand-edited rc dismissal does not cover the release it precedes.
+    /// `releases/latest` never points at a pre-release, so only the last
+    /// is reachable without an edit; all three pin `newer_than`'s rule.
+    #[test]
+    fn a_dismissal_covers_a_pre_release_of_the_same_triple_and_no_more() {
+        let current = Release::parse("0.6.0").unwrap();
+        let rc = Release::parse("0.7.0-rc1").unwrap();
+        let release = Release::parse("0.7.0").unwrap();
+
+        assert_eq!(
+            notice(&current, &rc, Some(&release)),
+            None,
+            "the rc of a dismissed release is not news"
+        );
+        assert!(
+            notice(&current, &rc, Some(&Release::parse("0.6.5").unwrap())).is_some(),
+            "an rc ahead of the dismissed release is news"
+        );
+        assert!(
+            notice(&current, &release, Some(&rc)).is_some(),
+            "the release is news after its rc was dismissed"
+        );
+    }
+
     #[test]
     fn the_notice_names_both_versions_and_points_at_the_subcommand() {
         let current = Release::parse("0.2.0").unwrap();
