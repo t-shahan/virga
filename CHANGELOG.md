@@ -12,6 +12,17 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `kill`, or a terminal that delivers Ctrl-C as a signal rather than a
+  key, no longer leaves the tty in raw mode on the alternate screen.
+  SIGTERM and SIGINT ended the process before anything could restore the
+  terminal; each is now caught and the app leaves through the same path `q`
+  takes, then dies of the same signal, so a shell or script waiting on it
+  sees what it always did. Ctrl-C in the app is unchanged, and on Windows,
+  where crossterm already reports Ctrl-C and Ctrl-Break as keys, nothing is
+  hooked (#85).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
