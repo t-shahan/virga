@@ -12,6 +12,23 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The install script no longer hangs on a stalled connection, and says
+  which of three different things went wrong when a download fails. Every
+  `curl` now carries a connect and overall timeout and is pinned to
+  https, including across redirects. A tag that does not exist, a tag
+  that predates prebuilt binaries, and a release with no build for the
+  current platform each get their own message; all three used to read
+  "No such archive". A `gh attestation verify` that could not finish, for
+  a rate limit or an unreachable API, is reported as not verified with
+  gh's own error and the command to run by hand, where it used to be
+  called a failed attestation and stop the install; only gh's "no
+  attestations found" still does that. Ctrl-C or a kill during the
+  install now exits through the cleanup trap rather than returning into
+  the step it interrupted, so an interrupted copy cannot be followed by
+  the rename that puts it on `PATH` (#69).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
