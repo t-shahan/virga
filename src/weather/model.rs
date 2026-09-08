@@ -139,25 +139,18 @@ impl Weather {
         let date = stamp.get(..10).unwrap_or(stamp);
         let hour = stamp.get(..13).unwrap_or(stamp);
 
-        let day = self.daily.iter().position(|d| d.date == date);
-        let today_index =
-            day.unwrap_or_else(|| self.daily.iter().filter(|d| d.date.as_str() < date).count());
-
-        let at = self
-            .hourly
-            .iter()
-            .position(|h| h.time.get(..13) == Some(hour));
-        let now_hour = at.unwrap_or_else(|| {
+        let (today_index, day_found) = index_of(self.daily.iter().map(|d| d.date.as_str()), date);
+        let (now_hour, hour_found) = index_of(
             self.hourly
                 .iter()
-                .filter(|h| h.time.as_str() < hour)
-                .count()
-        });
+                .map(|h| h.time.get(..13).unwrap_or(&h.time)),
+            hour,
+        );
 
         Position {
             today_index,
             now_hour,
-            exact: day.is_some() && at.is_some(),
+            exact: day_found && hour_found,
         }
     }
 
@@ -174,6 +167,17 @@ impl Weather {
         self.today_index = position.today_index;
         self.now_hour = position.now_hour;
         true
+    }
+}
+
+/// Where `key` sits in an ordered series, and whether it was actually there.
+/// A key the series lacks lands on the count of keys before it, which is the
+/// boundary between history and forecast; the flag lets `relocate` tell that
+/// fallback apart from a hit.
+fn index_of<'a>(keys: impl Iterator<Item = &'a str> + Clone, key: &str) -> (usize, bool) {
+    match keys.clone().position(|k| k == key) {
+        Some(index) => (index, true),
+        None => (keys.filter(|k| *k < key).count(), false),
     }
 }
 
