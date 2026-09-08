@@ -932,6 +932,7 @@ mod tests {
 
     use crate::app::ActiveLocation;
     use crate::events::Message;
+    use crate::weather::client::tests::serving_counted;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
@@ -1621,47 +1622,6 @@ mod tests {
         }
     }
 
-    /// A loopback host answering every forecast request with the same
-    /// canned response, and a count of how many it was asked for. The count
-    /// is the assertion: the server is the one party that knows whether a
-    /// report went to the network.
-    fn forecast_host(
-        status: &str,
-        body: &str,
-    ) -> (
-        weather::client::Endpoints,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) {
-        use std::io::{Read as _, Write as _};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("local addr");
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let hits = std::sync::Arc::new(AtomicUsize::new(0));
-        let counted = std::sync::Arc::clone(&hits);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                counted.fetch_add(1, Ordering::SeqCst);
-                let mut scratch = [0u8; 4096];
-                let _ = stream.read(&mut scratch);
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        let base = format!("http://{addr}/");
-        let endpoints = weather::client::Endpoints {
-            forecast: base.clone(),
-            air_quality: base,
-            ..weather::client::Endpoints::default()
-        };
-        (endpoints, hits)
-    }
-
     fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
         use chrono::TimeZone as _;
         chrono::Local
@@ -1693,7 +1653,8 @@ mod tests {
     fn a_fresh_cache_answers_a_bare_now_without_asking_the_network() {
         use std::sync::atomic::Ordering;
 
-        let (endpoints, hits) = forecast_host("500 Internal Server Error", "{}");
+        let (endpoints, hits) =
+            serving_counted("500 Internal Server Error", "application/json", "{}");
         let test = tempfile::tempdir().unwrap();
         let path = cached_forecast(test.path(), local(2026, 8, 2, 17, 52));
 
@@ -1713,7 +1674,7 @@ mod tests {
     /// way a launch would open on it.
     #[test]
     fn a_cached_report_is_relocated_to_the_current_hour() {
-        let (endpoints, _) = forecast_host("500 Internal Server Error", "{}");
+        let (endpoints, _) = serving_counted("500 Internal Server Error", "application/json", "{}");
         let test = tempfile::tempdir().unwrap();
         let path = cached_forecast(test.path(), local(2026, 8, 2, 23, 50));
 
@@ -1733,8 +1694,11 @@ mod tests {
     fn a_stale_foreign_or_disabled_cache_fetches() {
         use std::sync::atomic::Ordering;
 
-        let (endpoints, hits) =
-            forecast_host("200 OK", include_str!("../tests/fixtures/forecast.json"));
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        );
         let test = tempfile::tempdir().unwrap();
         let fetched = local(2026, 8, 2, 12, 0);
         let path = cached_forecast(test.path(), fetched);
@@ -1773,8 +1737,11 @@ mod tests {
     fn an_unreadable_cache_costs_the_fetch_not_the_report() {
         use std::sync::atomic::Ordering;
 
-        let (endpoints, hits) =
-            forecast_host("200 OK", include_str!("../tests/fixtures/forecast.json"));
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        );
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("forecast.json");
         std::fs::write(&path, "{").unwrap();
