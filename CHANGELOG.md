@@ -12,6 +12,17 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Changed
+
+- `virga now` answers from the app's last forecast when it describes the
+  remembered city and is under an hour old, moved to the current hour the
+  way a launch moves it, instead of fetching on every call, so a status
+  bar polling by the minute in the hour after a launch is answered from
+  disk. The bound is an hour rather than the app's day because the report
+  has no "as of" mark to say how old its reading is. A named city still
+  fetches, and `VIRGA_CACHE=off` turns the read off along with the rest of
+  the cache (#111).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

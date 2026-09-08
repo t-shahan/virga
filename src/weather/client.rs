@@ -99,7 +99,13 @@ fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location
 }
 
 pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
-    fetch_forecast_with(agent(), &Endpoints::default(), lat, lon)
+    fetch_forecast_at(&Endpoints::default(), lat, lon)
+}
+
+/// The same fetch, at hosts the caller names: the seam through which
+/// `virga now`'s tests prove a fresh cache is answered without one.
+pub(crate) fn fetch_forecast_at(endpoints: &Endpoints, lat: f64, lon: f64) -> Result<Weather> {
+    fetch_forecast_with(agent(), endpoints, lat, lon)
 }
 
 fn fetch_forecast_with(
@@ -214,10 +220,12 @@ fn fetch_air_quality_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn hourly_request_names_every_weathergram_field() {
@@ -240,23 +248,35 @@ mod tests {
     use std::time::Instant;
 
     /// A loopback server that answers every request with the same canned
-    /// response, and `Endpoints` pointing all three URLs at it.
+    /// response, `Endpoints` pointing all four URLs at it, and a count of
+    /// the requests it took. The count is for the callers elsewhere in the
+    /// crate whose assertion is that no request was made: the server is the
+    /// one party that knows whether the client went to the network.
     ///
     /// The failure that matters is not the network going away — that is the
     /// timeout case, already covered. It is a server that answers *promptly*
     /// and wrongly: an error status, a body that is not JSON, or the hotel
     /// wifi's login page delivered with a cheerful 200.
-    fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
+    pub(crate) fn serving_counted(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (Endpoints, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
 
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                // Counted before the reply is written, so the count is
+                // settled by the time the client holds its response.
+                counted.fetch_add(1, Ordering::SeqCst);
                 // Drain enough of the request that the client is not blocked
                 // writing while we are blocked replying.
                 let mut scratch = [0u8; 4096];
@@ -267,12 +287,19 @@ mod tests {
         });
 
         let base = format!("http://{addr}/");
-        Endpoints {
+        let endpoints = Endpoints {
             forecast: base.clone(),
             geocode: base.clone(),
             air_quality: base.clone(),
             geoip: base,
-        }
+        };
+        (endpoints, hits)
+    }
+
+    /// `serving_counted` for the tests here, which ask what the client made
+    /// of the answer rather than whether it asked at all.
+    fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
+        serving_counted(status, content_type, body).0
     }
 
     /// Short bounds: these servers answer at once, so a test that hangs is a

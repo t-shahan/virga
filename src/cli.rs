@@ -134,7 +134,8 @@ Environment:
   VIRGA_GEOIP   Set to `off` to skip the IP location lookup
   VIRGA_UPDATE  Set to `off` to skip the startup release check
   VIRGA_CACHE   Set to `off` to keep the last forecast off disk and open on
-                a spinner instead of it
+                a spinner instead of it. `now` answers from that forecast,
+                without a fetch, while it is under an hour old
 
 Weather, air quality and geocoding come from Open-Meteo. No account or API key
 is required. <{repository}>",
@@ -299,5 +300,14 @@ mod tests {
         assert!(text.contains("VIRGA_UNITS"));
         assert!(text.contains("VIRGA_GEOIP"));
         assert!(text.contains("VIRGA_UPDATE"));
+    }
+
+    /// The bound `now` holds the cache to is a promise about how stale a
+    /// reading can be, so the help has to state it.
+    #[test]
+    fn usage_says_how_old_a_forecast_now_will_answer_from() {
+        let text = usage();
+        assert!(text.contains("VIRGA_CACHE"));
+        assert!(text.contains("under an hour"), "{text}");
     }
 }
