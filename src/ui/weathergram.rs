@@ -237,13 +237,20 @@ impl Plot {
     }
 }
 
-/// One hour's place in the window: its column, its position in the series,
-/// and the colour its state demands.
+/// One hour's place in the window: its column and the colour its state
+/// demands. Its position in the series is derived from the window rather than
+/// stored beside `offset`, so no caller can fill the two in inconsistently.
 #[derive(Clone, Copy)]
 struct Column {
     offset: usize,
-    index: usize,
-    state: Option<Color>,
+    state_colour: Option<Color>,
+}
+
+impl Column {
+    /// The hour's index in the series the window was cut from.
+    fn index(&self, plot: &Plot) -> usize {
+        plot.window.start + self.offset
+    }
 }
 
 /// The colour a column's state demands, or `None` for an ordinary hour that
@@ -304,11 +311,9 @@ fn full_tracks_render(
 
     let range = temperature_range(visible);
     for (offset, hour) in visible.iter().enumerate() {
-        let index = window.start + offset;
         let column = Column {
             offset,
-            index,
-            state: state_colour(palette, index, selected),
+            state_colour: state_colour(palette, window.start + offset, selected),
         };
         sky_render(frame, plot, column, hour, palette);
         temperature_render(frame, plot, column, hour, palette, range);
@@ -397,7 +402,7 @@ fn sky_render(
     let sky_y = plot.y + SKY_ROW;
     let x0 = plot.column_x(column.offset);
     let cell_width = plot.window.cell_width;
-    let colour = column.state.unwrap_or(palette.text);
+    let colour = column.state_colour.unwrap_or(palette.text);
     let rail = Style::new().fg(palette.muted).add_modifier(Modifier::DIM);
 
     let known = condition_symbol::symbol(hour.code) != " ";
@@ -439,7 +444,7 @@ fn temperature_render(
     let Some(height) = temperature_eighths(hour.temp_c, range) else {
         return;
     };
-    let style = Style::new().fg(column.state.unwrap_or(palette.accent));
+    let style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
     let x0 = plot.column_x(column.offset);
     for cell in 0..plot.window.cell_width {
         band_render(
@@ -466,8 +471,8 @@ fn rain_render(
     let Some(height) = rain_sixteenths(hour.chance) else {
         return;
     };
-    let mut style = Style::new().fg(column.state.unwrap_or(palette.accent));
-    if column.state.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
+    let mut style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
+    if column.state_colour.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
         style = style.add_modifier(Modifier::DIM);
     }
     let x0 = plot.column_x(column.offset);
@@ -498,7 +503,8 @@ fn wind_render(
 ) {
     let clock = clock_hour(&hour.time);
     let on_cadence = clock.map_or(column.offset.is_multiple_of(2), |hour| hour % 2 == 0);
-    if !on_cadence && column.index != selected {
+    let index = column.index(plot);
+    if !on_cadence && index != selected {
         return;
     }
     let wind_y = plot.y + WIND_ROW;
@@ -509,7 +515,7 @@ fn wind_render(
         centre,
         wind_y,
         arrow,
-        column.state.unwrap_or(palette.text),
+        column.state_colour.unwrap_or(palette.text),
     );
 
     // Not beside the selection: the selected hour's off-cadence arrow
@@ -517,7 +523,7 @@ fn wind_render(
     // carries that hour's exact speed.
     if arrow != " "
         && clock.is_some_and(|hour| hour % 6 == 0)
-        && selected.abs_diff(column.index) > 1
+        && selected.abs_diff(index) > 1
         && let Some(speed) = hour.wind_kph
     {
         let text = format!("{:.0}", unit.speed(speed));

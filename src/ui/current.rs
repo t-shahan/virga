@@ -32,9 +32,9 @@ pub(super) fn current_area_render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (hero_area, detail_area) = columns(inner);
+    let (hero_area, detail_area) = column_areas(inner);
     if let Some(hero_area) = hero_area {
-        let temp = hero_temperature(weather, day, showing_today, unit);
+        let temp = hero_value(weather, day, showing_today, unit);
         let hero = hero_lines(&temp, unit, palette);
         frame.render_widget(Paragraph::new(hero).alignment(Alignment::Center), hero_area);
     }
@@ -154,7 +154,7 @@ fn air_quality_title(
 /// The block digits are decoration; the readings are the content. Rather
 /// than squeeze both and clip the digits mid-glyph, drop the hero entirely
 /// once there is not room for the pair.
-fn columns(inner: Rect) -> (Option<Rect>, Rect) {
+fn column_areas(inner: Rect) -> (Option<Rect>, Rect) {
     let full = HERO_WIDTH + COLUMN_GUTTER + DETAIL_WIDTH;
     let show_hero = inner.width >= full;
 
@@ -186,7 +186,7 @@ fn columns(inner: Rect) -> (Option<Rect>, Rect) {
 
 /// The block font already has a '-' glyph, so a missing reading renders as
 /// "--" at the same scale rather than collapsing the layout.
-fn hero_temperature(
+fn hero_value(
     weather: &Weather,
     day: Option<&DailyForecast>,
     showing_today: bool,
