@@ -96,6 +96,10 @@ A TUI that panics leaves the terminal in raw mode and the user with no prompt.
   Ratatui's `TestBackend`, including narrow and awkward terminal sizes.
 - Missing coverage for a new branch is worth reporting on its own.
 - A test that asserts on wall-clock timing or live network state is a flake.
+- Test modules are inline `#[cfg(test)]` blocks beside the code they cover.
+  `tests/` holds recorded provider payloads that those blocks `include_str!`,
+  not test functions; a new `tests/*.rs` would be the first integration test,
+  so the test goes beside the code instead.
 
 ### Cross-platform
 
