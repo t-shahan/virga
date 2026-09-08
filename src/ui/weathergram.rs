@@ -34,7 +34,7 @@ const TEMP_ROWS: u16 = 4;
 const RAIN_ROWS: u16 = 2;
 
 /// The full interior, top to bottom: sky, the temperature silhouette, the
-/// rain band, wind, the clock axis, and the selection marker.
+/// rain band, wind, the clock axis, and the marker row.
 const SKY_ROW: u16 = 0;
 const TEMP_ROW: u16 = 1;
 const RAIN_ROW: u16 = TEMP_ROW + TEMP_ROWS;
@@ -53,6 +53,15 @@ const HORIZONS: [usize; 3] = [48, 36, 24];
 /// hour. The inspector's minimum width leaves fifteen columns here.
 const NARROW_HORIZON: usize = 12;
 const MAX_CELL_WIDTH: u16 = 3;
+
+/// Under the selected hour on the marker row.
+const SELECTED_MARKER: &str = "▲";
+/// Under the current hour on the same row: the classic chart's glyph for now,
+/// so the two hourly views share one vocabulary. The axis anchor above it is
+/// coloured for the role as well, but colour was all that label had, and a
+/// monochrome or colour-blind reading of the row could not find the current
+/// hour among its neighbours.
+const NOW_MARKER: &str = "┬";
 
 /// Every eighth from a floor line to a full block: the vertical resolution
 /// both bands draw with.
@@ -428,11 +437,26 @@ fn full_tracks_render(
         palette,
     );
 
+    // Hour 0 is the first column of the first page and nowhere else, so the
+    // page number is the whole test. The selection draws last and takes the
+    // cell when both fall on now, as the classic chart's rule gives its
+    // selection precedence: the arrows move the selection, and stepping off
+    // now uncovers the tick.
+    let marker_x = |offset: usize| {
+        plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2
+    };
+    if window.start == 0 && !visible.is_empty() {
+        put(frame, marker_x(0), marker_y, NOW_MARKER, palette.now);
+    }
     let end = window.start + visible.len();
     if selected >= window.start && selected < end {
-        let offset = selected - window.start;
-        let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
-        put(frame, x, marker_y, "▲", palette.selection);
+        put(
+            frame,
+            marker_x(selected - window.start),
+            marker_y,
+            SELECTED_MARKER,
+            palette.selection,
+        );
     }
 }
 
@@ -452,6 +476,7 @@ mod tests {
     const FULL_TEMP_FLOOR_Y: u16 = 1 + TEMP_ROW + TEMP_ROWS - 1;
     const FULL_WIND_Y: u16 = 1 + WIND_ROW;
     const FULL_AXIS_Y: u16 = 1 + AXIS_ROW;
+    const FULL_MARKER_Y: u16 = 1 + MARKER_ROW;
 
     #[test]
     fn horizons_are_quantized_from_measured_plot_width() {
@@ -863,11 +888,11 @@ mod tests {
         );
     }
 
-    /// The selection keeps its shape in monochrome, while the opening label
-    /// still states the current day and time without a separate marker.
+    /// Shape is all this palette has, so both markers have to be found by it.
     #[test]
     fn selected_marker_and_current_time_anchor_survive_a_monochrome_palette() {
         let weather = Weather::fixture(22, 14);
+        let count = weather.forecast_hours().len();
         let monochrome = Palette {
             accent: Color::Gray,
             text: Color::Gray,
@@ -879,53 +904,65 @@ mod tests {
         };
 
         for palette in [Theme::default().palette(), monochrome] {
-            let text = rendered_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
-            assert!(text.contains('▲'), "selection lost without colour:\n{text}");
-            assert!(
-                text.contains("Sun 12a"),
-                "current day and time lost without colour:\n{text}"
-            );
-            assert!(
-                !text.contains('┬'),
-                "redundant current marker returned:\n{text}"
-            );
+            for width in [36, 80] {
+                let buffer =
+                    rendered_buffer_in(&weather, width, FULL_ROWS, 3, palette, Unit::Metric);
+                let text = text_of(&buffer, width, FULL_ROWS);
+                let cell_width = window_for(width, 3, count).cell_width;
+                let now_x = plot_x(&buffer, width) + (cell_width - 1) / 2;
+
+                assert_eq!(
+                    marker_coordinates(&buffer, width, FULL_ROWS, SELECTED_MARKER).len(),
+                    1,
+                    "selection lost without colour at {width} columns:\n{text}"
+                );
+                assert_eq!(
+                    marker_coordinates(&buffer, width, FULL_ROWS, NOW_MARKER),
+                    [(now_x, FULL_MARKER_Y)],
+                    "current hour lost without colour at {width} columns:\n{text}"
+                );
+                assert!(
+                    text.contains("Sun 12a"),
+                    "current day and time lost without colour:\n{text}"
+                );
+            }
         }
     }
 
-    /// The current time label itself is the indicator. Giving it the `now`
-    /// role keeps the day and time readable without stacking a separate glyph
-    /// above the first weather column.
+    /// The anchor label is the current time, coloured for the role, and the
+    /// tick under it is the shape that survives without the colour. The tick
+    /// sits on the marker row rather than in a column of its own on the axis:
+    /// an earlier design reserved one there, and it pushed the anchor label
+    /// off the hour it names.
     #[test]
-    fn current_time_anchor_replaces_the_separate_marker() {
+    fn the_current_hour_is_marked_under_its_anchor_at_every_cell_width() {
         let weather = Weather::fixture(22, 14);
         let palette = Theme::default().palette();
+        let count = weather.forecast_hours().len();
 
-        for width in [36, 80] {
+        // One-, two-, and three-cell hours.
+        for width in [36, 80, 165] {
             let buffer = rendered_buffer_in(&weather, width, FULL_ROWS, 3, palette, Unit::Metric);
-            let text: String = (0..FULL_ROWS)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let axis_y = FULL_AXIS_Y;
-            let anchor_x = (1..width - 1)
-                .find(|x| buffer[(*x, axis_y)].symbol() == "S")
-                .expect("current time anchor");
-            let axis: String = (0..width).map(|x| buffer[(x, axis_y)].symbol()).collect();
+            let text = text_of(&buffer, width, FULL_ROWS);
+            let anchor_x = plot_x(&buffer, width);
+            let axis: String = (0..width)
+                .map(|x| buffer[(x, FULL_AXIS_Y)].symbol())
+                .collect();
 
             assert!(
                 axis.contains("Sun") && axis.contains("12a"),
                 "current day and time disappeared from {axis:?}"
             );
-            assert_eq!(buffer[(anchor_x, axis_y)].fg, palette.now);
-            assert!(
-                !text.contains('┬'),
-                "redundant current marker returned:\n{text}"
+            assert_eq!(buffer[(anchor_x, FULL_AXIS_Y)].fg, palette.now);
+
+            let cell_width = window_for(width, 3, count).cell_width;
+            let now = (anchor_x + (cell_width - 1) / 2, FULL_MARKER_Y);
+            assert_eq!(
+                marker_coordinates(&buffer, width, FULL_ROWS, NOW_MARKER),
+                [now],
+                "the current hour has no shape at {width} columns:\n{text}"
             );
-            assert!(text.contains('▲'), "selection marker missing:\n{text}");
+            assert_eq!(buffer[now].fg, palette.now);
 
             let label_x = (1..width - 3)
                 .find(|x| {
@@ -935,6 +972,47 @@ mod tests {
                 })
                 .expect("sky label");
             assert_eq!(anchor_x, label_x + LABEL_WIDTH);
+        }
+    }
+
+    /// One cell, two markers: the selection takes it, as the classic chart's
+    /// rule gives its selection the cell over now. One step on uncovers the
+    /// tick beside the arrow, at the one-cell hour width as well.
+    #[test]
+    fn the_selection_covers_the_current_marker_until_it_steps_off() {
+        let weather = Weather::fixture(22, 14);
+        let palette = Theme::default().palette();
+        let count = weather.forecast_hours().len();
+
+        for width in [36, 80] {
+            let cell_width = window_for(width, 0, count).cell_width;
+            let on_now = rendered_buffer_in(&weather, width, FULL_ROWS, 0, palette, Unit::Metric);
+            let now = (plot_x(&on_now, width) + (cell_width - 1) / 2, FULL_MARKER_Y);
+            let text = text_of(&on_now, width, FULL_ROWS);
+
+            assert_eq!(
+                marker_coordinates(&on_now, width, FULL_ROWS, SELECTED_MARKER),
+                [now],
+                "the selection is not on the current hour at {width} columns:\n{text}"
+            );
+            assert!(
+                marker_coordinates(&on_now, width, FULL_ROWS, NOW_MARKER).is_empty(),
+                "the current marker was drawn beside the selection at {width} columns:\n{text}"
+            );
+            assert_eq!(on_now[now].fg, palette.selection);
+
+            let stepped = rendered_buffer_in(&weather, width, FULL_ROWS, 1, palette, Unit::Metric);
+            let text = text_of(&stepped, width, FULL_ROWS);
+            assert_eq!(
+                marker_coordinates(&stepped, width, FULL_ROWS, NOW_MARKER),
+                [now],
+                "stepping off now did not uncover its marker at {width} columns:\n{text}"
+            );
+            assert_eq!(
+                marker_coordinates(&stepped, width, FULL_ROWS, SELECTED_MARKER),
+                [(now.0 + cell_width, now.1)],
+                "the selection did not move one hour on at {width} columns:\n{text}"
+            );
         }
     }
 
@@ -1017,7 +1095,8 @@ mod tests {
             Theme::default().palette(),
             Unit::Metric,
         );
-        let selected = marker_coordinates(&baseline, 80, FULL_ROWS, "▲");
+        let selected = marker_coordinates(&baseline, 80, FULL_ROWS, SELECTED_MARKER);
+        let now = marker_coordinates(&baseline, 80, FULL_ROWS, NOW_MARKER);
         let anchor_x = (1..79)
             .find(|x| baseline[(*x, FULL_AXIS_Y)].symbol() == "S")
             .expect("current time anchor");
@@ -1026,11 +1105,25 @@ mod tests {
             let palette = theme.palette();
             let buffer = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
             assert_eq!(
-                marker_coordinates(&buffer, 80, FULL_ROWS, "▲"),
+                marker_coordinates(&buffer, 80, FULL_ROWS, SELECTED_MARKER),
                 selected,
                 "{} moved the selected marker",
                 theme.name()
             );
+            assert_eq!(
+                marker_coordinates(&buffer, 80, FULL_ROWS, NOW_MARKER),
+                now,
+                "{} moved the current marker",
+                theme.name()
+            );
+            for &cell in &now {
+                assert_eq!(
+                    buffer[cell].fg,
+                    palette.now,
+                    "{} did not style the current marker",
+                    theme.name()
+                );
+            }
             assert_eq!(
                 buffer[(anchor_x, FULL_AXIS_Y)].fg,
                 palette.now,
@@ -1172,7 +1265,14 @@ mod tests {
         palette: Palette,
         unit: Unit,
     ) -> String {
-        let buffer = rendered_buffer_in(weather, width, height, selected, palette, unit);
+        text_of(
+            &rendered_buffer_in(weather, width, height, selected, palette, unit),
+            width,
+            height,
+        )
+    }
+
+    fn text_of(buffer: &Buffer, width: u16, height: u16) -> String {
         (0..height)
             .map(|y| {
                 (0..width)
@@ -1181,6 +1281,13 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The plot's first column, which the axis anchor opens on every page.
+    fn plot_x(buffer: &Buffer, width: u16) -> u16 {
+        (1..width - 1)
+            .find(|x| !buffer[(*x, FULL_AXIS_Y)].symbol().trim().is_empty())
+            .expect("leading axis anchor")
     }
 
     fn rendered_buffer_in(
