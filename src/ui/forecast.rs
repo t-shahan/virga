@@ -4,7 +4,7 @@ use crate::weather::code::emoji;
 use crate::weather::model::Weather;
 use chrono::{Datelike, NaiveDate};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
@@ -29,12 +29,7 @@ pub(super) fn forecast_area_render(
         .get(start..weather.daily.len().min(start + window_len))
         .unwrap_or(&[]);
 
-    let block = Block::bordered()
-        .border_style(Style::new().fg(palette.border))
-        // A block title takes the block's own style rather than the border's,
-        // so left unstyled it stays the terminal's default foreground however
-        // the theme is set. It is a header, so it takes the header's role.
-        .title(Line::from("Forecast").fg(palette.muted));
+    let block = framed(palette);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -137,6 +132,43 @@ pub(super) fn forecast_area_render(
     }));
 
     frame.render_widget(Paragraph::new(lines), table_area);
+}
+
+/// The pane's border and heading: the part of it that does not wait for
+/// weather.
+fn framed(palette: Palette) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        // A block title takes the block's own style rather than the border's,
+        // so left unstyled it stays the terminal's default foreground however
+        // the theme is set. It is a header, so it takes the header's role.
+        .title(Line::from("Forecast").fg(palette.muted))
+}
+
+/// The pane on a cache miss: its border and heading, with `status` — the
+/// spinner and what it is waiting on — centred where the rows will be. The
+/// spinner used to float in a popup over an empty terminal; here it sits in
+/// the box the forecast will fill, so the frame reads as a screen that is
+/// waiting rather than as one that has not been drawn.
+pub(super) fn forecast_skeleton_render(
+    frame: &mut Frame,
+    palette: Palette,
+    area: Rect,
+    status: &str,
+) {
+    let block = framed(palette);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [row] = Layout::vertical([Constraint::Length(1)])
+        .flex(Flex::Center)
+        .areas(inner);
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(Style::new().fg(palette.text))
+            .alignment(Alignment::Center),
+        row,
+    );
 }
 
 // Compile-time invariants: the detail levels must stay ordered, so a narrowing

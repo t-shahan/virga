@@ -25,10 +25,10 @@ mod precipitation;
 mod search;
 mod weathergram;
 
-use chart::chart_area_render;
+use chart::{chart_area_render, chart_skeleton_render};
 use classic::classic_render;
-use current::current_area_render;
-use forecast::forecast_area_render;
+use current::{current_area_render, current_skeleton_render};
+use forecast::{forecast_area_render, forecast_skeleton_render};
 use help::help_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
@@ -143,69 +143,38 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     match app.screen {
         Screen::Weather => match &app.weather {
             Fetch::Ready(w) => {
-                // City and day live in the pane's border now, so the separate
-                // header box is gone and its rows go to the chart.
-                let [current_area, rest] =
-                    Layout::vertical([Constraint::Length(7), Constraint::Fill(1)]).areas(content);
-
-                // Table and chart are separate boxes now. Side by side buys
-                // rows at the cost of chart width, so it is a fallback for
-                // short windows rather than a reward for wide ones.
-                // Clamped to the area before the cast, and saturating after
-                // it: the count is the server's word, the DTO cap
-                // notwithstanding, and a table can never be taller than the
-                // space it draws in anyway.
-                let days = w
-                    .daily
-                    .len()
-                    .saturating_sub(w.today_index)
-                    .min(rest.height as usize) as u16;
-                let table_rows = days.saturating_add(1);
-                let table_box = table_rows.saturating_add(2);
-                let side_by_side = rest.width >= SIDE_BY_SIDE_MIN
-                    && rest.height < table_box.saturating_add(chart::MIN_HEIGHT + 2);
-
-                let (forecast_area, chart_area) = if side_by_side {
-                    let [left, _gutter, right] = Layout::horizontal([
-                        Constraint::Length(forecast::TABLE_FULL + 2),
-                        Constraint::Length(GUTTER),
-                        Constraint::Fill(1),
-                    ])
-                    .areas(rest);
-                    (
-                        Rect {
-                            height: table_box.min(left.height),
-                            ..left
-                        },
-                        Rect {
-                            height: table_box.min(right.height),
-                            ..right
-                        },
-                    )
-                } else {
-                    let [table, chart] =
-                        Layout::vertical([Constraint::Length(table_box), Constraint::Fill(1)])
-                            .areas(rest);
-                    (
-                        table,
-                        Rect {
-                            height: chart.height.min(chart::MAX_HEIGHT + 2),
-                            ..chart
-                        },
-                    )
-                };
-
-                current_area_render(frame, app, w, palette, current_area);
-                forecast_area_render(frame, w, palette, forecast_area, app.unit, app.selected_day);
-                chart_area_render(frame, w, palette, chart_area, app.unit, app.selected_day);
+                let panes = weather_panes(content, w.daily.len().saturating_sub(w.today_index));
+                current_area_render(frame, app, w, palette, panes.current);
+                forecast_area_render(
+                    frame,
+                    w,
+                    palette,
+                    panes.forecast,
+                    app.unit,
+                    app.selected_day,
+                );
+                chart_area_render(frame, w, palette, panes.chart, app.unit, app.selected_day);
             }
-            Fetch::Loading => popup_render(
-                frame,
-                area,
-                palette,
-                loading_title(app),
-                &format!("{} {}", spinner(app.tick), loading_verb(app)),
-            ),
+            // The skeleton: every pane's border and heading, with the
+            // spinner inside the forecast pane. Drawn from the same layout
+            // as the loaded frame so the forecast lands in boxes that are
+            // already there rather than in boxes that appear around it.
+            Fetch::Loading => {
+                let panes = weather_panes(content, SKELETON_DAYS);
+                let title = if app.is_locating() {
+                    "Locating"
+                } else {
+                    app.location.label.as_str()
+                };
+                current_skeleton_render(frame, title, palette, panes.current);
+                forecast_skeleton_render(
+                    frame,
+                    palette,
+                    panes.forecast,
+                    &format!("{} {}", spinner(app.tick), loading_verb(app)),
+                );
+                chart_skeleton_render(frame, palette, panes.chart);
+            }
             Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
         },
@@ -259,6 +228,79 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     // hourly list plus its border needs every row there is.
     if app.help_visible {
         help_render(frame, app, palette, page_area);
+    }
+}
+
+/// Forecast days the skeleton lays itself out for. The fetch asks Open-Meteo
+/// for eight, so this is the count the loaded frame all but always has, and
+/// its table box lands on the rows the skeleton drew. A server that answers
+/// with fewer moves the chart's top border up by the difference, once.
+const SKELETON_DAYS: usize = 8;
+
+/// Where the weather screen's three boxes go.
+struct WeatherPanes {
+    current: Rect,
+    forecast: Rect,
+    chart: Rect,
+}
+
+/// The weather screen's layout for a table of `forecast_days` rows. One
+/// function for the loaded frame and the skeleton drawn before it, so the
+/// two cannot drift: a skeleton with its own copy of these sums would put
+/// a border one row off and the whole screen would jump when the data
+/// landed, which is the one thing a skeleton is for.
+fn weather_panes(content: Rect, forecast_days: usize) -> WeatherPanes {
+    // City and day live in the pane's border now, so the separate
+    // header box is gone and its rows go to the chart.
+    let [current, rest] =
+        Layout::vertical([Constraint::Length(7), Constraint::Fill(1)]).areas(content);
+
+    // Table and chart are separate boxes now. Side by side buys
+    // rows at the cost of chart width, so it is a fallback for
+    // short windows rather than a reward for wide ones.
+    // Clamped to the area before the cast, and saturating after
+    // it: the count is the server's word, the DTO cap
+    // notwithstanding, and a table can never be taller than the
+    // space it draws in anyway.
+    let days = forecast_days.min(rest.height as usize) as u16;
+    let table_rows = days.saturating_add(1);
+    let table_box = table_rows.saturating_add(2);
+    let side_by_side = rest.width >= SIDE_BY_SIDE_MIN
+        && rest.height < table_box.saturating_add(chart::MIN_HEIGHT + 2);
+
+    let (forecast, chart) = if side_by_side {
+        let [left, _gutter, right] = Layout::horizontal([
+            Constraint::Length(forecast::TABLE_FULL + 2),
+            Constraint::Length(GUTTER),
+            Constraint::Fill(1),
+        ])
+        .areas(rest);
+        (
+            Rect {
+                height: table_box.min(left.height),
+                ..left
+            },
+            Rect {
+                height: table_box.min(right.height),
+                ..right
+            },
+        )
+    } else {
+        let [table, chart] =
+            Layout::vertical([Constraint::Length(table_box), Constraint::Fill(1)]).areas(rest);
+        (
+            table,
+            Rect {
+                height: chart.height.min(chart::MAX_HEIGHT + 2),
+                ..chart
+            },
+        )
+    };
+
+    WeatherPanes {
+        current,
+        forecast,
+        chart,
     }
 }
 
@@ -666,8 +708,8 @@ mod tests {
 
     /// A first launch can spend a round trip working out where the user is
     /// before it has anywhere to fetch weather for. Both steps are a spinner
-    /// over an empty screen, so if they said the same thing the first would
-    /// look like a forecast taking suspiciously long.
+    /// with no weather behind it, so if they said the same thing the first
+    /// would look like a forecast taking suspiciously long.
     #[test]
     fn the_first_step_says_it_is_locating_rather_than_fetching() {
         for screen in [Screen::Weather, Screen::Hourly] {
@@ -794,6 +836,107 @@ mod tests {
         app.on_action(crate::input::Action::NextDay);
         let after = drawn(&app, probe(), 120, 30);
         assert_eq!(before, after, "help did not put the screen back");
+    }
+
+    /// The sizes the skeleton has to read as intentional at: the floor, a
+    /// short terminal just above it, and two ordinary ones.
+    const SKELETON_SIZES: [(u16, u16); 4] =
+        [(MIN_WIDTH, MIN_HEIGHT), (40, 15), (80, 24), (120, 40)];
+
+    /// The rows and columns of the pane whose top border carries `title`:
+    /// its top and bottom rows, and its left and right columns.
+    fn pane_of(rows: &[String], title: &str) -> (usize, usize, usize, usize) {
+        let top = rows
+            .iter()
+            .position(|row| row.contains(title))
+            .unwrap_or_else(|| panic!("no pane titled {title:?}:\n{}", rows.join("\n")));
+        let cells: Vec<char> = rows[top].chars().collect();
+        let left = cells.iter().position(|c| *c == '┌').unwrap();
+        let right = cells.iter().rposition(|c| *c == '┐').unwrap();
+        let bottom = (top + 1..rows.len())
+            .find(|y| rows[*y].chars().nth(left) == Some('└'))
+            .unwrap_or_else(|| panic!("{title:?} has no bottom border:\n{}", rows.join("\n")));
+        (top, bottom, left, right)
+    }
+
+    /// Every cell that is part of a pane's border. Corners and verticals
+    /// only: the top and bottom rules are overwritten by titles, and the
+    /// loaded frame's condition title carries a rule of its own.
+    fn borders(buffer: &Buffer, width: u16, height: u16) -> Vec<(u16, u16, String)> {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|cell| ["┌", "┐", "└", "┘", "│"].contains(&buffer[*cell].symbol()))
+            .map(|(x, y)| (x, y, buffer[(x, y)].symbol().to_string()))
+            .collect()
+    }
+
+    /// A cache miss opens on the panes, not on a popup over an empty
+    /// terminal: the city in its corner, the `Forecast` heading with the
+    /// spinner inside its box, and the key bar, at every size the app
+    /// draws at — the floor included, where the chart pane has no rows in
+    /// the loaded frame either.
+    #[test]
+    fn a_cache_miss_draws_the_panes_with_the_spinner_in_the_forecast_pane() {
+        for (width, height) in SKELETON_SIZES {
+            let rows = symbols(&drawn(&App::new(), probe(), width, height), width, height);
+            let text = rows.join("\n");
+            assert!(text.contains("NEW YORK"), "{width}x{height}:\n{text}");
+            assert!(text.contains("[q] quit"), "{width}x{height}:\n{text}");
+            assert!(text.contains("[?] keybinds"), "{width}x{height}:\n{text}");
+            assert!(!text.contains("Loading"), "{width}x{height}:\n{text}");
+
+            let (top, bottom, left, right) = pane_of(&rows, "Forecast");
+            let row = rows
+                .iter()
+                .position(|row| row.contains("fetching..."))
+                .unwrap_or_else(|| panic!("{width}x{height} lost the spinner:\n{text}"));
+            assert!(
+                top < row && row < bottom,
+                "{width}x{height}: the spinner is on row {row}, outside rows {top}..{bottom}:\n{text}"
+            );
+            let cells: Vec<char> = rows[row].chars().collect();
+            assert_eq!(cells[left], '│', "{width}x{height}:\n{text}");
+            assert_eq!(cells[right], '│', "{width}x{height}:\n{text}");
+
+            let loaded = symbols(
+                &drawn(&ready(Screen::Weather), probe(), width, height),
+                width,
+                height,
+            )
+            .join("\n");
+            assert_eq!(
+                text.contains("Daily Highs"),
+                loaded.contains("Daily Highs"),
+                "{width}x{height}: the chart pane is drawn in one frame and not the other:\n{text}"
+            );
+        }
+    }
+
+    /// The property the skeleton exists for: the forecast lands in the boxes
+    /// already on screen, so nothing moves when it does.
+    #[test]
+    fn the_forecast_lands_on_the_skeletons_borders() {
+        for (width, height) in SKELETON_SIZES {
+            let skeleton = borders(&drawn(&App::new(), probe(), width, height), width, height);
+            let loaded = borders(
+                &drawn(&ready(Screen::Weather), probe(), width, height),
+                width,
+                height,
+            );
+            assert!(!skeleton.is_empty(), "{width}x{height} drew no borders");
+            assert_eq!(skeleton, loaded, "{width}x{height}: the layout jumped");
+        }
+    }
+
+    /// Before the place is known the city's corner has no city to name, and
+    /// the compiled-in fallback is not the user's: the corner says what the
+    /// app is doing instead.
+    #[test]
+    fn the_skeleton_says_locating_in_the_citys_corner_until_the_place_is_known() {
+        let text = symbols(&drawn(&locating(Screen::Weather), probe(), 80, 24), 80, 24).join("\n");
+        assert!(text.contains("LOCATING"), "{text}");
+        assert!(!text.contains("NEW YORK"), "{text}");
+        assert!(text.contains("locating..."), "{text}");
     }
 
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {

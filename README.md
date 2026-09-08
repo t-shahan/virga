@@ -404,12 +404,16 @@ launch, read from `forecast.json` before the terminal is taken over. Its
 bottom border says when it was fetched, `as of 17:52 · updating`, and the
 fresh forecast replaces the numbers in place when it lands, usually within a
 second. A forecast more than 24 hours old, or for a different city, is not
-shown; the launch opens on a spinner as it always did. If the fetch fails the
-forecast stays, marked `refresh failed, r to retry`, rather than giving way
-to an error popup. `r` behaves the same way: the forecast stays up while its
+shown; the launch then opens on the panes themselves, empty — the city in
+its corner, the `Forecast` and `Daily Highs` headings, and the key bar —
+with the spinner inside the forecast pane, and the readings fill the boxes
+already on screen when they land. If the fetch fails the forecast stays,
+marked `refresh failed, r to retry`, rather than giving way to an error
+popup. `r` behaves the same way: the forecast stays up while its
 replacement is fetched.
 
-Set `VIRGA_CACHE=off` to keep the forecast off disk and open on a spinner:
+Set `VIRGA_CACHE=off` to keep the forecast off disk and open on the empty
+panes:
 
 ```bash
 VIRGA_CACHE=off virga

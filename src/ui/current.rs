@@ -75,10 +75,8 @@ pub(super) fn current_area_render(
         None => bottom_titles(&summary, &when, area.width),
     };
 
-    let mut block = Block::bordered()
-        .border_style(Style::new().fg(palette.border))
-        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
-        .title_bottom(Line::from(when).fg(palette.text).right_aligned());
+    let mut block =
+        framed(city, palette).title_bottom(Line::from(when).fg(palette.text).right_aligned());
 
     if let Some(condition) = condition {
         // The rule between them takes the border's colour so the border
@@ -339,6 +337,27 @@ fn long_date(date: &str) -> String {
         Ok(parsed) => parsed.format("%a, %b %-d").to_string(),
         Err(_) => date.to_string(),
     }
+}
+
+/// The pane's border with the city in its corner: the part of it that does
+/// not wait for weather.
+fn framed(city: String, palette: Palette) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
+}
+
+/// The pane on a cache miss: its border and `title` in the city's corner,
+/// and nothing inside. The readings land in a box that is already there,
+/// at the width the loaded pane clips the name to.
+pub(super) fn current_skeleton_render(
+    frame: &mut Frame,
+    title: &str,
+    palette: Palette,
+    area: Rect,
+) {
+    let (title, _, _) = top_titles(title, "", None, area.width);
+    frame.render_widget(framed(title, palette), area);
 }
 
 /// City left; condition and air quality right. The city is the identity, so it
