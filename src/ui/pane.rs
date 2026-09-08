@@ -1,13 +1,25 @@
-//! Vocabulary the bordered panes share: a labelled reading, the two titles
-//! on a bottom border, a compass point, and the hour formats. Each of these
-//! used to be written once per pane, and the copies were identical only
-//! until one was edited.
+//! Vocabulary the bordered panes share: the box with a heading, a labelled
+//! reading, the two titles on a bottom border, a compass point, and the
+//! hour formats. Each of these used to be written once per pane, and the
+//! copies were identical only until one was edited.
 
 use crate::theme::Palette;
 use crate::ui::{TITLE_GUTTER, title_room};
 use chrono::NaiveDateTime;
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Block;
+
+/// A pane's border with `title` as its heading: the part of it that does
+/// not wait for weather.
+pub(super) fn framed(title: &str, palette: Palette) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        // A block title takes the block's own style rather than the border's,
+        // so left unstyled it stays the terminal's default foreground however
+        // the theme is set. It is a header, so it takes the header's role.
+        .title(Line::from(title.to_string()).fg(palette.muted))
+}
 
 /// A muted label in a fixed column and the reading beside it.
 pub(super) fn detail_line(label: &str, value: &str, palette: Palette) -> Line<'static> {

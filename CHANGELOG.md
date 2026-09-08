@@ -12,6 +12,18 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Changed
+
+- A launch with no forecast to show — the first run, a new city, a cache
+  older than a day, or `VIRGA_CACHE=off` — opens on the panes rather than
+  on a spinner in an empty terminal. The city in its corner, the `Forecast`
+  and `Daily Highs` headings and the key bar are drawn at once, with the
+  spinner inside the forecast pane, so the readings fill boxes that are
+  already on screen instead of the whole layout appearing when they land.
+  The corner names the city whose forecast is on its way, not the one just
+  left, and `p` waits for the forecast to land rather than opening the
+  hourly screen onto a spinner (#112).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
