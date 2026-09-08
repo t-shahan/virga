@@ -19,12 +19,9 @@ refuse to publish a version this file does not describe.
   hitting Enter while a fetch was hung showed the search spinner for up to
   the fetch's fifteen-second timeout with nothing to say. Fetches,
   detections and searches now each have a thread of their own, and the only
-  thing a search can wait behind is another search (#75).
-- Choosing a city while the launch is still working out where you are no
-  longer risks losing the choice. A detection that answered after the pick
-  could chain its own fetch over the chosen one, so the guess was what got
-  saved and the city you asked for was thrown away as stale. The pick now
-  abandons the detection outright (#75).
+  thing a search can wait behind is another search. Choosing a city while
+  the launch is still working out where you are abandons the detection, so
+  its late guess cannot fetch over the city you asked for (#75).
 - The update notice is dismissed only by a key pressed on a frame that
   showed it. Any key outside the city search used to clear it, including on
   a terminal too short to give it a row, so on a short terminal the news

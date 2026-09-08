@@ -95,9 +95,11 @@ pub enum Message {
     },
 }
 
-/// One release probe on its own one-shot thread — never the request queue,
-/// where the worker serves requests serially and a slow answer from GitHub
-/// would stall a city search behind it. Sends at most one message and ends.
+/// One release probe on its own one-shot thread, never one of the request
+/// queues. Each queue serves its kind in order, so a probe put on the
+/// search queue would stall a city search behind a slow answer from GitHub,
+/// and the other two are no better a fit for a one-shot with no id and
+/// nothing chaining off it. Sends at most one message and ends.
 ///
 /// The probe is injected so a test never opens a socket; `main` passes the
 /// real one. A probe with nothing to say returns `None`, and failure *is*
@@ -253,7 +255,7 @@ fn spawn_worker(
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -398,12 +400,21 @@ mod tests {
         drop(rx);
         // The worker only learns the receiver is gone when it next sends, so
         // requests are accepted, and may even pile up, until it has served
-        // one more. Every one of them is refused once it has.
-        while !matches!(
-            workers.try_send(search(2)),
-            Err(TrySendError::Disconnected(_))
-        ) {
-            thread::yield_now();
+        // one more. Every one of them is refused once it has. The deadline
+        // is a safety bound, not a timing assertion: a worker that never
+        // notices fails here with a message instead of hanging the run.
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match workers.try_send(search(2)) {
+                Err(TrySendError::Disconnected(_)) => break,
+                Ok(()) | Err(TrySendError::Full(_)) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the worker kept accepting requests after the app stopped listening"
+                    );
+                    thread::yield_now();
+                }
+            }
         }
     }
 

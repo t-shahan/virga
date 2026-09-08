@@ -738,7 +738,8 @@ impl App {
     }
 
     /// Ignored while a fetch or a detection is already running, so a held
-    /// `r` cannot queue one request per keypress against a single worker.
+    /// `r` cannot queue one request per keypress on the fetch queue, which
+    /// serves them one at a time.
     fn refresh(&mut self) -> Option<Request> {
         if self.is_fetching() || self.is_locating() {
             return None;
