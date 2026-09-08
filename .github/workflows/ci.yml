@@ -173,10 +173,18 @@ jobs:
       # install.sh is piped straight from the repository into strangers'
       # shells, which makes it the least appropriate file here to leave
       # unlinted. shellcheck ships preinstalled on the runner image.
-      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh scripts/check-path-advice.sh
+      - run: shellcheck install.sh scripts/release.sh scripts/check-changelog.sh scripts/check-path-advice.sh scripts/check-install.sh
       # The one branch of install.sh that can run without a release behind
       # it: the PATH advice, one arm per shell.
       - run: ./scripts/check-path-advice.sh
+      # The rest of install.sh, driven end to end against shims for curl, gh
+      # and cp: every failure message, every gh verdict, and a signal landing
+      # in the middle of the copy. Once under the runner's sh, which is dash,
+      # and once under bash: when a signal trap runs relative to the command
+      # it interrupted is each shell's own decision, and those two are the
+      # shells a user is likeliest to pipe the script into.
+      - run: ./scripts/check-install.sh
+      - run: ./scripts/check-install.sh bash
 
   actionlint:
     name: actionlint
