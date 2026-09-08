@@ -7,6 +7,14 @@ pub struct Location {
     pub country: Option<String>,
     pub lat: f64,
     pub lon: f64,
+    /// The IANA zone the geocoder files the place under, e.g.
+    /// "America/Denver". Not persisted: what the state file and the cache
+    /// keep is `ActiveLocation`, and the offset the forecast response
+    /// carries is what tells the time there.
+    pub timezone: Option<String>,
+    /// From the geocoder, where it knows. Orders the search list so the city
+    /// people mean comes first among the places that share its name.
+    pub population: Option<u64>,
 }
 
 impl Location {

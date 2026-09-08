@@ -215,8 +215,10 @@ The hourly screen puts its four tracks on a shared axis. `▲` marks the selecte
 hour, a weather emoji marks the sky every three hours, and wind arrows every
 second hour carry their speed on the six-hour ticks.
 
-Choosing a city — or cancelling — returns to whichever screen the search was
-opened from.
+Search results come biggest first. Two that would read the same — one name,
+one region, one country — get a second line naming the timezone, or the
+coordinates where even that is shared. Choosing a city — or cancelling —
+returns to whichever screen the search was opened from.
 
 ## Commands
 
@@ -243,6 +245,10 @@ Frederick, Maryland, United States · Partly cloudy
 75°F, feels like 78°F · wind 7 mph · AQI 42 Good
 Today: 84°F / 63°F · rain 20% · UV 6 · sun 06:24–20:07
 ```
+
+A city whose clocks disagree with the machine's says what time it is there
+on the first line, as `· local time 21:30 (UTC+09:00)`; a city on the same
+clock says nothing about it.
 
 Plain lines on stdout, so a script or a status bar reads it as easily as a
 person does; a reading the provider did not report simply does not appear.

@@ -13,6 +13,38 @@ pub struct GeocodeResultDto {
     pub country: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// These two decorate a row rather than define it, so a value of the
+    /// wrong shape — a population sent as a string, a timezone sent as a
+    /// number — costs that one value and not the whole list. The name and
+    /// coordinates above are held to the stricter rule because a row
+    /// without them is not a place, and the list is better off failing
+    /// loudly than showing one.
+    #[serde(default, deserialize_with = "lenient")]
+    pub timezone: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub population: Option<u64>,
+}
+
+/// A value of the expected type, or `None` for anything else. An untagged
+/// enum buffers the value before trying each arm, which is what lets the
+/// second arm swallow whatever the first refused — a plain `Option<T>`
+/// would have consumed part of the input and failed the whole document.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Lenient<T> {
+    Value(T),
+    Other(serde::de::IgnoredAny),
+}
+
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Lenient::<T>::deserialize(deserializer)? {
+        Lenient::Value(value) => Some(value),
+        Lenient::Other(_) => None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +79,8 @@ impl GeocodeResultDto {
             country: self.country.map(plain),
             lat: self.latitude?,
             lon: self.longitude?,
+            timezone: self.timezone.map(plain),
+            population: self.population,
         })
     }
 }
@@ -106,6 +140,10 @@ impl GeoIpDto {
             country: country.map(plain),
             lat,
             lon,
+            // A detection never sits in the search list, which is the one
+            // place these are read.
+            timezone: None,
+            population: None,
         })
     }
 }
@@ -735,9 +773,12 @@ mod tests {
             country: Some("Fra\u{200f}nce".to_string()),
             latitude: Some(48.85),
             longitude: Some(2.35),
+            timezone: Some("Europe/\u{202e}Paris".to_string()),
+            population: None,
         };
         let location = geocode.into_location().expect("a location");
         assert_eq!(location.label(), "Paris, Île-de-France, France");
+        assert_eq!(location.timezone.as_deref(), Some("Europe/Paris"));
 
         // The overrides ride JSON's own \u escapes so the hostile
         // characters are visible in this source rather than reordering it.
@@ -761,6 +802,8 @@ mod tests {
             country: None,
             latitude: Some(27.18),
             longitude: Some(56.26),
+            timezone: None,
+            population: None,
         };
         let location = geocode.into_location().expect("a location");
         assert_eq!(location.name, "بندر\u{200c}عباس");
@@ -803,6 +846,41 @@ mod tests {
         let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
         assert_eq!(dto.results[0].name, "Frederick");
         assert_eq!(dto.results[0].admin1.as_deref(), Some("Maryland"));
+        assert_eq!(dto.results[0].timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(dto.results[0].population, Some(69479));
+    }
+
+    /// The timezone and population decorate a row; the row stands without
+    /// them. Absent, null, and the wrong type all read as unknown, and none
+    /// of them costs the list the rows around it.
+    #[test]
+    fn a_geocode_row_survives_a_missing_or_malformed_timezone_and_population() {
+        let json = r#"{"results": [
+            {"name": "Absent", "latitude": 1.0, "longitude": 1.0},
+            {"name": "Null", "latitude": 1.0, "longitude": 1.0,
+             "timezone": null, "population": null},
+            {"name": "Wrong", "latitude": 1.0, "longitude": 1.0,
+             "timezone": 42, "population": "many"},
+            {"name": "Negative", "latitude": 1.0, "longitude": 1.0,
+             "population": -5},
+            {"name": "Right", "latitude": 1.0, "longitude": 1.0,
+             "timezone": "Europe/Berlin", "population": 3644826}
+        ]}"#;
+
+        let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
+        let locations: Vec<_> = dto
+            .results
+            .into_iter()
+            .filter_map(GeocodeResultDto::into_location)
+            .collect();
+
+        assert_eq!(locations.len(), 5, "every row is still a place");
+        for location in &locations[..4] {
+            assert!(location.timezone.is_none(), "{}", location.name);
+            assert!(location.population.is_none(), "{}", location.name);
+        }
+        assert_eq!(locations[4].timezone.as_deref(), Some("Europe/Berlin"));
+        assert_eq!(locations[4].population, Some(3_644_826));
     }
 
     #[test]
