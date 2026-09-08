@@ -267,9 +267,9 @@ fn main() -> Result<()> {
         println!("{notice}");
     }
     // After the restore and the notices: the whole point of catching the
-    // signal was to reach them.
+    // signal was to reach them. Now it can end the process as it meant to.
     if let Some(signal) = interrupt.signal() {
-        std::process::exit(interrupt::exit_status(signal));
+        interrupt::end(signal);
     }
     result
 }
