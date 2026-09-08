@@ -88,6 +88,12 @@ undo_hint() {
     fi
 }
 trap 'undo_hint $?' EXIT
+# Ctrl-C during a slow gate is the exit people actually take, and it never
+# reaches the hint on its own: dash ends on an untrapped signal without running
+# the EXIT trap, and bash runs it with $? still 0. Turning the signal into an
+# exit with its conventional status gets the hint printed under both.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Only the first `version =`, which is the package's own. Dependency versions
 # further down the manifest must not be touched.
