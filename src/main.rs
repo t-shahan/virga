@@ -926,14 +926,14 @@ mod tests {
 
     use crate::app::ActiveLocation;
     use crate::events::Message;
+    use crate::weather::client::tests::serving_counted;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
     use ratatui::buffer::Cell;
     use ratatui::layout::{Position, Size};
     use std::convert::Infallible;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
     /// A backend that counts how often the terminal is asked where its
     /// cursor is, so a test can prove the answer is never waited on.
@@ -1393,38 +1393,6 @@ mod tests {
         assert!(warning.contains("create"));
     }
 
-    /// A loopback host answering every detection with the same canned
-    /// response, and a count of how many it was asked for — the count is
-    /// the assertion (#65): the server is the one party that knows whether
-    /// a report asked the network.
-    fn detection_host(status: &str, body: &str) -> (Endpoints, Arc<AtomicUsize>) {
-        use std::io::{Read as _, Write as _};
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("local addr");
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let hits = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&hits);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                counted.fetch_add(1, Ordering::SeqCst);
-                let mut scratch = [0u8; 4096];
-                let _ = stream.read(&mut scratch);
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        let endpoints = Endpoints {
-            geoip: format!("http://{addr}/"),
-            ..Endpoints::default()
-        };
-        (endpoints, hits)
-    }
-
     fn instant(seconds: i64) -> DateTime<Utc> {
         DateTime::<Utc>::from_timestamp(seconds, 0).expect("a representable instant")
     }
@@ -1435,7 +1403,11 @@ mod tests {
     /// after a refusal must not knock again until the backoff has passed.
     #[test]
     fn a_refused_detection_is_not_asked_again_by_the_next_report() {
-        let (endpoints, hits) = detection_host("429 Too Many Requests", r#"{"error":true}"#);
+        let (endpoints, hits) = serving_counted(
+            "429 Too Many Requests",
+            "application/json",
+            r#"{"error":true}"#,
+        );
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
         let first_poll = instant(1_800_000_000);
@@ -1469,8 +1441,9 @@ mod tests {
     /// goes with it: the next report asks nothing.
     #[test]
     fn a_detection_that_answers_after_a_refusal_is_remembered() {
-        let (endpoints, hits) = detection_host(
+        let (endpoints, hits) = serving_counted(
             "200 OK",
+            "application/json",
             r#"{"city":"Reykjavík","region":"Capital Region","country_name":"Iceland","latitude":64.14659,"longitude":-21.94223}"#,
         );
         let test = tempfile::tempdir().unwrap();

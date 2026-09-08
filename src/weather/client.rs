@@ -220,10 +220,12 @@ fn fetch_air_quality_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn hourly_request_names_every_weathergram_field() {
@@ -253,6 +255,17 @@ mod tests {
     /// and wrongly: an error status, a body that is not JSON, or the hotel
     /// wifi's login page delivered with a cheerful 200.
     fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
+        serving_counted(status, content_type, body).0
+    }
+
+    /// `serving`, with a count of how many requests it answered. The count
+    /// is what `virga now`'s tests assert on (#65): the server is the one
+    /// party that knows whether a report asked the network.
+    pub(crate) fn serving_counted(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (Endpoints, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let response = format!(
@@ -260,9 +273,12 @@ mod tests {
             body.len()
         );
 
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                counted.fetch_add(1, Ordering::SeqCst);
                 // Drain enough of the request that the client is not blocked
                 // writing while we are blocked replying.
                 let mut scratch = [0u8; 4096];
@@ -273,12 +289,13 @@ mod tests {
         });
 
         let base = format!("http://{addr}/");
-        Endpoints {
+        let endpoints = Endpoints {
             forecast: base.clone(),
             geocode: base.clone(),
             air_quality: base.clone(),
             geoip: base,
-        }
+        };
+        (endpoints, hits)
     }
 
     /// Short bounds: these servers answer at once, so a test that hangs is a
