@@ -2,7 +2,7 @@ use crate::app::{ActiveLocation, KeyHintStyle, LocationSource, Remembered};
 use crate::theme::Theme;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Version 2 requires a location; the optional `theme` field rides along
@@ -37,8 +37,22 @@ struct StateDocument {
     /// no answer, as UTC seconds. Optional in every version, and ignored by
     /// binaries that predate it: it only ever says "do not ask again just
     /// yet", so a reader that does not understand it merely asks (#65).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "integer_or_nothing",
+        skip_serializing_if = "Option::is_none"
+    )]
     detection_failed_at: Option<i64>,
+}
+
+/// Any value but an integer reads as no marker. The other fields fail the
+/// whole document when their type is wrong, and the next save then treats
+/// the file as corruption and writes it back without the remembered city or
+/// theme. The marker is not worth that: its only power is to hold off one
+/// request, so a hand-edit or some future reshaping of it costs one request
+/// and nothing else.
+fn integer_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_i64())
 }
 
 /// Everything the state file had to say, with the parts that could not be
@@ -160,10 +174,10 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     let remembered = remembered_of(&document)?;
     let (theme, theme_warning) = theme_of(&document);
     let (key_hint_style, key_hint_warning) = key_hint_style_of(&document);
-    // A timestamp `chrono` cannot represent did not come from this program.
-    // It is treated as no marker, which errs toward asking the network once
-    // more rather than never; not worth a warning, since nothing the user
-    // set is being ignored.
+    // An integer `chrono` cannot place on a calendar did not come from this
+    // program either, and reads as no marker for the reason
+    // `integer_or_nothing` gives. Not worth a warning: nothing the user set
+    // is being ignored.
     let detection_failed_at = document
         .detection_failed_at
         .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0));
@@ -748,6 +762,42 @@ mod tests {
 
         assert_eq!(persisted.detection_failed_at, None);
         assert_eq!(persisted.warning, None);
+    }
+
+    /// A marker of the wrong type is the same story: every other field
+    /// would fail the document, but this one only ever holds off a request,
+    /// so it is not allowed to take the remembered city and theme with it.
+    #[test]
+    fn a_marker_of_the_wrong_type_reads_as_none_and_costs_nothing_else() {
+        for marker in ["\"1800000000\"", "1800000000.5", "null", "true", "[]"] {
+            let test = tempfile::tempdir().unwrap();
+            let path = test.path().join("state.json");
+            write_raw(
+                &path,
+                &format!(
+                    r#"{{"version":2,"location":{{"label":"Berlin","lat":52.0,"lon":13.0}},"source":"chosen","theme":"nord","detection_failed_at":{marker}}}"#
+                ),
+            );
+
+            let persisted = load_from(&path).unwrap();
+            assert_eq!(persisted.detection_failed_at, None, "{marker}");
+            assert_eq!(persisted.theme, Some(Theme::Nord), "{marker}");
+            assert!(persisted.remembered.is_some(), "{marker}");
+            assert_eq!(persisted.warning, None, "{marker}");
+
+            // The reviewer's scenario for #119: a save over such a document
+            // must merge into it, not treat it as corruption and start over.
+            save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+            let persisted = load_from(&path).unwrap();
+            assert!(persisted.remembered.is_some(), "{marker}");
+            assert_eq!(persisted.theme, Some(Theme::Nord), "{marker}");
+            assert_eq!(
+                persisted.key_hint_style,
+                Some(KeyHintStyle::Full),
+                "{marker}"
+            );
+            assert_eq!(persisted.detection_failed_at, None, "{marker}");
+        }
     }
 
     #[test]
