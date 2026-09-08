@@ -7,10 +7,14 @@ use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
+use std::fmt;
+use std::io::{self, Read};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
-use ureq::Agent;
+use ureq::http::Response;
+use ureq::{Agent, Body};
 
 /// End-to-end bound on a request: DNS, connect, TLS, response and body read.
 /// `ureq` defaults every one of these to `None`, so before this a hung server
@@ -29,6 +33,20 @@ const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,we
 const TIMEOUT_GEOIP_GLOBAL: Duration = Duration::from_secs(5);
 const TIMEOUT_GEOIP_CONNECT: Duration = Duration::from_secs(3);
 
+/// Ceiling on any response body, counted on the wire and again after decoding,
+/// before it is parsed. A full forecast with its hourly block is tens of
+/// kilobytes and a geocode page is under five, so this is headroom, not a
+/// budget. Stated here because ureq's own 10 MB cap lives inside
+/// `Body::read_json()` alone, `with_config()` defaults to unlimited, and
+/// neither counts decoded bytes; `read_bounded_json` is where all of that is
+/// made to hold.
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+/// Open-Meteo and ipapi.co do not redirect, so ureq's default of ten is nine
+/// hops of somebody else's itinerary. A couple is enough to survive a host
+/// growing a trailing-slash rule without turning a loop into ten round trips.
+const MAX_REDIRECTS: u32 = 2;
+
 /// One shared agent for the whole process. `ureq::get()` builds a fresh Agent
 /// per call, and a fresh Agent means a fresh connection pool — so every request
 /// re-paid a full TCP + TLS handshake. Measured against Open-Meteo that was
@@ -36,7 +54,7 @@ const TIMEOUT_GEOIP_CONNECT: Duration = Duration::from_secs(3);
 /// the same host reuse the connection.
 fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
-    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GLOBAL, TIMEOUT_CONNECT))
+    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GLOBAL, TIMEOUT_CONNECT, true))
 }
 
 /// Its own agent rather than the shared one: this is a different host with a
@@ -44,14 +62,22 @@ fn agent() -> &'static Agent {
 /// app talks to it once, at launch, and never again.
 fn geoip_agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
-    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GEOIP_GLOBAL, TIMEOUT_GEOIP_CONNECT))
+    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GEOIP_GLOBAL, TIMEOUT_GEOIP_CONNECT, true))
 }
 
-fn bounded_agent(global: Duration, connect: Duration) -> Agent {
+/// `https_only` is a parameter rather than a constant because the loopback
+/// tests serve plain HTTP and cannot cheaply do otherwise. Production passes
+/// `true`: every request carries the user's coordinates, and with the default
+/// `false` a redirect from any provider to an `http://` URL would be followed
+/// and those coordinates re-sent in the clear. ureq checks the scheme on every
+/// hop, so the setting covers the redirect target as well as the first URL.
+fn bounded_agent(global: Duration, connect: Duration, https_only: bool) -> Agent {
     Agent::new_with_config(
         Agent::config_builder()
             .timeout_global(Some(global))
             .timeout_connect(Some(connect))
+            .https_only(https_only)
+            .max_redirects(MAX_REDIRECTS)
             .build(),
     )
 }
@@ -92,7 +118,7 @@ pub fn detect_location() -> Result<Location> {
 
 fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location> {
     let mut response = agent.get(&endpoints.geoip).call()?;
-    let dto: GeoIpDto = response.body_mut().read_json()?;
+    let dto: GeoIpDto = read_bounded_json(&mut response)?;
 
     dto.into_location()
         .context("the location service did not name a place")
@@ -154,7 +180,7 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
         .query("past_days", "14")
         .call()?;
 
-    let dto: ForecastDto = response.body_mut().read_json()?;
+    let dto: ForecastDto = read_bounded_json(&mut response)?;
     Ok(dto.into())
 }
 
@@ -175,7 +201,7 @@ fn search_locations_with(
         .query("format", "json")
         .call()?;
 
-    let dto: GeocodeDto = response.body_mut().read_json()?;
+    let dto: GeocodeDto = read_bounded_json(&mut response)?;
 
     Ok(dto
         .results
@@ -208,15 +234,72 @@ fn fetch_air_quality_with(
         .query("domains", "cams_global")
         .call()?;
 
-    let dto: AqiDto = response.body_mut().read_json()?;
+    let dto: AqiDto = read_bounded_json(&mut response)?;
 
     Ok(dto.into())
 }
 
+/// Every body is read through here, so the bound is a property of the module
+/// rather than something each call site remembers to repeat. Two layers,
+/// because ureq's limit reader sits *under* its gzip decoder: `limit()` counts
+/// bytes off the wire, ureq inflates whatever the response's `Content-Encoding`
+/// says regardless of what was requested, and a few kilobytes of gzip inflate
+/// to gigabytes. `take` counts the decoded bytes, with one of slack so a body
+/// of exactly the limit is told apart from one that ran past it. Buffered and
+/// then parsed, rather than streamed into `from_reader`, so that the check
+/// happens before a padded `String` field is allocated; serde_json documents
+/// the buffered path as the faster one anyway.
+fn read_bounded_json<T: DeserializeOwned>(response: &mut Response<Body>) -> Result<T> {
+    let reader = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
+        .reader();
+
+    let mut bytes = Vec::new();
+    let outcome = reader.take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut bytes);
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES || tripped_wire_limit(&outcome) {
+        return Err(ResponseTooLarge {
+            limit: MAX_RESPONSE_BYTES,
+        }
+        .into());
+    }
+    outcome?;
+
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// ureq reports its wire limit as an `io::Error` wrapping its own error, and
+/// exposes it through neither `source()` nor a variant of its own. Read it
+/// back out so that both layers refuse a body with the same error, and a
+/// caller never has to know which one fired.
+fn tripped_wire_limit(outcome: &io::Result<usize>) -> bool {
+    let Err(err) = outcome else { return false };
+    matches!(
+        err.get_ref()
+            .and_then(|inner| inner.downcast_ref::<ureq::Error>()),
+        Some(ureq::Error::BodyExceedsLimit(_))
+    )
+}
+
+/// A body that ran past `MAX_RESPONSE_BYTES`, on the wire or once decoded.
+#[derive(Debug)]
+struct ResponseTooLarge {
+    limit: u64,
+}
+
+impl fmt::Display for ResponseTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the response body ran past {} bytes", self.limit)
+    }
+}
+
+impl std::error::Error for ResponseTooLarge {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
 
     #[test]
@@ -247,12 +330,30 @@ mod tests {
     /// and wrongly: an error status, a body that is not JSON, or the hotel
     /// wifi's login page delivered with a cheerful 200.
     fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("local addr");
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
+        serving_response(response.into_bytes())
+    }
+
+    /// A 200 whose body arrives gzip-compressed. ureq decodes on the
+    /// response's `Content-Encoding` whether or not it asked for it, so this is
+    /// what a provider, or whoever is answering for it, can hand the parser.
+    fn serving_gzip(body: &[u8]) -> Endpoints {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        serving_response(response)
+    }
+
+    /// The raw bytes every connection gets, whatever it asked for.
+    fn serving_response(response: Vec<u8>) -> Endpoints {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
 
         thread::spawn(move || {
             for stream in listener.incoming() {
@@ -261,7 +362,7 @@ mod tests {
                 // writing while we are blocked replying.
                 let mut scratch = [0u8; 4096];
                 let _ = stream.read(&mut scratch);
-                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&response);
                 let _ = stream.flush();
             }
         });
@@ -278,7 +379,7 @@ mod tests {
     /// Short bounds: these servers answer at once, so a test that hangs is a
     /// bug in the test, and should say so in a moment rather than in 15s.
     fn test_agent() -> Agent {
-        bounded_agent(Duration::from_secs(5), Duration::from_secs(2))
+        bounded_agent(Duration::from_secs(5), Duration::from_secs(2), false)
     }
 
     const CAPTIVE_PORTAL: &str =
@@ -458,6 +559,10 @@ mod tests {
         assert_eq!(timeouts.connect, Some(TIMEOUT_GEOIP_CONNECT));
         assert!(TIMEOUT_GEOIP_GLOBAL < TIMEOUT_GLOBAL);
         assert!(TIMEOUT_GEOIP_CONNECT < TIMEOUT_GEOIP_GLOBAL);
+        assert!(
+            geoip_agent().config().https_only(),
+            "the detection request identifies the user by its source address"
+        );
     }
 
     #[test]
@@ -492,6 +597,122 @@ mod tests {
             TIMEOUT_CONNECT < TIMEOUT_GLOBAL,
             "connect must fit inside the end-to-end budget"
         );
+        assert!(agent().config().https_only());
+        assert_eq!(agent().config().max_redirects(), MAX_REDIRECTS);
+    }
+
+    /// The scheme check is what keeps coordinates off the wire in the clear,
+    /// and it has to hold before any byte is sent, not after a redirect has
+    /// already been followed. A production-shaped agent pointed at a plain
+    /// `http://` URL must refuse the request outright.
+    #[test]
+    fn a_production_agent_refuses_to_speak_plain_http() {
+        let endpoints = serving("200 OK", "application/json", DETECTED);
+        let agent = bounded_agent(Duration::from_secs(5), Duration::from_secs(2), true);
+
+        let Err(err) = detect_location_with(&agent, &endpoints) else {
+            panic!("an http:// URL must not be fetched by the production agent");
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<ureq::Error>(),
+                Some(ureq::Error::RequireHttpsOnly(_))
+            ),
+            "refused for the wrong reason: {err:#}"
+        );
+    }
+
+    /// A server that redirects to itself forever. With ureq's default of ten
+    /// the client would make eleven round trips before giving up; the bound
+    /// here caps the tour at the original request plus `MAX_REDIRECTS`.
+    #[test]
+    fn a_redirect_loop_is_cut_short_rather_than_followed_ten_times() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let hops = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hops);
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{addr}/again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut scratch = [0u8; 4096];
+                let _ = stream.read(&mut scratch);
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let result = test_agent().get(format!("http://{addr}/")).call();
+
+        assert!(
+            matches!(result, Err(ureq::Error::TooManyRedirects)),
+            "a loop must end in an error, got {result:?}"
+        );
+        assert_eq!(
+            hops.load(Ordering::SeqCst),
+            1 + MAX_REDIRECTS as usize,
+            "the client kept following past its bound"
+        );
+    }
+
+    /// The bound has to be the one this module names, not whatever the ureq
+    /// release in Cargo.lock happens to apply inside `read_json`. The body is
+    /// a well-formed geocode answer padded past the limit, so the only thing
+    /// that can reject it is the limit.
+    #[test]
+    fn an_oversized_body_is_refused_before_it_is_parsed() {
+        let padding = "x".repeat(MAX_RESPONSE_BYTES as usize);
+        let body = format!(r#"{{"results":[],"padding":"{padding}"}}"#);
+        assert!(body.len() as u64 > MAX_RESPONSE_BYTES);
+        let endpoints = serving("200 OK", "application/json", &body);
+
+        let Err(err) = search_locations_with(&test_agent(), &endpoints, "reykjavik") else {
+            panic!("a body past the limit must not be read into memory");
+        };
+        assert_eq!(
+            limit_that_fired(&err),
+            Some(MAX_RESPONSE_BYTES),
+            "refused for the wrong reason: {err:#}"
+        );
+    }
+
+    /// The wire limit alone does not hold: ureq inflates on the response's
+    /// `Content-Encoding`, and its limit reader counts the bytes underneath
+    /// the decoder. The fixture is a well-formed geocode answer padded to
+    /// 8 MiB and gzipped down to a few KiB, so it is under the limit on the
+    /// wire and eight times over it once decoded. Before the decoded bound
+    /// it parsed to an empty result list.
+    #[test]
+    fn a_gzip_body_inflating_past_the_limit_is_refused() {
+        let fixture = include_bytes!("../../tests/fixtures/geocode_padded_8mib.json.gz");
+        assert!(
+            (fixture.len() as u64) < MAX_RESPONSE_BYTES,
+            "the fixture must fit on the wire, or the wire limit is what fired"
+        );
+        let endpoints = serving_gzip(fixture);
+
+        let Err(err) = search_locations_with(&test_agent(), &endpoints, "reykjavik") else {
+            panic!("a body that inflates past the limit must not be read into memory");
+        };
+        assert_eq!(
+            limit_that_fired(&err),
+            Some(MAX_RESPONSE_BYTES),
+            "refused for the wrong reason: {err:#}"
+        );
+    }
+
+    /// Both bounds surface as the module's own error, so telling "too big"
+    /// from "not JSON" is a downcast rather than a match on prose.
+    fn limit_that_fired(err: &anyhow::Error) -> Option<u64> {
+        err.downcast_ref::<ResponseTooLarge>()
+            .map(|refusal| refusal.limit)
     }
 
     /// A server that completes the handshake, reads the request and then says
@@ -515,7 +736,11 @@ mod tests {
             }
         });
 
-        let agent = bounded_agent(Duration::from_millis(400), Duration::from_millis(200));
+        let agent = bounded_agent(
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+            false,
+        );
         let started = Instant::now();
         let result = agent.get(format!("http://{addr}/")).call();
         let waited = started.elapsed();
@@ -536,7 +761,11 @@ mod tests {
             listener.local_addr().expect("local addr")
         };
 
-        let agent = bounded_agent(Duration::from_millis(400), Duration::from_millis(200));
+        let agent = bounded_agent(
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+            false,
+        );
         let started = Instant::now();
         let result = agent.get(format!("http://{addr}/")).call();
 
