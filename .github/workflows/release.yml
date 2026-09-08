@@ -213,7 +213,10 @@ jobs:
             inside
           ' CHANGELOG.md | sed '/^\[[^]]*\]: http/d' > notes.md
 
-          if ! grep -q '[^[:space:]]' notes.md; then
+          # A line whose first non-blank character is not `#`: a section
+          # holding only a bare `### Fixed` sub-heading has no notes either.
+          # The same test release.sh applies before it tags.
+          if ! grep -q '^[[:space:]]*[^#[:space:]]' notes.md; then
             echo "::error::Extracted no release notes for $release from CHANGELOG.md."
             exit 1
           fi

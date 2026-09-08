@@ -24,19 +24,18 @@ around `release.sh` that the README leaves out.
    [Cutting a release](README.md#cutting-a-release) says what it does. It
    asks `[y/N]` before it commits, tags and pushes (`--yes` skips the
    question). If a gate fails, or you answer `N`, the version bump is still
-   in the working tree; discard it with
-   `git checkout -- Cargo.toml Cargo.lock CHANGELOG.md`.
+   in the working tree; the script says so on the way out, and
+   `git checkout -- Cargo.toml Cargo.lock CHANGELOG.md` discards it.
 3. Watch the [release run](https://github.com/t-shahan/virga/actions/workflows/release.yml).
 4. Confirm the release page lists all five archives and `SHA256SUMS`. For a
    full release with the `TAP_KEY` secret set, confirm too that a
    `virga X.Y.Z` commit landed on
    [`t-shahan/homebrew-virga`](https://github.com/t-shahan/homebrew-virga).
 
-A prerelease (`X.Y.Z-rc1`) never touches the tap. It also borrows the final
-version's changelog section and currently stamps a date on it, which the
-changelog gate then treats as shipped, so every edit to those notes before
-the final release needs a `Changelog: history` trailer; see
-[#66](https://github.com/t-shahan/virga/issues/66) before cutting one.
+A prerelease (`X.Y.Z-rc1`) never touches the tap. It borrows the final
+version's changelog section and leaves the heading undated, so those notes
+stay open to ordinary edits until `./scripts/release.sh X.Y.Z` stamps them;
+a date on a heading is what the changelog gate reads as shipped.
 
 ## Reporting a vulnerability
 
