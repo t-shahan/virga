@@ -114,7 +114,15 @@ fn main() -> Result<()> {
                 None => asked_location(),
             };
             match weather::client::fetch_forecast(location.lat, location.lon) {
-                Ok(weather) => {
+                Ok(weather::client::Forecast {
+                    weather,
+                    air_quality_error,
+                }) => {
+                    // Stderr, so a status bar parsing stdout still gets its
+                    // report and a human still learns why the AQI is missing.
+                    if let Some(error) = air_quality_error {
+                        eprintln!("virga: the forecast loaded without air quality: {error}");
+                    }
                     // The app's rule, kept here too: a detection is written
                     // down only once weather has actually loaded for it. And
                     // written down it must be — remembering the answer is
@@ -1057,6 +1065,7 @@ mod tests {
             id,
             location,
             weather: Weather::fixture(5, 2),
+            air_quality_error: None,
         }
     }
 

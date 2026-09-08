@@ -477,6 +477,7 @@ impl App {
                 id,
                 location,
                 weather,
+                air_quality_error,
             } => {
                 if !self.awaiting_weather(id) {
                     return Outcome::nothing();
@@ -493,6 +494,9 @@ impl App {
                 self.shown = Shown::default();
                 Outcome {
                     remember: self.remembered(),
+                    warning: air_quality_error.map(|error| {
+                        format!("virga: the forecast loaded without air quality: {error}")
+                    }),
                     ..Outcome::nothing()
                 }
             }
@@ -1820,6 +1824,7 @@ mod tests {
             id,
             location,
             weather,
+            air_quality_error: None,
         })
         .remember
     }
@@ -1980,6 +1985,44 @@ mod tests {
         assert!(matches!(app.weather, Fetch::Ready(_)));
         assert!(outcome.warning.unwrap().contains("permission denied"));
         assert!(outcome.request.is_none());
+    }
+
+    /// A forecast that arrived without its air quality is still a forecast,
+    /// so the reason is a line on the way out, never a frame — and the reason
+    /// has to be there, because a blank cell with no explanation is the bug.
+    #[test]
+    fn a_forecast_missing_its_air_quality_is_a_warning() {
+        let mut app = App::new();
+        let request = app.startup_request();
+        let Request::Fetch { id, location } = request else {
+            panic!("not a fetch")
+        };
+        let outcome = app.on_message(Message::Loaded {
+            id,
+            location,
+            weather: Weather::fixture(5, 2),
+            air_quality_error: Some("http status: 503".to_string()),
+        });
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        let warning = outcome.warning.expect("the reason reaches the user");
+        assert!(warning.contains("air quality"), "{warning:?}");
+        assert!(warning.contains("http status: 503"), "{warning:?}");
+    }
+
+    #[test]
+    fn a_forecast_with_its_air_quality_carries_no_warning() {
+        let mut app = App::new();
+        let request = app.startup_request();
+        let Request::Fetch { id, location } = request else {
+            panic!("not a fetch")
+        };
+        let outcome = app.on_message(Message::Loaded {
+            id,
+            location,
+            weather: Weather::fixture(5, 2),
+            air_quality_error: None,
+        });
+        assert!(outcome.warning.is_none());
     }
 
     /// The bug ActiveLocation exists to kill: `r` used to refetch the
@@ -2419,6 +2462,7 @@ mod tests {
             id,
             location,
             weather: Weather::fixture(5, 2),
+            air_quality_error: None,
         });
 
         assert!(

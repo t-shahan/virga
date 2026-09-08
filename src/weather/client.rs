@@ -91,14 +91,30 @@ pub fn detect_location() -> Result<Location> {
 }
 
 fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location> {
-    let mut response = agent.get(&endpoints.geoip).call()?;
-    let dto: GeoIpDto = response.body_mut().read_json()?;
+    let mut response = agent
+        .get(&endpoints.geoip)
+        .call()
+        .with_context(|| format!("ask {} where you are", endpoints.geoip))?;
+    let dto: GeoIpDto = response
+        .body_mut()
+        .read_json()
+        .with_context(|| format!("read the location from {}", endpoints.geoip))?;
 
     dto.into_location()
         .context("the location service did not name a place")
 }
 
-pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
+/// A forecast that arrived, and the reason its air quality did not when that
+/// is what happened. Air quality is supplementary, so losing it costs the
+/// reading and never the forecast — but a blank cell for a whole session
+/// looks the same whether CAMS has no coverage here or the endpoint is down,
+/// and only the reason tells those apart.
+pub struct Forecast {
+    pub weather: Weather,
+    pub air_quality_error: Option<String>,
+}
+
+pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Forecast> {
     fetch_forecast_with(agent(), &Endpoints::default(), lat, lon)
 }
 
@@ -107,7 +123,7 @@ fn fetch_forecast_with(
     endpoints: &Endpoints,
     lat: f64,
     lon: f64,
-) -> Result<Weather> {
+) -> Result<Forecast> {
     // A scoped thread rather than a detached one. The rule this encodes was
     // already here in prose: `?` on the forecast while air quality was still
     // running used to detach it, so a run of early failures left a pile of
@@ -117,9 +133,16 @@ fn fetch_forecast_with(
         let aqi = scope.spawn(|| fetch_air_quality_with(agent, endpoints, lat, lon));
         let forecast = fetch_daily_with(agent, endpoints, lat, lon);
 
-        let report = match aqi.join() {
-            Ok(Ok(report)) => report,
-            _ => AirQualityReport::default(),
+        let (report, air_quality_error) = match aqi.join() {
+            Ok(Ok(report)) => (report, None),
+            Ok(Err(error)) => (AirQualityReport::default(), Some(format!("{error:#}"))),
+            // A panic in the child is a bug rather than a network condition,
+            // but the forecast still arrived and re-raising it here would take
+            // the terminal down with it. Degrade, and say why.
+            Err(_) => (
+                AirQualityReport::default(),
+                Some("the air-quality request panicked".to_string()),
+            ),
         };
 
         let mut weather = forecast?;
@@ -128,7 +151,10 @@ fn fetch_forecast_with(
             day.aqi = report.daily_max.get(&day.date).copied();
         }
 
-        Ok(weather)
+        Ok(Forecast {
+            weather,
+            air_quality_error,
+        })
     })
 }
 
@@ -152,9 +178,13 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
         .query("timezone", "auto")
         .query("forecast_days", "8")
         .query("past_days", "14")
-        .call()?;
+        .call()
+        .with_context(|| format!("fetch the forecast from {}", endpoints.forecast))?;
 
-    let dto: ForecastDto = response.body_mut().read_json()?;
+    let dto: ForecastDto = response
+        .body_mut()
+        .read_json()
+        .with_context(|| format!("read the forecast from {}", endpoints.forecast))?;
     Ok(dto.into())
 }
 
@@ -173,9 +203,13 @@ fn search_locations_with(
         .query("count", "5")
         .query("language", "en")
         .query("format", "json")
-        .call()?;
+        .call()
+        .with_context(|| format!("search for cities at {}", endpoints.geocode))?;
 
-    let dto: GeocodeDto = response.body_mut().read_json()?;
+    let dto: GeocodeDto = response
+        .body_mut()
+        .read_json()
+        .with_context(|| format!("read the city list from {}", endpoints.geocode))?;
 
     Ok(dto
         .results
@@ -206,9 +240,13 @@ fn fetch_air_quality_with(
         .query("past_days", "14")
         .query("forecast_days", "7")
         .query("domains", "cams_global")
-        .call()?;
+        .call()
+        .with_context(|| format!("fetch air quality from {}", endpoints.air_quality))?;
 
-    let dto: AqiDto = response.body_mut().read_json()?;
+    let dto: AqiDto = response
+        .body_mut()
+        .read_json()
+        .with_context(|| format!("read the air quality from {}", endpoints.air_quality))?;
 
     Ok(dto.into())
 }
@@ -337,7 +375,10 @@ mod tests {
             ..good
         };
 
-        let weather = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
+        let Forecast {
+            weather,
+            air_quality_error,
+        } = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
             .expect("a dead air-quality endpoint must not fail the forecast");
 
         assert!(!weather.daily.is_empty(), "the forecast still arrived");
@@ -349,6 +390,66 @@ mod tests {
             weather.daily.iter().all(|d| d.aqi.is_none()),
             "and no day should carry one either"
         );
+        let reason = air_quality_error.expect("a 503 is a reason, not a gap in coverage");
+        assert!(
+            reason.contains("503") && reason.contains(&endpoints.air_quality),
+            "the reason must say what failed and where, got {reason:?}"
+        );
+    }
+
+    /// The other way round: a forecast with its air quality intact has nothing
+    /// to warn about, so the absence of a reading on a day past coverage stays
+    /// an absence.
+    #[test]
+    fn air_quality_arriving_leaves_nothing_to_warn_about() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+
+        let fetched = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
+            .expect("a forecast");
+
+        assert!(fetched.air_quality_error.is_none());
+    }
+
+    /// `http status: 503` on its own does not say which of three Open-Meteo
+    /// hosts, or ipapi.co, produced it. Every failure has to name its host
+    /// once the chain is printed.
+    #[test]
+    fn a_failure_names_the_endpoint_that_produced_it() {
+        let endpoints = serving("503 Service Unavailable", "text/plain", "upstream down");
+        let agent = test_agent();
+
+        let forecast = fetch_forecast_with(&agent, &endpoints, 39.414_27, -77.410_54)
+            .err()
+            .expect("a 503 is not a forecast");
+        let detection = detect_location_with(&agent, &endpoints)
+            .err()
+            .expect("nor a place");
+        let search = search_locations_with(&agent, &endpoints, "reykjavik")
+            .err()
+            .expect("nor a list of cities");
+
+        for (name, error, host) in [
+            ("forecast", forecast, &endpoints.forecast),
+            ("detection", detection, &endpoints.geoip),
+            ("search", search, &endpoints.geocode),
+        ] {
+            let shown = format!("{error:#}");
+            assert!(
+                shown.contains(host) && shown.contains("503"),
+                "{name} error must name its host and the status, got {shown:?}"
+            );
+            // `to_string` is the outermost message alone, and with the host in
+            // that layer it is the status that would go missing. This pins
+            // why the worker has to print the chain rather than the message.
+            assert!(
+                !error.to_string().contains("503"),
+                "{name}: the status is in the chain, not the outermost message"
+            );
+        }
     }
 
     const DETECTED: &str = r#"{"city":"Reykjavík","region":"Capital Region",
@@ -552,7 +653,7 @@ mod live {
     #[test]
     #[ignore]
     fn real_fetch_carries_per_day_air_quality() {
-        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch");
+        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch").weather;
         let covered = weather.daily.iter().filter(|d| d.aqi.is_some()).count();
 
         println!(
@@ -600,7 +701,7 @@ mod live {
     #[test]
     #[ignore]
     fn real_fetch_carries_a_populated_hourly_series() {
-        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch");
+        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch").weather;
         let forward = weather.forecast_hours();
 
         println!(
