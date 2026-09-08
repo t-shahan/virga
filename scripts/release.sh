@@ -64,16 +64,30 @@ grep -q "^## \[$release\]" CHANGELOG.md \
 # A heading with no prose under it passes the grep above, tags cleanly, and
 # then fails the release workflow's notes step after five platforms have been
 # built. release-pr.yml opens exactly that empty section on purpose, so the
-# check belongs here. Same extraction release.yml uses.
+# check belongs here. Same extraction release.yml uses, and the same test: a
+# line whose first non-blank character is not `#`, because a bare `### Fixed`
+# sub-heading is not a note either.
 awk -v want="## [$release]" '
     index($0, "## [") == 1 { inside = (index($0, want) == 1); next }
     inside
-' CHANGELOG.md | grep -q '[^[:space:]]' \
+' CHANGELOG.md | grep -q '^[[:space:]]*[^#[:space:]]' \
     || die "CHANGELOG.md's [$release] section has a heading but no notes."
 
 # --- bump ------------------------------------------------------------------
 
 step "setting the version to $version"
+
+# From here until the release commit, every exit leaves the bump in the working
+# tree, and `set -e` leaves without a word. The hint is worth more on a failed
+# gate than on a `[y/N]` refusal, because a failed gate is the exit nobody
+# planned for.
+bumped=true
+undo_hint() {
+    if [ "$1" -ne 0 ] && [ "$bumped" = true ]; then
+        printf '\nrelease: the version bump is still in your working tree. Discard it with\n  git checkout -- Cargo.toml Cargo.lock CHANGELOG.md\n' >&2
+    fi
+}
+trap 'undo_hint $?' EXIT
 
 # Only the first `version =`, which is the package's own. Dependency versions
 # further down the manifest must not be touched.
@@ -87,11 +101,16 @@ awk -v v="$version" '
 cargo check --quiet
 
 # Today's date, so a section written days ago does not ship with a stale one.
-today=$(date -u +%Y-%m-%d)
-awk -v want="## [$release]" -v date="$today" '
-    !done && index($0, want) == 1 { print want " - " date; done = 1; next }
-    { print }
-' CHANGELOG.md > CHANGELOG.new && mv CHANGELOG.new CHANGELOG.md
+# A prerelease leaves the heading alone: the date is what check-changelog.sh
+# reads as "shipped and frozen", and the section an rc borrows is still being
+# written until the final version stamps it.
+if [ "$version" = "$release" ]; then
+    today=$(date -u +%Y-%m-%d)
+    awk -v want="## [$release]" -v date="$today" '
+        !done && index($0, want) == 1 { print want " - " date; done = 1; next }
+        { print }
+    ' CHANGELOG.md > CHANGELOG.new && mv CHANGELOG.new CHANGELOG.md
+fi
 
 # --- the same gates CI runs -------------------------------------------------
 
@@ -116,12 +135,13 @@ if [ "$assume_yes" != true ]; then
     read -r answer </dev/tty
     case "$answer" in
         y|Y|yes|Yes) ;;
-        *) die "Stopped. The version bump is still in your working tree." ;;
+        *) die "Stopped." ;;
     esac
 fi
 
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "chore(release): v$version"
+bumped=false
 git tag -a "v$version" -m "virga v$version"
 git push origin "$BRANCH"
 git push origin "v$version"
