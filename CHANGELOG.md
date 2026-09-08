@@ -12,6 +12,17 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `kill`, a dropped SSH session, or a terminal window closing no longer
+  leaves the tty in raw mode on the alternate screen. SIGTERM, SIGHUP and
+  SIGINT ended the process before anything could restore the terminal;
+  each is now caught and the app leaves through the same path `q` takes,
+  then exits with the status a shell expects of a process a signal ended
+  (130 for SIGINT, 143 for SIGTERM). Ctrl-C in the app is unchanged, and
+  on Windows, where crossterm already reports Ctrl-C and Ctrl-Break as
+  keys, nothing is hooked (#85).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
