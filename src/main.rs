@@ -131,7 +131,15 @@ fn main() -> Result<()> {
                             eprintln!("virga: could not remember location: {error:#}");
                         }
                     }
-                    println!("{}", now::report(&location.label, &weather, unit));
+                    println!(
+                        "{}",
+                        now::report(
+                            &location.label,
+                            &weather,
+                            unit,
+                            chrono::Local::now().fixed_offset()
+                        )
+                    );
                     return Ok(());
                 }
                 Err(error) => {

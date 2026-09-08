@@ -1,14 +1,89 @@
 use crate::app::{App, Fetch};
 use crate::theme::Palette;
 use crate::ui::{centered, spinner};
+use crate::weather::model::Location;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+/// Rows of the popup below the input: the border, the input and its
+/// underline, and eight lines of results for the five the geocoder is asked
+/// for.
+const POPUP_HEIGHT: u16 = 12;
+
+/// What tells apart the rows that would otherwise read the same, one entry
+/// per result and `None` for a row nothing collides with.
+///
+/// Name, region and country are the label, and for most searches that is
+/// enough. Where two rows share it, the zone tells them apart, and where the
+/// zone is shared too, or unknown, the coordinates do, which two distinct
+/// places cannot share. Only the colliding rows get a second line: five
+/// results that never needed one would make the list twice as tall for
+/// nothing.
+fn disambiguators(locations: &[Location]) -> Vec<Option<String>> {
+    let labels: Vec<String> = locations.iter().map(Location::label).collect();
+    locations
+        .iter()
+        .enumerate()
+        .map(|(i, location)| {
+            let twins: Vec<&Location> = locations
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i && labels[*j] == labels[i])
+                .map(|(_, twin)| twin)
+                .collect();
+            if twins.is_empty() {
+                return None;
+            }
+            let mut parts = Vec::new();
+            if let Some(zone) = &location.timezone {
+                parts.push(zone.clone());
+            }
+            if location.timezone.is_none()
+                || twins.iter().any(|twin| twin.timezone == location.timezone)
+            {
+                parts.push(format!("{:.2}, {:.2}", location.lat, location.lon));
+            }
+            Some(parts.join(" · "))
+        })
+        .collect()
+}
+
+/// How many list lines to scroll past so the selected row, second line
+/// included, is the last one drawn when the list is taller than the space
+/// it got. Zero while it fits.
+///
+/// The popup asks for the height it needs, but the terminal can refuse: at
+/// 34x12, the smallest the app draws in, four rows sharing a label want
+/// nine list lines of the eight there are, and what falls off the bottom
+/// is exactly the row the arrows can still reach. Scrolling keeps every
+/// row reachable and visible at once, where trimming second lines to fit
+/// would leave the bottom rows on screen but no longer told apart.
+fn scroll_to(selected: usize, second_lines: &[Option<String>], height: u16) -> u16 {
+    let lines_through_selected = second_lines
+        .iter()
+        .take(selected.saturating_add(1))
+        .map(|second| 1 + usize::from(second.is_some()))
+        .sum::<usize>();
+    u16::try_from(lines_through_selected.saturating_sub(usize::from(height))).unwrap_or(u16::MAX)
+}
+
 pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
-    let area = centered(area, 50, 12);
+    let second_lines = match &app.results {
+        Fetch::Ready(locations) => disambiguators(locations),
+        _ => Vec::new(),
+    };
+    // Every second line is a row the popup did not budget for, and the last
+    // result must not be the one that pays: an unseen row is one the arrows
+    // can still land on.
+    let extra = second_lines.iter().flatten().count();
+    let area = centered(
+        area,
+        50,
+        POPUP_HEIGHT.saturating_add(u16::try_from(extra).unwrap_or(u16::MAX)),
+    );
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -68,19 +143,387 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area
         }
         Fetch::Ready(locations) => locations
             .iter()
+            .zip(&second_lines)
             .enumerate()
-            .map(|(i, l)| {
+            .flat_map(|(i, (l, second))| {
                 let marker = if i == app.selected { ">" } else { " " };
                 let text = format!("{marker} {}", l.label());
-                if i == app.selected {
+                let row = if i == app.selected {
                     Line::from(text).fg(palette.selection).bold()
                 } else {
                     Line::from(text).fg(palette.accent)
-                }
+                };
+                let second = second
+                    .as_ref()
+                    .map(|text| Line::from(format!("    {text}")).fg(palette.muted));
+                std::iter::once(row).chain(second)
             })
             .collect(),
         Fetch::Failed(e) => vec![Line::from(format!("error: {e}")).fg(palette.error)],
     };
 
-    frame.render_widget(Paragraph::new(body), list_area);
+    let scroll = scroll_to(app.selected, &second_lines, list_area.height);
+    frame.render_widget(Paragraph::new(body).scroll((scroll, 0)), list_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Screen;
+    use crate::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
+
+    fn place(name: &str, admin1: &str, timezone: Option<&str>, lat: f64, lon: f64) -> Location {
+        Location {
+            name: name.to_string(),
+            admin1: Some(admin1.to_string()),
+            country: Some("United States".to_string()),
+            lat,
+            lon,
+            timezone: timezone.map(str::to_string),
+            country_code: None,
+            population: None,
+        }
+    }
+
+    /// The popup drawn over a terminal of the given size, as its rows of
+    /// text with the trailing blanks trimmed.
+    fn drawn(locations: Vec<Location>, width: u16, height: u16) -> Vec<String> {
+        drawn_selecting(locations, 0, width, height).0
+    }
+
+    /// As `drawn`, with the cursor on the given row; also says which rows
+    /// of the terminal hold a bold cell, which only the selected row does.
+    fn drawn_selecting(
+        locations: Vec<Location>,
+        selected: usize,
+        width: u16,
+        height: u16,
+    ) -> (Vec<String>, Vec<u16>) {
+        let mut app = App::new();
+        app.screen = Screen::Search;
+        app.query = "freder".to_string();
+        app.results = Fetch::Ready(locations);
+        app.selected = selected;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let buffer = terminal
+            .draw(|frame| search_render(frame, &app, Theme::default().palette(), frame.area()))
+            .unwrap()
+            .buffer
+            .clone();
+        let rows = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let bold_rows = (0..height)
+            .filter(|&y| (0..width).any(|x| buffer[(x, y)].modifier.contains(Modifier::BOLD)))
+            .collect();
+        (rows, bold_rows)
+    }
+
+    fn rows_with(rows: &[String], needle: &str) -> Vec<String> {
+        rows.iter()
+            .filter(|row| row.contains(needle))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn rows_that_read_differently_get_no_second_line() {
+        let found = vec![
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                39.41,
+                -77.41,
+            ),
+            place(
+                "Frederick",
+                "Colorado",
+                Some("America/Denver"),
+                40.10,
+                -104.94,
+            ),
+        ];
+
+        assert_eq!(disambiguators(&found), [None, None]);
+
+        let rows = drawn(found, 60, 20);
+        assert!(rows_with(&rows, "America/").is_empty(), "{rows:#?}");
+    }
+
+    /// Two rows with one label: the zone separates them, so that is what the
+    /// second line carries, and nothing else.
+    #[test]
+    fn rows_that_read_the_same_are_told_apart_by_their_zone() {
+        let found = vec![
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                39.41,
+                -77.41,
+            ),
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/Chicago"),
+                38.90,
+                -76.90,
+            ),
+            place(
+                "Frederick",
+                "Colorado",
+                Some("America/Denver"),
+                40.10,
+                -104.94,
+            ),
+        ];
+
+        assert_eq!(
+            disambiguators(&found),
+            [
+                Some("America/New_York".to_string()),
+                Some("America/Chicago".to_string()),
+                None
+            ]
+        );
+    }
+
+    /// The same zone tells nothing apart, and neither does no zone; the
+    /// coordinates step in, since two places cannot share those.
+    #[test]
+    fn a_shared_or_unknown_zone_falls_back_to_the_coordinates() {
+        let found = vec![
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                39.41,
+                -77.41,
+            ),
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                38.90,
+                -76.90,
+            ),
+            place("Frederick", "Maryland", None, 39.00, -77.00),
+        ];
+
+        assert_eq!(
+            disambiguators(&found),
+            [
+                Some("America/New_York · 39.41, -77.41".to_string()),
+                Some("America/New_York · 38.90, -76.90".to_string()),
+                Some("39.00, -77.00".to_string())
+            ]
+        );
+    }
+
+    /// The second line sits under its row, indented and in the muted
+    /// colour, and the rows below it move down rather than vanish.
+    #[test]
+    fn the_second_line_is_drawn_under_its_row() {
+        let found = vec![
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                39.41,
+                -77.41,
+            ),
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/Chicago"),
+                38.90,
+                -76.90,
+            ),
+            place(
+                "Frederick",
+                "Colorado",
+                Some("America/Denver"),
+                40.10,
+                -104.94,
+            ),
+        ];
+
+        let rows = drawn(found, 60, 20);
+        let inside: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.contains("Frederick") || row.contains("America/"))
+            .map(|row| row.trim_matches(|c| c == ' ' || c == '│').trim_end())
+            .collect();
+
+        assert_eq!(
+            inside,
+            [
+                "> Frederick, Maryland, United States",
+                "America/New_York",
+                "Frederick, Maryland, United States",
+                "America/Chicago",
+                "Frederick, Colorado, United States",
+            ],
+            "{rows:#?}"
+        );
+        let second = rows
+            .iter()
+            .find(|row| row.contains("America/New_York"))
+            .unwrap();
+        assert!(second.contains("│    America/"), "not indented: {second:?}");
+    }
+
+    /// The narrowest terminal the app draws in: the label is cut at the
+    /// border, and the second line, being shorter, is what still tells the
+    /// two rows apart.
+    #[test]
+    fn the_second_line_survives_the_narrowest_terminal() {
+        let found = vec![
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                39.41,
+                -77.41,
+            ),
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/Chicago"),
+                38.90,
+                -76.90,
+            ),
+        ];
+
+        let rows = drawn(found, 34, 12);
+
+        assert_eq!(rows_with(&rows, "America/New_York").len(), 1, "{rows:#?}");
+        assert_eq!(rows_with(&rows, "America/Chicago").len(), 1, "{rows:#?}");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= 34),
+            "a row ran past the terminal: {rows:#?}"
+        );
+    }
+
+    /// Five colliding rows want ten lines of an eight-line list. The popup
+    /// grows by the lines it added rather than losing the last result
+    /// behind its own border.
+    #[test]
+    fn the_popup_grows_by_the_second_lines_it_added() {
+        let found: Vec<Location> = (0..5)
+            .map(|i| {
+                place(
+                    "Frederick",
+                    "Maryland",
+                    Some(&format!("Zone/{i}")),
+                    39.0 + f64::from(i),
+                    -77.0,
+                )
+            })
+            .collect();
+
+        let rows = drawn(found, 60, 24);
+        let border_rows = rows.iter().filter(|row| row.contains('─')).count();
+
+        assert_eq!(rows_with(&rows, "Frederick").len(), 5, "{rows:#?}");
+        assert_eq!(rows_with(&rows, "Zone/4").len(), 1, "{rows:#?}");
+        // Top border, the input's underline, and the bottom border: the
+        // popup is 17 rows tall, which is the 12 it was plus one per line.
+        assert_eq!(border_rows, 3, "{rows:#?}");
+        let top = rows.iter().position(|row| row.contains('─')).unwrap();
+        let bottom = rows.iter().rposition(|row| row.contains('─')).unwrap();
+        assert_eq!(bottom - top + 1, 17, "{rows:#?}");
+    }
+
+    /// The narrowest terminal cannot grow the popup: five colliding rows
+    /// want ten list lines and get eight. The arrows still reach the fifth
+    /// row, so the list scrolls to keep the selected row and its second line
+    /// on screen, and scrolls back when the cursor returns to the top.
+    #[test]
+    fn the_selected_row_stays_on_screen_when_the_terminal_refuses_the_height() {
+        let five_alike = || -> Vec<Location> {
+            (0..5)
+                .map(|i| {
+                    place(
+                        "Frederick",
+                        "Maryland",
+                        Some(&format!("Zone/{i}")),
+                        39.0 + f64::from(i),
+                        -77.0,
+                    )
+                })
+                .collect()
+        };
+
+        let (rows, bold_rows) = drawn_selecting(five_alike(), 4, 34, 12);
+        assert_eq!(rows_with(&rows, "> Frederick").len(), 1, "{rows:#?}");
+        assert_eq!(bold_rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows_with(&rows, "Zone/4").len(), 1, "{rows:#?}");
+        // The first row scrolled off to make room; the border did not move.
+        assert!(rows_with(&rows, "Zone/0").is_empty(), "{rows:#?}");
+        assert_eq!(rows.iter().rposition(|row| row.contains('─')), Some(11));
+
+        let (rows, bold_rows) = drawn_selecting(five_alike(), 0, 34, 12);
+        assert_eq!(bold_rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows_with(&rows, "Zone/0").len(), 1, "{rows:#?}");
+        assert!(rows_with(&rows, "Zone/4").is_empty(), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_list_scrolls_only_as_far_as_the_selected_row_needs() {
+        let lines = [
+            None,
+            Some("zone".to_string()),
+            Some("zone".to_string()),
+            None,
+        ];
+
+        // Eight lines of room for six: nothing to scroll, whichever is chosen.
+        assert_eq!(scroll_to(3, &lines, 8), 0);
+        // Four lines of room: the second row ends on the third line, the
+        // third row on the fifth, the last on the sixth.
+        assert_eq!(scroll_to(0, &lines, 4), 0);
+        assert_eq!(scroll_to(1, &lines, 4), 0);
+        assert_eq!(scroll_to(2, &lines, 4), 1);
+        assert_eq!(scroll_to(3, &lines, 4), 2);
+        // No results, or a cursor past the end: nothing more to keep in view.
+        assert_eq!(scroll_to(0, &[], 4), 0);
+        assert_eq!(scroll_to(9, &lines, 4), 2);
+    }
+
+    #[test]
+    fn a_list_with_no_collisions_keeps_the_popup_its_usual_height() {
+        let found = vec![
+            place(
+                "Frederick",
+                "Maryland",
+                Some("America/New_York"),
+                39.41,
+                -77.41,
+            ),
+            place(
+                "Frederick",
+                "Colorado",
+                Some("America/Denver"),
+                40.10,
+                -104.94,
+            ),
+        ];
+
+        let rows = drawn(found, 60, 24);
+        let top = rows.iter().position(|row| row.contains('─')).unwrap();
+        let bottom = rows.iter().rposition(|row| row.contains('─')).unwrap();
+
+        assert_eq!(bottom - top + 1, usize::from(POPUP_HEIGHT), "{rows:#?}");
+    }
 }

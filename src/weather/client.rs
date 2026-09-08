@@ -7,6 +7,7 @@ use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
+use std::cmp::Reverse;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -177,11 +178,20 @@ fn search_locations_with(
 
     let dto: GeocodeDto = response.body_mut().read_json()?;
 
-    Ok(dto
+    let mut locations: Vec<Location> = dto
         .results
         .into_iter()
         .filter_map(GeocodeResultDto::into_location)
-        .collect())
+        .collect();
+    // The geocoder ranks by how well the name matched, which among five
+    // places all called Frederick is no ranking at all: behind the county
+    // seat of 70,000 it put a town of 3,700 above one of 11,000. Biggest first
+    // puts the one most people mean under the cursor, and makes it the one
+    // `virga now frederick` answers for. The sort is stable, so places the
+    // geocoder gave no population keep its order among themselves, at the
+    // bottom.
+    locations.sort_by_key(|location| Reverse(location.population.unwrap_or(0)));
+    Ok(locations)
 }
 
 /// Air quality is only ever fetched as part of a forecast — it shares that
@@ -477,6 +487,51 @@ mod tests {
         let result = search_locations_with(&test_agent(), &endpoints, "reykjavik");
 
         assert!(result.is_err(), "a login page is not a list of cities");
+    }
+
+    /// The recorded answer lists Maryland, Oklahoma, Colorado — the order the
+    /// geocoder matched them in, which puts the town of 3,700 above the one
+    /// of 11,000. The list the app gets is by size.
+    #[test]
+    fn search_results_come_biggest_first() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/geocode.json"),
+        );
+        let found = search_locations_with(&test_agent(), &endpoints, "frederick")
+            .expect("a list of cities");
+
+        let order: Vec<_> = found.iter().map(|l| l.admin1.as_deref()).collect();
+        assert_eq!(
+            order,
+            [Some("Maryland"), Some("Colorado"), Some("Oklahoma")]
+        );
+        assert_eq!(found[0].timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(found[0].country_code.as_deref(), Some("US"));
+    }
+
+    /// A place the geocoder gave no population sinks below every place it
+    /// did, and two such places keep the geocoder's order between them: the
+    /// sort must be stable, or the rows would shuffle from one keystroke to
+    /// the next.
+    #[test]
+    fn search_results_without_a_population_keep_their_order_at_the_bottom() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            r#"{"results": [
+                {"name": "A", "latitude": 1.0, "longitude": 1.0},
+                {"name": "B", "latitude": 1.0, "longitude": 1.0, "population": 10},
+                {"name": "C", "latitude": 1.0, "longitude": 1.0},
+                {"name": "D", "latitude": 1.0, "longitude": 1.0, "population": 20}
+            ]}"#,
+        );
+        let found =
+            search_locations_with(&test_agent(), &endpoints, "x").expect("a list of cities");
+
+        let order: Vec<_> = found.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(order, ["D", "B", "A", "C"]);
     }
 
     /// The agent every request shares must actually carry the bounds, not just

@@ -12,6 +12,22 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **The city search tells identical rows apart, biggest first.** Results
+  now come in order of population, so the city most people mean sits under
+  the cursor and is the one `virga now CITY` answers for; the geocoder's
+  own order put a town of 3,700 above one of 11,000. Two rows that would
+  read the same — one name, one region, one country — get a second line
+  naming the timezone, or the coordinates where the zone is shared or
+  unknown, and rows that never needed one are left alone. A row the
+  geocoder sends without a country name shows its country code instead of
+  nothing. `virga now` for a city whose clocks disagree with the machine's
+  says what time it is there, on the first line: `Tokyo, Japan · Clear sky
+  · local time 21:30 (UTC+09:00)`. The timezone and population ride the
+  search response the app already fetches, so none of this costs a request
+  (#88).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

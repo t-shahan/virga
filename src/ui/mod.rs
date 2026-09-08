@@ -598,6 +598,9 @@ mod tests {
                 country: Some("United States".to_string()),
                 lat: 39.414_27,
                 lon: -77.410_54,
+                timezone: None,
+                country_code: None,
+                population: None,
             },
             Location {
                 name: "Fredericksburg".to_string(),
@@ -605,6 +608,21 @@ mod tests {
                 country: Some("United States".to_string()),
                 lat: 38.301_8,
                 lon: -77.460_5,
+                timezone: None,
+                country_code: None,
+                population: None,
+            },
+            // Reads the same as the first row, so the list draws its
+            // disambiguating second line and the colour sweep reaches it.
+            Location {
+                name: "Frederick".to_string(),
+                admin1: Some("Maryland".to_string()),
+                country: Some("United States".to_string()),
+                lat: 38.9,
+                lon: -76.9,
+                timezone: Some("America/Chicago".to_string()),
+                country_code: None,
+                population: None,
             },
         ]
     }
