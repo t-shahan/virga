@@ -88,8 +88,15 @@ const _: () = assert!(MIN_WIDTH >= forecast::TABLE_MINIMAL + 2);
 /// the app, not a dashboard.
 const CANVAS_WIDTH: u16 = 120;
 
-pub(crate) fn render(frame: &mut Frame, app: &App) {
-    render_with(frame, app, app.theme.palette_for(app.color_depth));
+/// Draws the frame and reports whether the release notice was part of it.
+///
+/// Whether the notice got a row is decided here, by the screen and the
+/// size, and nowhere else — `App` cannot know without repeating this
+/// layout. The report is what lets a keypress dismiss the notice only when
+/// the user has been shown it, rather than on a terminal too short to have
+/// given it a row.
+pub(crate) fn render(frame: &mut Frame, app: &App) -> bool {
+    render_with(frame, app, app.theme.palette_for(app.color_depth))
 }
 
 /// The frame, drawn in a given palette.
@@ -98,12 +105,12 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
 /// value — no widget reaches for `app.theme` itself. That is what lets a test
 /// render the whole app in a palette of its own choosing and check that no
 /// colour survived being hard-coded.
-fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
+fn render_with(frame: &mut Frame, app: &App, palette: Palette) -> bool {
     let area = frame.area();
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         too_small_render(frame, area, area, (MIN_WIDTH, MIN_HEIGHT), palette);
-        return;
+        return false;
     }
 
     let page_area = if app.screen == Screen::Search {
@@ -260,6 +267,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     if app.help_visible {
         help_render(frame, app, palette, page_area);
     }
+    notice_visible
 }
 
 /// The first launch of the day can spend a round trip working out where the
@@ -799,10 +807,22 @@ mod tests {
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| render_with(f, app, palette))
+            .draw(|f| {
+                render_with(f, app, palette);
+            })
             .unwrap()
             .buffer
             .clone()
+    }
+
+    /// What `render` reports about the notice for a given size.
+    fn notice_reported(app: &App, width: u16, height: u16) -> bool {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut reported = false;
+        terminal
+            .draw(|f| reported = render_with(f, app, probe()))
+            .unwrap();
+        reported
     }
 
     fn symbols(buffer: &Buffer, width: u16, height: u16) -> Vec<String> {
@@ -976,7 +996,11 @@ mod tests {
         let expected_accent = Color::Indexed(208);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(frame, &app);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let colours: Vec<Color> = (0..40u16)
             .flat_map(|y| (0..120u16).map(move |x| buffer[(x, y)].fg))
@@ -1000,7 +1024,10 @@ mod tests {
 
         for (width, height) in [(1, 1), (10, 5), (33, 11), (34, 11), (33, 12)] {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
-            t.draw(|f| render(f, &app)).unwrap();
+            t.draw(|f| {
+                render(f, &app);
+            })
+            .unwrap();
 
             let buf = t.backend().buffer();
             let text: String = (0..height)
@@ -1020,7 +1047,10 @@ mod tests {
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
 
         let mut t = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).unwrap();
-        t.draw(|f| render(f, &app)).unwrap();
+        t.draw(|f| {
+            render(f, &app);
+        })
+        .unwrap();
 
         let buf = t.backend().buffer();
         let text: String = (0..MIN_HEIGHT)
@@ -1400,6 +1430,37 @@ mod tests {
         let text = symbols(&buffer, 100, 20).join("\n");
 
         assert!(!text.contains("update: virga"));
+    }
+
+    /// The report has to agree with the frame in every case above, because
+    /// it is what decides whether the next key may let the notice go. A
+    /// frame that withheld the row and reported it drawn would lose news
+    /// nobody saw; the reverse would leave a key that saw it changing
+    /// nothing.
+    #[test]
+    fn the_render_reports_the_notice_exactly_when_it_drew_it() {
+        assert!(notice_reported(&noticed(Screen::Weather), 100, 20));
+        assert!(
+            !notice_reported(&ready(Screen::Weather), 100, 20),
+            "no notice, nothing to report"
+        );
+        assert!(
+            !notice_reported(&noticed(Screen::Weather), MIN_WIDTH, MIN_HEIGHT),
+            "the minimum terminal has no row to give it"
+        );
+        assert!(
+            !notice_reported(&noticed(Screen::Weather), MIN_WIDTH, MIN_HEIGHT - 1),
+            "a terminal below the floor draws nothing but its size"
+        );
+        assert!(!notice_reported(&noticed(Screen::Search), 100, 20));
+
+        let hourly = noticed(Screen::Hourly);
+        let fits = hourly_fits_at(&hourly, 100);
+        assert!(
+            !notice_reported(&hourly, 100, fits),
+            "the notice yielded to the hourly floor but was reported drawn"
+        );
+        assert!(notice_reported(&hourly, 100, fits + 1));
     }
 
     /// The complaint this replaced a role for: the bars in both charts were a

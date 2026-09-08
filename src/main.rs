@@ -3,7 +3,7 @@ use crate::app::{
     Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
-use crate::events::{Message, Request};
+use crate::events::{Message, Request, Workers};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
@@ -13,7 +13,7 @@ use ratatui::crossterm::event::Event;
 use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::TrySendError;
 use std::time::{Duration, Instant};
 
 mod app;
@@ -629,22 +629,24 @@ fn clear_screen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> 
     Ok(())
 }
 
-fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
-    match tx.try_send(request) {
+fn dispatch(workers: &Workers, app: &mut App, request: Request) -> Result<()> {
+    match workers.try_send(request) {
         Ok(()) => Ok(()),
-        // Unreachable while the guards in `App` hold — the queue is deeper
+        // Unreachable while the guards in `App` hold — every queue is deeper
         // than it can fill. It is handled anyway so that the day a guard is
         // dropped, the screen says something instead of waiting forever on a
         // request that was never sent.
         Err(TrySendError::Full(request)) => {
             // A dropped detection still has to reach its fallback, so the
             // replacement it asks for is dispatched rather than discarded.
+            // The replacement is a different kind, so it goes to a different
+            // queue: a full one cannot refuse it a second time.
             if let Some(replacement) = app.on_dispatch_dropped(request) {
-                return dispatch(tx, app, replacement);
+                return dispatch(workers, app, replacement);
             }
             Ok(())
         }
-        Err(TrySendError::Disconnected(_)) => Err(anyhow!("the worker thread has stopped")),
+        Err(TrySendError::Disconnected(_)) => Err(anyhow!("a worker thread has stopped")),
     }
 }
 
@@ -682,14 +684,13 @@ fn run(
     warning: &mut Option<String>,
     notice: &mut Option<String>,
 ) -> Result<()> {
-    // Bounded: see `events::REQUEST_QUEUE`. Messages back stay unbounded — the
-    // worker produces at most one per request it was handed, so bounding the
-    // requests bounds the replies too, and a blocking send on the worker side
-    // would be a deadlock waiting to happen.
-    let (request_tx, request_rx) = mpsc::sync_channel(events::REQUEST_QUEUE);
+    // Requests are bounded: see `events::REQUEST_QUEUE`. Messages back stay
+    // unbounded — a worker produces at most one per request it was handed,
+    // so bounding the requests bounds the replies too, and a blocking send
+    // on the worker side would be a deadlock waiting to happen.
     let (message_tx, message_rx) = mpsc::channel();
-    // The probe rides its own thread and the shared message channel; the
-    // worker's request queue is serial, and news must never stall a search.
+    // The probe rides its own thread and the shared message channel; each
+    // worker's queue is serial, and news must never stall a search.
     if check_updates {
         events::spawn_update_check(message_tx.clone(), || {
             let current = update::Release::parse(env!("CARGO_PKG_VERSION")).ok()?;
@@ -698,12 +699,12 @@ fn run(
             update::notice(&current, &latest)
         });
     }
-    events::spawn_worker(request_rx, message_tx, cache_path);
+    let workers = events::spawn_workers(message_tx, cache_path);
     let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
-    dispatch(&request_tx, &mut app, initial)?;
+    dispatch(&workers, &mut app, initial)?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
@@ -729,7 +730,7 @@ fn run(
             retain_first_warning(warning, message_warning);
             // A detection answers with the fetch it asked for.
             if let Some(request) = chained {
-                dispatch(&request_tx, &mut app, request)?;
+                dispatch(&workers, &mut app, request)?;
             }
         }
 
@@ -779,7 +780,9 @@ fn run(
 
         if dirty || animating {
             app.tick = app.tick.wrapping_add(1);
-            terminal.draw(|frame| ui::render(frame, &app))?;
+            let mut notice_drawn = false;
+            terminal.draw(|frame| notice_drawn = ui::render(frame, &app))?;
+            app.notice_drawn = notice_drawn;
             dirty = false;
         }
 
@@ -807,7 +810,7 @@ fn run(
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {
-                            dispatch(&request_tx, &mut app, request)?;
+                            dispatch(&workers, &mut app, request)?;
                         }
                         if let Some(style) = app.take_key_hint_style_save() {
                             retain_first_warning(
@@ -939,7 +942,11 @@ mod tests {
     fn a_clean_repaint_never_asks_where_the_cursor_is() {
         let app = ready_app();
         let mut terminal = Terminal::new(Counting::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
 
         clear_screen(&mut terminal).unwrap();
 
@@ -966,7 +973,11 @@ mod tests {
     fn a_clean_repaint_writes_every_cell_of_an_unchanged_frame() {
         let app = ready_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         let frame = terminal.backend().buffer().clone();
 
         clear_screen(&mut terminal).unwrap();
@@ -976,7 +987,11 @@ mod tests {
             "the screen was not wiped"
         );
 
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         assert_eq!(terminal.backend().buffer(), &frame);
     }
 
