@@ -54,14 +54,51 @@ detect_target() {
     fi
 }
 
+# --- fetching ---------------------------------------------------------------
+
+# Every request goes through here. A connection that stalls after the
+# handshake would otherwise hang the install with no output and no prompt,
+# and pinning the protocol keeps a redirect from stepping down to plain http
+# on the way to the archive.
+fetch() {
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 15 --max-time 300 "$@"
+}
+
 # --- which release ----------------------------------------------------------
 
 latest_tag() {
     # The redirect on /releases/latest carries the tag, which avoids both the
     # JSON parsing and the lower rate limit of the API.
-    curl -fsSLI -o /dev/null -w '%{url_effective}' \
+    fetch -I -o /dev/null -w '%{url_effective}' \
         "https://github.com/$REPO/releases/latest" \
         | sed 's#.*/tag/##'
+}
+
+# Why SHA256SUMS could not be fetched for the tag the user named. A tag that
+# does not exist and one that predates prebuilt binaries both 404 on the
+# asset, and both used to be reported as "No such archive", which says
+# nothing about which of the two the user should fix.
+missing_sums() {
+    status=$1
+    base=$2
+    tag=$3
+    # curl exits 22 for an HTTP error and something else for a connection
+    # that never answered; only the former says anything about the release.
+    [ "$status" -eq 22 ] || die "Could not download $base/SHA256SUMS"
+    # The tag page's status code, not the probe's exit status: -f exits 22
+    # for a 403 or a 429 as readily as for a 404, and only the 404 means the
+    # tag is missing. Telling a rate limit "there is no such tag" would be the
+    # same false statement this function exists to remove. %{http_code} is
+    # written even when -f fails, and reads 000 when nothing answered.
+    code=$(fetch -I -o /dev/null -w '%{http_code}' \
+        "https://github.com/$REPO/releases/tag/$tag" 2>/dev/null) || :
+    case "$code" in
+        200) die "Release $tag has no SHA256SUMS, so nothing in it can be verified. Prebuilt binaries start at v0.2.0." ;;
+        404) die "There is no release tagged $tag. The ones that exist are listed at https://github.com/$REPO/releases" ;;
+        000|'') die "Could not download $base/SHA256SUMS, and could not check whether $tag exists: github.com did not answer." ;;
+        *) die "Could not download $base/SHA256SUMS, and could not check whether $tag exists: github.com answered $code." ;;
+    esac
 }
 
 # --- checksums --------------------------------------------------------------
@@ -93,17 +130,33 @@ archive="virga-${version}-${target}.tar.gz"
 base="https://github.com/$REPO/releases/download/$tag"
 
 work=$(mktemp -d)
+staged=
+cleanup() {
+    rm -rf "$work"
+    [ -z "$staged" ] || rm -f "$staged"
+}
 # Runs on success and on failure, so a network error leaves nothing behind.
-trap 'rm -rf "$work"' EXIT INT TERM
+# INT and TERM turn into an exit rather than cleaning up themselves: a trap
+# that only removes files returns to the line after the one the signal
+# interrupted, and the script carries on to chmod and rename a staged file
+# that is truncated or already gone. Leaving through the EXIT trap is what
+# makes the cleanup the last thing that runs.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-say "downloading $archive"
-curl -fsSL "$base/$archive" -o "$work/$archive" \
-    || die "No such archive: $base/$archive"
-curl -fsSL "$base/SHA256SUMS" -o "$work/SHA256SUMS" \
-    || die "Release $tag has no SHA256SUMS, so the download cannot be verified."
+# SHA256SUMS first, because it answers two questions the archive alone cannot:
+# whether the release exists, and whether it was built for this platform.
+status=0
+fetch "$base/SHA256SUMS" -o "$work/SHA256SUMS" || status=$?
+[ "$status" -eq 0 ] || missing_sums "$status" "$base" "$tag"
 
 expected=$(grep " ${archive}\$" "$work/SHA256SUMS" | cut -d' ' -f1)
-[ -n "$expected" ] || die "SHA256SUMS does not list $archive."
+[ -n "$expected" ] || die "Release $tag has no build for $target: SHA256SUMS does not list $archive."
+
+say "downloading $archive"
+fetch "$base/$archive" -o "$work/$archive" \
+    || die "Could not download $base/$archive"
 
 actual=$(sha256_of "$work/$archive")
 if [ "$expected" != "$actual" ]; then
@@ -122,12 +175,26 @@ binary=$(find "$work" -type f -name virga | head -n 1)
 # built it. `gh attestation verify` needs an authenticated gh to reach the
 # API, so it runs when that is available and says so when it is not — a
 # quiet skip would look like a pass.
+#
+# gh exits non-zero for a rate limit or an unreachable API as readily as for
+# a binary nothing signed, and only the latter is a statement about the
+# binary. Its verdict is told apart by the message, which is the only place
+# gh makes the distinction; the alternative was calling every outage a
+# forgery and turning away the users who had bothered to log in. The match
+# is loose on purpose: gh has worded it "no attestations found" and "no
+# attestations were verified" across releases, and both mean the same here.
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    if gh attestation verify "$binary" --repo "$REPO" >/dev/null 2>&1; then
+    if verdict=$(gh attestation verify "$binary" --repo "$REPO" 2>&1); then
         say "build provenance verified"
-    else
+    elif printf '%s\n' "$verdict" | grep -qi 'no attestations'; then
         die "Provenance verification failed: this binary does not carry an
 attestation from $REPO's release workflow. Nothing was installed."
+    else
+        say "provenance not verified: gh attestation verify did not finish, so
+this says nothing about the binary either way. It reported:
+$verdict
+To check by hand once gh can reach GitHub:
+       gh attestation verify $INSTALL_DIR/virga --repo $REPO"
     fi
 else
     say "provenance not verified (needs an authenticated gh). To check by hand:
@@ -142,7 +209,6 @@ mkdir -p "$INSTALL_DIR"
 # tmpfs while the install directory is not. An interrupted copy would leave a
 # truncated binary on PATH, which is worse than no binary at all.
 staged="$INSTALL_DIR/.virga.install.$$"
-trap 'rm -rf "$work"; rm -f "$staged"' EXIT INT TERM
 cp "$binary" "$staged"
 chmod +x "$staged"
 mv -f "$staged" "$INSTALL_DIR/virga"

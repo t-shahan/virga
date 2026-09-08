@@ -12,6 +12,26 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The install script no longer hangs on a stalled connection. Every
+  `curl` now carries a connect and overall timeout and is pinned to
+  https, including across redirects (#69).
+- The install script says which of three things went wrong when a
+  download fails. A tag that does not exist, a tag that predates prebuilt
+  binaries, and a release with no build for the current platform each get
+  their own message; all three used to read "No such archive". A tag is
+  only reported missing when GitHub answers 404 for it; a rate limit or
+  an unreachable github.com is reported as that (#69).
+- A `gh attestation verify` that could not finish, for a rate limit or an
+  unreachable API, is reported by the install script as not verified,
+  with gh's own error and the command to run by hand. It used to be
+  called a failed attestation and stop the install; only gh's "no
+  attestations found" still does that (#69).
+- Ctrl-C or a kill during the install now exits through the cleanup trap
+  rather than returning into the step it interrupted, so an interrupted
+  copy cannot be followed by the rename that puts it on `PATH` (#69).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
