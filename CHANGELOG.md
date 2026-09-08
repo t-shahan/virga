@@ -25,6 +25,11 @@ refuse to publish a version this file does not describe.
   could chain its own fetch over the chosen one, so the guess was what got
   saved and the city you asked for was thrown away as stale. The pick now
   abandons the detection outright (#75).
+- The update notice is dismissed only by a key pressed on a frame that
+  showed it. Any key outside the city search used to clear it, including on
+  a terminal too short to give it a row, so on a short terminal the news
+  was gone before it was ever drawn and never printed on the way out either
+  (#75).
 
 ## [0.6.1] - 2026-09-07
 

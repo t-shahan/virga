@@ -278,6 +278,12 @@ pub struct App {
     /// Composed in the probe, so this module never learns about versions,
     /// paths, or the network — it holds a string and lets it go.
     pub update_notice: Option<String>,
+    /// Whether the last frame drawn had the notice on it. Set by the draw
+    /// loop from what `ui::render` reports, because only the layout knows:
+    /// the search screen never gives it a row, and neither does a terminal
+    /// too short to spare one. A key is allowed to dismiss the notice only
+    /// when this says the user could have read it.
+    pub notice_drawn: bool,
     /// Whether the key reference overlay is open. Only reachable from the
     /// weather screens: search binds `?` to text, and while the overlay is
     /// open every action closes it before it could change screen.
@@ -359,6 +365,7 @@ impl App {
             search_return: Screen::Weather,
             theme_readout_until: None,
             update_notice: None,
+            notice_drawn: false,
             help_visible: false,
             key_hint_style: KeyHintStyle::default(),
             key_hint_style_dirty: false,
@@ -396,11 +403,13 @@ impl App {
             return None;
         }
         // The notice is dismissed by living — but only by a key that could
-        // have seen it. The search screen never renders the notice, so keys
-        // pressed there must not silently delete news nobody was shown; and
-        // quit keeps it, so the event loop can hand it back for the ordinary
-        // screen a straight-to-quit launch never gave it a frame on.
-        if !matches!(action, Action::Quit) && self.screen != Screen::Search {
+        // have seen it, which means one pressed after a frame that drew it.
+        // The search screen never renders the notice and a short terminal
+        // has no row for it, so keys pressed on either must not silently
+        // delete news nobody was shown; and quit keeps it, so the event loop
+        // can hand it back for the ordinary screen a straight-to-quit launch
+        // never gave it a frame on.
+        if !matches!(action, Action::Quit) && self.notice_drawn {
             self.update_notice = None;
         }
         match action {
@@ -1027,6 +1036,8 @@ mod tests {
         let mut app = app_with(22, 14);
         app.on_action(Action::ToggleHelp);
         app.update_notice = Some("update: virga 9.9.9".to_string());
+        // The row is drawn under the card; the card is what hides it.
+        app.notice_drawn = true;
 
         app.on_action(Action::NextDay);
         assert!(!app.help_visible);
@@ -2558,6 +2569,7 @@ mod tests {
     fn the_next_action_clears_the_notice_and_still_acts() {
         let mut app = App::new();
         app.on_message(news());
+        app.notice_drawn = true;
 
         app.on_action(Action::ToggleUnits);
 
@@ -2573,6 +2585,8 @@ mod tests {
         let mut app = App::new();
         app.on_action(Action::OpenSearch);
         app.on_message(news());
+        // What every frame of the search screen reports.
+        app.notice_drawn = false;
 
         app.on_action(Action::Insert('a'));
         assert!(app.update_notice.is_some(), "typing deleted hidden news");
@@ -2583,8 +2597,32 @@ mod tests {
             "leaving search is the first chance to see it"
         );
 
+        app.notice_drawn = true;
         app.on_action(Action::ToggleUnits);
         assert_eq!(app.update_notice, None, "a key that saw it clears it");
+    }
+
+    /// The same rule off the search screen: a terminal too short to give the
+    /// notice a row reports it undrawn, and keys pressed there leave it
+    /// standing — for a taller frame, or for the way out, where quit hands
+    /// it to the ordinary screen. Before this any key on the weather screen
+    /// let it go, and on a short terminal that meant nobody ever read it.
+    #[test]
+    fn keys_on_a_frame_without_the_notice_keep_it() {
+        let mut app = App::new();
+        app.on_message(news());
+        assert!(!app.notice_drawn, "no frame has been drawn yet");
+
+        app.on_action(Action::ToggleUnits);
+        assert!(
+            app.update_notice.is_some(),
+            "a key pressed before the notice had a frame deleted it"
+        );
+        assert_eq!(app.unit, Unit::Metric, "the keypress still did its work");
+
+        app.notice_drawn = true;
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(app.update_notice, None);
     }
 
     /// A straight-to-quit launch may never give the notice a frame, so quit
@@ -2594,6 +2632,7 @@ mod tests {
     fn quitting_keeps_the_notice_for_the_ordinary_screen() {
         let mut app = App::new();
         app.on_message(news());
+        app.notice_drawn = true;
 
         app.on_action(Action::Quit);
 

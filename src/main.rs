@@ -780,7 +780,9 @@ fn run(
 
         if dirty || animating {
             app.tick = app.tick.wrapping_add(1);
-            terminal.draw(|frame| ui::render(frame, &app))?;
+            let mut notice_drawn = false;
+            terminal.draw(|frame| notice_drawn = ui::render(frame, &app))?;
+            app.notice_drawn = notice_drawn;
             dirty = false;
         }
 
@@ -940,7 +942,11 @@ mod tests {
     fn a_clean_repaint_never_asks_where_the_cursor_is() {
         let app = ready_app();
         let mut terminal = Terminal::new(Counting::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
 
         clear_screen(&mut terminal).unwrap();
 
@@ -967,7 +973,11 @@ mod tests {
     fn a_clean_repaint_writes_every_cell_of_an_unchanged_frame() {
         let app = ready_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         let frame = terminal.backend().buffer().clone();
 
         clear_screen(&mut terminal).unwrap();
@@ -977,7 +987,11 @@ mod tests {
             "the screen was not wiped"
         );
 
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         assert_eq!(terminal.backend().buffer(), &frame);
     }
 
