@@ -80,13 +80,25 @@ latest_tag() {
 # asset, and both used to be reported as "No such archive", which says
 # nothing about which of the two the user should fix.
 missing_sums() {
+    status=$1
+    base=$2
+    tag=$3
     # curl exits 22 for an HTTP error and something else for a connection
     # that never answered; only the former says anything about the release.
-    [ "$1" -eq 22 ] || die "Could not download $base/SHA256SUMS."
-    if fetch -I -o /dev/null "https://github.com/$REPO/releases/tag/$tag" 2>/dev/null; then
-        die "Release $tag has no SHA256SUMS, so nothing in it can be verified. Prebuilt binaries start at v0.2.0."
-    fi
-    die "There is no release tagged $tag. The ones that exist are listed at https://github.com/$REPO/releases"
+    [ "$status" -eq 22 ] || die "Could not download $base/SHA256SUMS"
+    # The tag page's status code, not the probe's exit status: -f exits 22
+    # for a 403 or a 429 as readily as for a 404, and only the 404 means the
+    # tag is missing. Telling a rate limit "there is no such tag" would be the
+    # same false statement this function exists to remove. %{http_code} is
+    # written even when -f fails, and reads 000 when nothing answered.
+    code=$(fetch -I -o /dev/null -w '%{http_code}' \
+        "https://github.com/$REPO/releases/tag/$tag" 2>/dev/null) || :
+    case "$code" in
+        200) die "Release $tag has no SHA256SUMS, so nothing in it can be verified. Prebuilt binaries start at v0.2.0." ;;
+        404) die "There is no release tagged $tag. The ones that exist are listed at https://github.com/$REPO/releases" ;;
+        000|'') die "Could not download $base/SHA256SUMS, and could not check whether $tag exists: github.com did not answer." ;;
+        *) die "Could not download $base/SHA256SUMS, and could not check whether $tag exists: github.com answered $code." ;;
+    esac
 }
 
 # --- checksums --------------------------------------------------------------
@@ -137,7 +149,7 @@ trap 'exit 143' TERM
 # whether the release exists, and whether it was built for this platform.
 status=0
 fetch "$base/SHA256SUMS" -o "$work/SHA256SUMS" || status=$?
-[ "$status" -eq 0 ] || missing_sums "$status"
+[ "$status" -eq 0 ] || missing_sums "$status" "$base" "$tag"
 
 expected=$(grep " ${archive}\$" "$work/SHA256SUMS" | cut -d' ' -f1)
 [ -n "$expected" ] || die "Release $tag has no build for $target: SHA256SUMS does not list $archive."
