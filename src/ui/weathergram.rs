@@ -24,7 +24,7 @@ use crate::weather::model::HourlyForecast;
 use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 
@@ -193,9 +193,7 @@ fn precipitation_summary(hours: &[HourlyForecast], selected: usize, unit: Unit) 
     match total {
         PrecipitationAggregate::Unavailable => "—".to_string(),
         PrecipitationAggregate::Zero => format!("0 {}", unit.precip_label()),
-        PrecipitationAggregate::Trace(_) | PrecipitationAggregate::Measured(_) => total
-            .positive_text(unit, " ")
-            .expect("positive aggregate has text"),
+        PrecipitationAggregate::Positive(amount) => amount.text(unit, " "),
     }
 }
 
@@ -216,18 +214,48 @@ fn wind_summary(hours: &[HourlyForecast], unit: Unit) -> String {
 }
 
 /// Everything a track needs to place itself: the visible window and the
-/// measured columns the frame gave it.
+/// measured columns and interior the frame gave it.
 struct Plot {
     window: Window,
+    /// The interior's first row; every track is a fixed number of rows below.
+    y: u16,
     content_x: u16,
     plot_x: u16,
     plot_width: u16,
     summary_x: u16,
 }
 
+impl Plot {
+    /// The first cell of the hour `offset` columns into the window.
+    fn column_x(&self, offset: usize) -> u16 {
+        self.plot_x + offset as u16 * self.window.cell_width
+    }
+
+    /// The cell a one-cell glyph takes to sit centred on that hour.
+    fn centre_x(&self, offset: usize) -> u16 {
+        self.column_x(offset) + (self.window.cell_width - 1) / 2
+    }
+}
+
+/// One hour's place in the window: its column and the colour its state
+/// demands. Its position in the series is derived from the window rather than
+/// stored beside `offset`, so no caller can fill the two in inconsistently.
+#[derive(Clone, Copy)]
+struct Column {
+    offset: usize,
+    state_colour: Option<Color>,
+}
+
+impl Column {
+    /// The hour's index in the series the window was cut from.
+    fn index(&self, plot: &Plot) -> usize {
+        plot.window.start + self.offset
+    }
+}
+
 /// The colour a column's state demands, or `None` for an ordinary hour that
 /// takes its track's own colour.
-fn state_colour(palette: Palette, index: usize, selected: usize) -> Option<ratatui::style::Color> {
+fn state_colour(palette: Palette, index: usize, selected: usize) -> Option<Color> {
     if index == selected {
         Some(palette.selection)
     } else if index == 0 {
@@ -259,16 +287,16 @@ pub(super) fn weathergram_render(
     let content_x = inner.x + inner.width.saturating_sub(used_width) / 2;
     let plot = Plot {
         window,
+        y: inner.y,
         content_x,
         plot_x: content_x + LABEL_WIDTH,
         plot_width,
         summary_x: content_x + LABEL_WIDTH + plot_width + SUMMARY_GAP,
     };
 
-    full_tracks_render(frame, hours, visible, palette, unit, selected, &plot, inner);
+    full_tracks_render(frame, hours, visible, palette, unit, selected, &plot);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn full_tracks_render(
     frame: &mut Frame,
     hours: &[HourlyForecast],
@@ -277,149 +305,29 @@ fn full_tracks_render(
     unit: Unit,
     selected: usize,
     plot: &Plot,
-    inner: Rect,
 ) {
     let window = plot.window;
-    let sky_y = inner.y + SKY_ROW;
-    let temp_y = inner.y + TEMP_ROW;
-    let rain_y = inner.y + RAIN_ROW;
-    let wind_y = inner.y + WIND_ROW;
-    let axis_y = inner.y + AXIS_ROW;
-    let marker_y = inner.y + MARKER_ROW;
-
-    // A band's label and summary sit low in the band, where its ink gathers.
-    let temp_label_y = temp_y + TEMP_ROWS / 2;
-    let rain_label_y = rain_y + RAIN_ROWS - 1;
-
-    for (label, summary, y) in [
-        ("sky", String::new(), sky_y),
-        ("temp", temperature_summary(visible, unit), temp_label_y),
-        (
-            "rain",
-            precipitation_summary(hours, selected, unit),
-            rain_label_y,
-        ),
-        ("wind", wind_summary(visible, unit), wind_y),
-    ] {
-        put_text(frame, plot.content_x, y, label, palette.muted);
-        put_right(
-            frame,
-            plot.summary_x,
-            y,
-            SUMMARY_WIDTH,
-            &summary,
-            palette.muted,
-        );
-    }
+    labels_render(frame, plot, hours, visible, palette, unit, selected);
 
     let range = temperature_range(visible);
-    let rail = Style::new().fg(palette.muted).add_modifier(Modifier::DIM);
-
     for (offset, hour) in visible.iter().enumerate() {
-        let index = window.start + offset;
-        let x0 = plot.plot_x + offset as u16 * window.cell_width;
-        let centre = x0 + (window.cell_width - 1) / 2;
-        let state = state_colour(palette, index, selected);
-        let clock = clock_hour(&hour.time);
-
-        // Sky: the condition's emoji every third clock hour, on a faint rail.
-        // The steady cadence is what keeps the row from reading as scattered
-        // leftovers, and a two-cell emoji spans its two-cell hour column
-        // exactly, so the symbols sit centred where one-cell glyphs never
-        // could. The rail still says the condition is known between marks,
-        // and a gap still says the provider made no claim. An hour column too
-        // narrow for a wide glyph falls back to the one-cell text symbol.
-        let known = condition_symbol::symbol(hour.code) != " ";
-        let cadence = clock.map_or(offset % 3 == 0, |hour| hour % 3 == 0);
-        let emoji_cells = if cadence && known && window.cell_width >= 2 {
-            put(
-                frame,
-                x0,
-                sky_y,
-                condition_symbol::emoji(hour.code),
-                state.unwrap_or(palette.text),
-            );
-            2
-        } else if cadence && known {
-            put(
-                frame,
-                centre,
-                sky_y,
-                condition_symbol::symbol(hour.code),
-                state.unwrap_or(palette.text),
-            );
-            1
-        } else {
-            0
+        let column = Column {
+            offset,
+            state_colour: state_colour(palette, window.start + offset, selected),
         };
-        if known {
-            for column in emoji_cells..window.cell_width {
-                put_styled(frame, x0 + column, sky_y, "─", rail);
-            }
-        }
-
-        // Temperature: every cell of the hour inked, so the silhouette is
-        // continuous rather than a picket fence of centred glyphs.
-        if let Some(height) = temperature_eighths(hour.temp_c, range) {
-            let style = Style::new().fg(state.unwrap_or(palette.accent));
-            for column in 0..window.cell_width {
-                band_render(frame, x0 + column, temp_y, TEMP_ROWS, height, style);
-            }
-        }
-
-        // Rain: the same floor. Dim below the week strip's faint threshold,
-        // except for the selection and the current hour, which are states
-        // rather than readings and draw at full strength.
-        if let Some(height) = rain_sixteenths(hour.chance) {
-            let mut style = Style::new().fg(state.unwrap_or(palette.accent));
-            if state.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
-                style = style.add_modifier(Modifier::DIM);
-            }
-            for column in 0..window.cell_width {
-                band_render(frame, x0 + column, rain_y, RAIN_ROWS, height, style);
-            }
-        }
-
-        // Wind: an arrow every second hour, its speed on the six-hour ticks.
-        // Hour after hour of near-identical arrows says less than a sparse
-        // row the eye can actually compare; the selected hour always draws so
-        // the marker below never points at a blank.
-        if clock.map_or(offset % 2 == 0, |hour| hour % 2 == 0) || index == selected {
-            let arrow = wind_symbol(hour.wind_kph, hour.wind_dir_deg);
-            put(frame, centre, wind_y, arrow, state.unwrap_or(palette.text));
-
-            // Not beside the selection: the selected hour's off-cadence arrow
-            // would overprint the tick's digits, and the inspector already
-            // carries that hour's exact speed.
-            if arrow != " "
-                && clock.is_some_and(|hour| hour % 6 == 0)
-                && selected.abs_diff(index) > 1
-                && let Some(speed) = hour.wind_kph
-            {
-                let text = format!("{:.0}", unit.speed(speed));
-                let cells = text.chars().count() as u16;
-                // The next even hour's arrow sits two hour-columns on, so
-                // the digits get the cells between: one at the narrowest
-                // tier, which holds a single digit. A speed that does not
-                // fit is left off rather than clipped — `↑2↑` for 20 km/h
-                // told the reader the wind was 2.
-                let before_next_arrow = cells < 2 * window.cell_width;
-                let inside_plot = centre + 1 + cells <= plot.plot_x + plot.plot_width;
-                if before_next_arrow && inside_plot {
-                    put_text(frame, centre + 1, wind_y, &text, palette.muted);
-                }
-            }
-        }
+        sky_render(frame, plot, column, hour, palette);
+        temperature_render(frame, plot, column, hour, palette, range);
+        rain_render(frame, plot, column, hour, palette);
+        wind_render(frame, plot, column, hour, palette, unit, selected);
     }
 
     // The clock reads at the bottom, under the columns it measures, where a
     // meteogram keeps it.
     hour_ticks_render(
         frame,
-        Rect::new(plot.plot_x, axis_y, plot.plot_width, 1),
+        Rect::new(plot.plot_x, plot.y + AXIS_ROW, plot.plot_width, 1),
         visible.iter().map(|hour| hour.time.as_str()),
         window.cell_width,
-        0,
         if window.start == 0 {
             palette.now
         } else {
@@ -431,8 +339,205 @@ fn full_tracks_render(
     let end = window.start + visible.len();
     if selected >= window.start && selected < end {
         let offset = selected - window.start;
-        let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
-        put(frame, x, marker_y, "▲", palette.selection);
+        put(
+            frame,
+            plot.centre_x(offset),
+            plot.y + MARKER_ROW,
+            "▲",
+            palette.selection,
+        );
+    }
+}
+
+/// Each track's name on the left and its summary on the right.
+fn labels_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    hours: &[HourlyForecast],
+    visible: &[HourlyForecast],
+    palette: Palette,
+    unit: Unit,
+    selected: usize,
+) {
+    // A band's label and summary sit low in the band, where its ink gathers.
+    let temp_label_y = plot.y + TEMP_ROW + TEMP_ROWS / 2;
+    let rain_label_y = plot.y + RAIN_ROW + RAIN_ROWS - 1;
+
+    for (label, summary, y) in [
+        ("sky", String::new(), plot.y + SKY_ROW),
+        ("temp", temperature_summary(visible, unit), temp_label_y),
+        (
+            "rain",
+            precipitation_summary(hours, selected, unit),
+            rain_label_y,
+        ),
+        ("wind", wind_summary(visible, unit), plot.y + WIND_ROW),
+    ] {
+        put_text(frame, plot.content_x, y, label, palette.muted);
+        put_right(
+            frame,
+            plot.summary_x,
+            y,
+            SUMMARY_WIDTH,
+            &summary,
+            palette.muted,
+        );
+    }
+}
+
+/// Sky: the condition's emoji every third clock hour, on a faint rail. The
+/// steady cadence is what keeps the row from reading as scattered leftovers,
+/// and a two-cell emoji spans its two-cell hour column exactly, so the
+/// symbols sit centred where one-cell glyphs never could. The rail still says
+/// the condition is known between marks, and a gap still says the provider
+/// made no claim. An hour column too narrow for a wide glyph falls back to
+/// the one-cell text symbol.
+fn sky_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+) {
+    let sky_y = plot.y + SKY_ROW;
+    let x0 = plot.column_x(column.offset);
+    let cell_width = plot.window.cell_width;
+    let colour = column.state_colour.unwrap_or(palette.text);
+    let rail = Style::new().fg(palette.muted).add_modifier(Modifier::DIM);
+
+    let known = condition_symbol::symbol(hour.code) != " ";
+    let cadence =
+        clock_hour(&hour.time).map_or(column.offset.is_multiple_of(3), |hour| hour % 3 == 0);
+    let emoji_cells = if cadence && known && cell_width >= 2 {
+        put(frame, x0, sky_y, condition_symbol::emoji(hour.code), colour);
+        2
+    } else if cadence && known {
+        let centre = plot.centre_x(column.offset);
+        put(
+            frame,
+            centre,
+            sky_y,
+            condition_symbol::symbol(hour.code),
+            colour,
+        );
+        1
+    } else {
+        0
+    };
+    if known {
+        for cell in emoji_cells..cell_width {
+            put_styled(frame, x0 + cell, sky_y, "─", rail);
+        }
+    }
+}
+
+/// Temperature: every cell of the hour inked, so the silhouette is continuous
+/// rather than a picket fence of centred glyphs.
+fn temperature_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+    range: Option<(f64, f64)>,
+) {
+    let Some(height) = temperature_eighths(hour.temp_c, range) else {
+        return;
+    };
+    let style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
+    let x0 = plot.column_x(column.offset);
+    for cell in 0..plot.window.cell_width {
+        band_render(
+            frame,
+            x0 + cell,
+            plot.y + TEMP_ROW,
+            TEMP_ROWS,
+            height,
+            style,
+        );
+    }
+}
+
+/// Rain: the same floor as the silhouette. Dim below the week strip's faint
+/// threshold, except for the selection and the current hour, which are states
+/// rather than readings and draw at full strength.
+fn rain_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+) {
+    let Some(height) = rain_sixteenths(hour.chance) else {
+        return;
+    };
+    let mut style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
+    if column.state_colour.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    let x0 = plot.column_x(column.offset);
+    for cell in 0..plot.window.cell_width {
+        band_render(
+            frame,
+            x0 + cell,
+            plot.y + RAIN_ROW,
+            RAIN_ROWS,
+            height,
+            style,
+        );
+    }
+}
+
+/// Wind: an arrow every second hour, its speed on the six-hour ticks. Hour
+/// after hour of near-identical arrows says less than a sparse row the eye
+/// can actually compare; the selected hour always draws so the marker below
+/// never points at a blank.
+fn wind_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+    unit: Unit,
+    selected: usize,
+) {
+    let clock = clock_hour(&hour.time);
+    let on_cadence = clock.map_or(column.offset.is_multiple_of(2), |hour| hour % 2 == 0);
+    let index = column.index(plot);
+    if !on_cadence && index != selected {
+        return;
+    }
+    let wind_y = plot.y + WIND_ROW;
+    let centre = plot.centre_x(column.offset);
+    let arrow = wind_symbol(hour.wind_kph, hour.wind_dir_deg);
+    put(
+        frame,
+        centre,
+        wind_y,
+        arrow,
+        column.state_colour.unwrap_or(palette.text),
+    );
+
+    // Not beside the selection: the selected hour's off-cadence arrow
+    // would overprint the tick's digits, and the inspector already
+    // carries that hour's exact speed.
+    if arrow != " "
+        && clock.is_some_and(|hour| hour % 6 == 0)
+        && selected.abs_diff(index) > 1
+        && let Some(speed) = hour.wind_kph
+    {
+        let text = format!("{:.0}", unit.speed(speed));
+        let cells = text.chars().count() as u16;
+        // The next even hour's arrow sits two hour-columns on, so
+        // the digits get the cells between: one at the narrowest
+        // tier, which holds a single digit. A speed that does not
+        // fit is left off rather than clipped — `↑2↑` for 20 km/h
+        // told the reader the wind was 2.
+        let before_next_arrow = cells < 2 * plot.window.cell_width;
+        let inside_plot = centre + 1 + cells <= plot.plot_x + plot.plot_width;
+        if before_next_arrow && inside_plot {
+            put_text(frame, centre + 1, wind_y, &text, palette.muted);
+        }
     }
 }
 

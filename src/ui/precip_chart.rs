@@ -50,8 +50,7 @@ const RULE: &str = "─";
 /// The selected hour, distinguished by shape as well as colour — the daily
 /// chart encodes its selection in colour alone, which this should not repeat.
 const RULE_SELECTED: &str = "═";
-/// Rows the hour-tick axis takes below the plot. Was a shared `axis` const
-/// until the weathergram rework absorbed it; this chart is its last user.
+/// Rows the hour-tick axis takes below the plot.
 const TICK_ROWS: u16 = 1;
 
 const RULE_NOW: &str = "┬";
@@ -158,23 +157,7 @@ pub(super) fn precip_chart_render(
             .saturating_sub(if ticks { TICK_ROWS } else { 0 }),
         ..inner
     };
-
-    // Centre the columns on their measured width, as the daily chart does. The
-    // gutter is carved out first so the bars are centred in what is left of the
-    // box rather than sitting under their own labels.
-    let [_gutter, field] = Layout::horizontal([
-        Constraint::Length(if axis { AXIS_WIDTH } else { 0 }),
-        Constraint::Fill(1),
-    ])
-    .areas(body);
-
-    let [plot] = Layout::horizontal([Constraint::Length(columns.width_of(shown))])
-        .flex(Flex::Center)
-        .areas(field);
-    let [plot] = Layout::vertical([Constraint::Length(body.height.min(MAX_PLOT_HEIGHT))])
-        .flex(Flex::Start)
-        .areas(plot);
-
+    let plot = plot_area(body, axis, columns.width_of(shown));
     let rows = Rows::split(plot.height);
 
     if axis {
@@ -191,53 +174,104 @@ pub(super) fn precip_chart_render(
             row,
             visible.iter().map(|h| h.time.as_str()),
             columns.stride,
-            0,
             palette.muted,
             palette,
         );
     }
 
-    for (i, hour) in visible.iter().enumerate() {
-        let index = start + i;
-        let colour = if index == selected {
-            palette.selection
-        } else if index == 0 {
-            // Hour zero of the forward window is always now.
-            palette.now
-        } else {
-            palette.accent
-        };
+    let chart = Chart {
+        plot,
+        columns,
+        rows,
+        amount_scale,
+        start,
+        selected,
+    };
+    for (offset, hour) in visible.iter().enumerate() {
+        column_render(frame, &chart, offset, hour, palette);
+    }
+}
 
-        let rising = rising_column(fraction(hour.chance.map(f64::from), 100.0), rows.rise);
-        let falling = falling_column(fraction(hour.precip_mm, amount_scale), rows.fall);
+/// Where the bars stand. Centred on their measured width, as the daily chart
+/// does; the gutter is carved out first so the bars are centred in what is
+/// left of the box rather than sitting under their own labels.
+fn plot_area(body: Rect, axis: bool, width: u16) -> Rect {
+    let [_gutter, field] = Layout::horizontal([
+        Constraint::Length(if axis { AXIS_WIDTH } else { 0 }),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
 
-        // The rule takes its column's colour except at a day boundary, which
-        // is structural rather than a reading: the bars above it stay ordinary
-        // while the mark itself takes the accent. Sharing the selection's
-        // yellow costs little, because the selection is yellow down its whole
-        // column and carries a different glyph.
-        let (rule, rule_colour) = if index == selected {
-            (RULE_SELECTED, colour)
-        } else if index == 0 {
-            (RULE_NOW, colour)
-        } else if is_midnight(&hour.time) {
-            (RULE_MIDNIGHT, palette.selection)
-        } else {
-            (RULE, colour)
-        };
+    let [plot] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(field);
+    let [plot] = Layout::vertical([Constraint::Length(body.height.min(MAX_PLOT_HEIGHT))])
+        .flex(Flex::Start)
+        .areas(plot);
+    plot
+}
 
-        let left = plot.x + (i * columns.stride as usize) as u16;
-        let width = columns.stride - GAP;
+/// Everything a column needs to place itself: the plot it stands in, the
+/// stride it is laid out on, the row split, the amount scale, and where the
+/// visible window and the selection sit in the series.
+struct Chart {
+    plot: Rect,
+    columns: Columns,
+    rows: Rows,
+    amount_scale: f64,
+    start: usize,
+    selected: usize,
+}
 
-        for x in left..(left + width).min(plot.right()) {
-            for (offset, symbol) in rising.iter().enumerate() {
-                put(frame, x, plot.y + offset as u16, symbol, colour);
-            }
-            put(frame, x, plot.y + rows.rise as u16, rule, rule_colour);
-            for (offset, symbol) in falling.iter().enumerate() {
-                let y = plot.y + (rows.rise + 1 + offset) as u16;
-                put(frame, x, y, symbol, colour);
-            }
+/// One hour's bars either side of its rule.
+fn column_render(
+    frame: &mut Frame,
+    chart: &Chart,
+    offset: usize,
+    hour: &HourlyForecast,
+    palette: Palette,
+) {
+    let index = chart.start + offset;
+    let colour = if index == chart.selected {
+        palette.selection
+    } else if index == 0 {
+        // Hour zero of the forward window is always now.
+        palette.now
+    } else {
+        palette.accent
+    };
+
+    let rows = &chart.rows;
+    let rising = rising_column(fraction(hour.chance.map(f64::from), 100.0), rows.rise);
+    let falling = falling_column(fraction(hour.precip_mm, chart.amount_scale), rows.fall);
+
+    // The rule takes its column's colour except at a day boundary, which
+    // is structural rather than a reading: the bars above it stay ordinary
+    // while the mark itself takes the accent. Sharing the selection's
+    // yellow costs little, because the selection is yellow down its whole
+    // column and carries a different glyph.
+    let (rule, rule_colour) = if index == chart.selected {
+        (RULE_SELECTED, colour)
+    } else if index == 0 {
+        (RULE_NOW, colour)
+    } else if is_midnight(&hour.time) {
+        (RULE_MIDNIGHT, palette.selection)
+    } else {
+        (RULE, colour)
+    };
+
+    let plot = chart.plot;
+    let left = plot.x + (offset * chart.columns.stride as usize) as u16;
+    let width = chart.columns.stride - GAP;
+
+    for x in left..(left + width).min(plot.right()) {
+        for (row, symbol) in rising.iter().enumerate() {
+            put(frame, x, plot.y + row as u16, symbol, colour);
+        }
+        put(frame, x, plot.y + rows.rise as u16, rule, rule_colour);
+        for (row, symbol) in falling.iter().enumerate() {
+            let y = plot.y + (rows.rise + 1 + row) as u16;
+            put(frame, x, y, symbol, colour);
         }
     }
 }
@@ -350,8 +384,9 @@ fn chart_title(hours: usize, scale_mm: f64, unit: Unit, width: u16) -> String {
         unit.precip_label()
     );
 
-    // Two corners plus a column of breathing room inside each, as the current
-    // pane's border budget does.
+    // A column of breathing room inside each corner. `width` is the interior,
+    // so the corners themselves are already outside it; the current pane's
+    // budget subtracts four because it starts from the box.
     let room = width.saturating_sub(2) as usize;
     for candidate in [full, legend, span] {
         if candidate.chars().count() <= room {
