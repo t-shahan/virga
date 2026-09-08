@@ -99,7 +99,13 @@ fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location
 }
 
 pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
-    fetch_forecast_with(agent(), &Endpoints::default(), lat, lon)
+    fetch_forecast_at(&Endpoints::default(), lat, lon)
+}
+
+/// The same fetch, at hosts the caller names: the seam through which
+/// `virga now`'s tests prove a fresh cache is answered without one.
+pub(crate) fn fetch_forecast_at(endpoints: &Endpoints, lat: f64, lon: f64) -> Result<Weather> {
+    fetch_forecast_with(agent(), endpoints, lat, lon)
 }
 
 fn fetch_forecast_with(

@@ -251,7 +251,10 @@ first frame. Asking about a named city is a question, not a move — the
 remembered city stays whatever it was. And when nothing is remembered yet,
 the one location lookup `virga now` makes is remembered afterwards, so a
 status bar polling by the minute asks the location provider once, not once
-per poll.
+per poll. When the app fetched a forecast for that city within the last
+hour, `virga now` answers from it, moved to the current hour, without asking
+the network; a named city always fetches, and `VIRGA_CACHE=off` turns this
+off along with the rest of the cache.
 
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went
@@ -512,7 +515,8 @@ Weather, air quality, and geocoding all come from
 Each weather load makes two requests, and each submitted search makes a third.
 `virga now` asks the same questions the same way — two requests per report,
 one more for a named city, and the location lookup only on a first run where
-nothing is remembered.
+nothing is remembered — or none, when the app's last forecast for the city
+is under an hour old.
 
 Location detection is the one thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to

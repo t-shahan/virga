@@ -23,7 +23,15 @@ const FILE: &str = "forecast.json";
 /// is a different day's, and the hourly series has less than a week left.
 /// The age is shown beside the forecast whatever it is; this only decides
 /// whether it is shown at all.
-const MAX_AGE: TimeDelta = TimeDelta::hours(24);
+pub const MAX_AGE: TimeDelta = TimeDelta::hours(24);
+/// The oldest forecast `virga now` may answer from. Shorter than `MAX_AGE`
+/// because the report carries no "as of" mark: whatever it prints has to
+/// pass for the answer to a question asked now. The conditions line is the
+/// observation at the fetch, which an hour on is the previous hour's, and an
+/// hour is also the resolution of the series beside it. Not shorter, or a
+/// status bar polling by the minute would be answered from disk only in
+/// the minutes after a launch.
+pub const REPORT_MAX_AGE: TimeDelta = TimeDelta::hours(1);
 /// The shape of the series' timestamps, local to the location.
 const STAMP: &str = "%Y-%m-%dT%H:%M";
 
@@ -47,10 +55,12 @@ pub fn path_beside(state: &Path) -> PathBuf {
     state.with_file_name(FILE)
 }
 
-/// The cache, if there is one this launch may open on.
+/// The cache, if there is one under `max_age` that describes `expected`:
+/// `MAX_AGE` for a launch to open on, `REPORT_MAX_AGE` for `virga now` to
+/// print.
 ///
 /// `None`, silently, when there is no file, when it describes somewhere
-/// other than `expected`, when it is older than `MAX_AGE`, or when its
+/// other than `expected`, when it is older than `max_age`, or when its
 /// series does not reach the current hour. A file that is there and cannot
 /// be read is an error for the caller to report; it is never a reason not to
 /// start.
@@ -60,6 +70,7 @@ pub fn load(
     path: &Path,
     expected: &ActiveLocation,
     now: DateTime<Local>,
+    max_age: TimeDelta,
 ) -> Result<Option<CachedWeather>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -83,7 +94,7 @@ pub fn load(
         return Ok(None);
     };
     let age = now.with_timezone(&Utc) - fetched;
-    if age < TimeDelta::zero() || age > MAX_AGE {
+    if age < TimeDelta::zero() || age > max_age {
         return Ok(None);
     }
 
@@ -225,7 +236,7 @@ mod tests {
         let path = written(dir.path(), fetched);
 
         let now = local(2026, 8, 2, 21, 5);
-        let cached = load(&path, &frederick(), now)
+        let cached = load(&path, &frederick(), now, MAX_AGE)
             .unwrap()
             .expect("a three hour old forecast opens the app");
         assert_eq!(cached.as_of, "17:52");
@@ -245,7 +256,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = written(dir.path(), local(2026, 8, 2, 23, 59));
 
-        let cached = load(&path, &frederick(), local(2026, 8, 3, 0, 5))
+        let cached = load(&path, &frederick(), local(2026, 8, 3, 0, 5), MAX_AGE)
             .unwrap()
             .expect("a six minute old forecast opens the app");
         assert_eq!(cached.weather.today_index, 2, "midnight has passed");
@@ -260,7 +271,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = written(dir.path(), local(2026, 8, 2, 13, 59));
 
-        let cached = load(&path, &frederick(), local(2026, 8, 2, 14, 1))
+        let cached = load(&path, &frederick(), local(2026, 8, 2, 14, 1), MAX_AGE)
             .unwrap()
             .expect("a two minute old forecast opens the app");
         assert_eq!(cached.weather.now_hour, 38);
@@ -272,7 +283,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = written(dir.path(), local(2026, 8, 1, 22, 14));
 
-        let cached = load(&path, &frederick(), local(2026, 8, 2, 1, 0))
+        let cached = load(&path, &frederick(), local(2026, 8, 2, 1, 0), MAX_AGE)
             .unwrap()
             .unwrap();
         assert_eq!(cached.as_of, "yesterday 22:14");
@@ -285,14 +296,56 @@ mod tests {
         let path = written(dir.path(), fetched);
 
         let just_inside = fetched + TimeDelta::hours(24);
-        assert!(load(&path, &frederick(), just_inside).unwrap().is_some());
-        let just_outside = just_inside + TimeDelta::minutes(1);
-        assert!(load(&path, &frederick(), just_outside).unwrap().is_none());
         assert!(
-            load(&path, &frederick(), fetched - TimeDelta::minutes(1))
+            load(&path, &frederick(), just_inside, MAX_AGE)
                 .unwrap()
-                .is_none(),
+                .is_some()
+        );
+        let just_outside = just_inside + TimeDelta::minutes(1);
+        assert!(
+            load(&path, &frederick(), just_outside, MAX_AGE)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            load(
+                &path,
+                &frederick(),
+                fetched - TimeDelta::minutes(1),
+                MAX_AGE
+            )
+            .unwrap()
+            .is_none(),
             "a clock that has gone backwards is not trusted either"
+        );
+    }
+
+    /// The one-shot report's bound, an hour, is the same edge one tier down:
+    /// the minute after it, the file is still a launch's cache and no longer
+    /// a report's.
+    #[test]
+    fn a_report_is_held_to_a_tighter_bound_than_a_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = local(2026, 8, 2, 12, 0);
+        let path = written(dir.path(), fetched);
+
+        let just_inside = fetched + REPORT_MAX_AGE;
+        assert!(
+            load(&path, &frederick(), just_inside, REPORT_MAX_AGE)
+                .unwrap()
+                .is_some()
+        );
+        let just_outside = just_inside + TimeDelta::minutes(1);
+        assert!(
+            load(&path, &frederick(), just_outside, REPORT_MAX_AGE)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            load(&path, &frederick(), just_outside, MAX_AGE)
+                .unwrap()
+                .is_some(),
+            "a launch still opens on it"
         );
     }
 
@@ -307,7 +360,7 @@ mod tests {
         };
 
         assert!(
-            load(&path, &elsewhere, local(2026, 8, 31, 18, 0))
+            load(&path, &elsewhere, local(2026, 8, 31, 18, 0), MAX_AGE)
                 .unwrap()
                 .is_none()
         );
@@ -318,7 +371,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE);
         assert!(
-            load(&path, &frederick(), local(2026, 8, 31, 18, 0))
+            load(&path, &frederick(), local(2026, 8, 31, 18, 0), MAX_AGE)
                 .unwrap()
                 .is_none()
         );
@@ -336,7 +389,7 @@ mod tests {
         ] {
             std::fs::write(&path, body).unwrap();
             assert!(
-                load(&path, &frederick(), local(2026, 8, 31, 18, 0)).is_err(),
+                load(&path, &frederick(), local(2026, 8, 31, 18, 0), MAX_AGE).is_err(),
                 "{body:?}"
             );
         }
@@ -349,7 +402,7 @@ mod tests {
         std::fs::write(&path, "{\"version\":99,\"anything\":true}").unwrap();
 
         assert!(
-            load(&path, &frederick(), local(2026, 8, 31, 18, 0))
+            load(&path, &frederick(), local(2026, 8, 31, 18, 0), MAX_AGE)
                 .unwrap()
                 .is_none()
         );
@@ -376,7 +429,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load(&path, &frederick(), fetched + TimeDelta::hours(1))
+            load(&path, &frederick(), fetched + TimeDelta::hours(1), MAX_AGE)
                 .unwrap()
                 .is_none()
         );
@@ -395,7 +448,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load(&path, &frederick(), local(2026, 8, 10, 1, 0))
+            load(&path, &frederick(), local(2026, 8, 10, 1, 0), MAX_AGE)
                 .unwrap()
                 .is_none()
         );
