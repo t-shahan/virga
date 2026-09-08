@@ -164,7 +164,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
                 let title = if app.is_locating() {
                     "Locating"
                 } else {
-                    app.location.label.as_str()
+                    app.fetching_for().label.as_str()
                 };
                 current_skeleton_render(frame, title, palette, panes.current);
                 forecast_skeleton_render(
@@ -259,9 +259,10 @@ fn weather_panes(content: Rect, forecast_days: usize) -> WeatherPanes {
     // rows at the cost of chart width, so it is a fallback for
     // short windows rather than a reward for wide ones.
     // Clamped to the area before the cast, and saturating after
-    // it: the count is the server's word, the DTO cap
-    // notwithstanding, and a table can never be taller than the
-    // space it draws in anyway.
+    // it: in the loaded frame the count is the server's word, the
+    // DTO cap notwithstanding, and in the skeleton it is a guess at
+    // that word; a table can never be taller than the space it
+    // draws in anyway.
     let days = forecast_days.min(rest.height as usize) as u16;
     let table_rows = days.saturating_add(1);
     let table_box = table_rows.saturating_add(2);
@@ -937,6 +938,64 @@ mod tests {
         assert!(text.contains("LOCATING"), "{text}");
         assert!(!text.contains("NEW YORK"), "{text}");
         assert!(text.contains("locating..."), "{text}");
+    }
+
+    /// The place whose forecast is on its way, as the corner should name it.
+    fn berlin() -> crate::app::ActiveLocation {
+        crate::app::ActiveLocation {
+            label: "Berlin, Germany".to_string(),
+            lat: 52.52,
+            lon: 13.405,
+        }
+    }
+
+    /// The ordinary first run: detection has answered and the forecast for
+    /// the place it found is on its way. The corner names that place, not
+    /// the compiled-in fallback the app opened with — `LOCATING` was put
+    /// there to keep the fallback off the screen, and naming it one step
+    /// later would undo that.
+    #[test]
+    fn the_skeleton_names_the_place_detection_found_while_its_forecast_is_fetched() {
+        let mut app = App::with_startup(crate::app::Startup {
+            location: crate::app::ActiveLocation::default(),
+            source: crate::app::LocationSource::Fallback,
+            detect: true,
+            cached: None,
+        });
+        let crate::events::Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+        let _ = app.on_message(crate::events::Message::Detected {
+            id,
+            location: berlin(),
+        });
+
+        let text = symbols(&drawn(&app, probe(), 80, 24), 80, 24).join("\n");
+        assert!(text.contains("BERLIN, GERMANY"), "{text}");
+        assert!(!text.contains("NEW YORK"), "{text}");
+    }
+
+    /// A forecast on screen, then another city picked: the skeleton is for
+    /// the city on its way, not the one just left.
+    #[test]
+    fn the_skeleton_names_the_city_picked_rather_than_the_one_left() {
+        let mut app = ready(Screen::Search);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52,
+            lon: 13.405,
+        }]);
+        let _ = app.on_action(crate::input::Action::Submit);
+        assert!(
+            matches!(app.weather, Fetch::Loading),
+            "the pick did not clear the screen"
+        );
+
+        let text = symbols(&drawn(&app, probe(), 80, 24), 80, 24).join("\n");
+        assert!(text.contains("BERLIN, GERMANY"), "{text}");
+        assert!(!text.contains("NEW YORK"), "{text}");
     }
 
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {

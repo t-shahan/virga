@@ -414,9 +414,14 @@ impl App {
                 self.theme_readout_until = Some(Instant::now() + THEME_READOUT);
             }
             Action::OpenSearch => self.open_search(),
+            // Waits for a forecast, as the day keys do: with nothing loaded
+            // the hourly screen has only a spinner to show, and that one is
+            // already on the weather screen, inside the panes.
             Action::OpenHourly => {
-                self.screen = Screen::Hourly;
-                self.select_now();
+                if matches!(self.weather, Fetch::Ready(_)) {
+                    self.screen = Screen::Hourly;
+                    self.select_now();
+                }
             }
             Action::PrevDay => self.select_prev_day(),
             Action::NextDay => self.select_next_day(),
@@ -770,14 +775,26 @@ impl App {
         };
     }
 
-    /// What `r` should fetch: whatever we are already chasing, else what is on
-    /// screen. Never the compiled-in default — that was the bug. The source
-    /// rides along, so a refresh cannot quietly relabel where a place came from.
+    /// The place the app is chasing: the fetch in flight, else what is on
+    /// screen. `location` only moves on a load, so a frame drawn from it
+    /// during a fetch for somewhere else names the place just left — or,
+    /// on a first run, the compiled-in fallback the detection was there to
+    /// replace.
+    pub fn fetching_for(&self) -> &ActiveLocation {
+        self.pending
+            .as_ref()
+            .map_or(&self.location, |p| &p.location)
+    }
+
+    /// What `r` should fetch. Never the compiled-in default — that was the
+    /// bug. The source rides along, so a refresh cannot quietly relabel
+    /// where a place came from.
     fn refresh_target(&self) -> (ActiveLocation, LocationSource) {
-        self.pending.as_ref().map_or_else(
-            || (self.location.clone(), self.location_source),
-            |p| (p.location.clone(), p.source),
-        )
+        let source = self
+            .pending
+            .as_ref()
+            .map_or(self.location_source, |p| p.source);
+        (self.fetching_for().clone(), source)
     }
 
     /// Both directions wrap, so the window is a loop rather than a corridor.
@@ -1625,6 +1642,22 @@ mod tests {
 
     fn first_run() -> App {
         detecting_app(ActiveLocation::default(), LocationSource::Fallback)
+    }
+
+    /// `p` with nothing loaded has nothing to show. It used to open the
+    /// hourly screen anyway, onto the old centred popup over an empty
+    /// terminal — the frame the skeleton replaced.
+    #[test]
+    fn the_hourly_screen_waits_for_a_forecast() {
+        let mut app = first_run();
+        let _ = app.startup_request();
+
+        assert!(app.on_action(Action::OpenHourly).is_none());
+        assert_eq!(app.screen, Screen::Weather);
+
+        app.weather = Fetch::Ready(Weather::fixture(5, 2));
+        assert!(app.on_action(Action::OpenHourly).is_none());
+        assert_eq!(app.screen, Screen::Hourly);
     }
 
     /// The promise: a city you picked is not a question the network gets asked
