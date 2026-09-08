@@ -478,13 +478,9 @@ impl App {
                 location,
                 weather,
             } => {
-                if !self.awaiting_weather(id) {
+                let Some(Pending { source, .. }) = self.pending.take_if(|p| p.id == id) else {
                     return Outcome::nothing();
-                }
-                let source = self
-                    .pending
-                    .take()
-                    .map_or(self.location_source, |p| p.source);
+                };
                 self.selected_day = weather.today_index;
                 self.selected_hour = 0;
                 self.location = location;
