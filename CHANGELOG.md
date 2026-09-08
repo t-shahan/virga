@@ -23,7 +23,9 @@ refuse to publish a version this file does not describe.
   to show `http status: 503` or `json: expected value at line 1 column 1`
   with nothing saying which of three Open-Meteo hosts, or the location
   provider, had answered that way; every request now carries its endpoint
-  into the message, and the search and detection errors carry it too (#71).
+  into the message, and the search and detection errors carry it too. The
+  error popup and the search box wrap that message to fit rather than
+  cutting it off at the border (#71).
 
 ## [0.6.1] - 2026-09-07
 
