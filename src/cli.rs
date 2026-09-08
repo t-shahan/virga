@@ -129,7 +129,7 @@ No option changes how the application runs. Every control inside it is a key,
 and the bar along the bottom names them. `q` quits.
 
 Exit status:
-  0  Answered. For `update`: this is the latest release
+  0  Answered. For `update`: no newer release
   1  Could not answer: the network or a file failed
   2  Usage error, or an argument nothing matched
   3  `update` found a newer release
@@ -322,7 +322,7 @@ mod tests {
             assert!(
                 table
                     .lines()
-                    .any(|line| line.trim_start().starts_with(code)),
+                    .any(|line| line.split_whitespace().next() == Some(code)),
                 "exit code {code} is not in the table:{table}"
             );
         }

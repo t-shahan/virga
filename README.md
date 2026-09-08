@@ -258,13 +258,14 @@ cron job can act on it without reading the text:
 
 | Exit status | Meaning |
 |---|---|
-| 0 | This is the latest release |
+| 0 | Nothing to do: on the latest release, or ahead of it |
 | 1 | The check could not be made |
 | 2 | Usage error |
 | 3 | A newer release exists |
 
-The first three are what every command means by them; 3 is the one `update`
-adds, non-zero because there is something to do, the way `brew outdated` is.
+1 and 2 are what every command means by them; 0 is `update`'s answer, and 3
+is the one `update` adds, non-zero because there is something to do, the way
+`brew outdated` is.
 A script that treated any non-zero status as a failed check now has to
 tell 1 from 3.
 

@@ -708,17 +708,30 @@ mod tests {
         }
     }
 
-    /// The status agrees with the report: an update is the one thing that
-    /// is non-zero, and being ahead of the listing is not an update.
+    /// The status agrees with the report: whenever stdout says an update
+    /// is available the outcome is `Available`, and only then. Being ahead
+    /// of the listing is not an update by either measure.
     #[test]
     fn the_outcome_tracks_the_report() {
         let current = Release::parse("0.2.0").unwrap();
         let newer = Release::parse("0.3.0").unwrap();
         let older = Release::parse("0.1.0").unwrap();
 
-        assert_eq!(outcome(&current, &newer), Outcome::Available);
-        assert_eq!(outcome(&current, &current), Outcome::Current);
-        assert_eq!(outcome(&current, &older), Outcome::Current);
+        for (latest, expected) in [
+            (&newer, Outcome::Available),
+            (&current, Outcome::Current),
+            (&older, Outcome::Current),
+        ] {
+            let outcome = outcome(&current, latest);
+            let report = report(&current, latest, &InstallMethod::Homebrew);
+
+            assert_eq!(outcome, expected, "{latest}");
+            assert_eq!(
+                report.contains("is available"),
+                outcome == Outcome::Available,
+                "{latest}: {report}"
+            );
+        }
     }
 
     #[test]
