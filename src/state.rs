@@ -1,15 +1,18 @@
 use crate::app::{ActiveLocation, KeyHintStyle, LocationSource, Remembered};
 use crate::theme::Theme;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Version 2 requires a location; the optional `theme` field rides along
-/// unnoticed by binaries that predate it, which is what lets a themed
-/// document stay readable everywhere. Version 3 exists for the one shape
-/// version 2 cannot hold — a theme chosen before any weather has loaded, so
-/// no location — and older binaries refuse it loudly rather than misread it.
-/// A document is always written at the lowest version that can carry it.
+/// Version 2 requires a location; the optional `theme`, `key_hints`, and
+/// `detection_failed_at` fields ride along unnoticed by binaries that
+/// predate them, which is what lets such a document stay readable
+/// everywhere. Version 3 exists for the shapes version 2 cannot hold — a
+/// theme, a key hint style, or a failed detection, in any mix, recorded
+/// before any location was — and older binaries refuse it loudly rather
+/// than misread it. A document is always written at the lowest version that
+/// can carry it.
 const VERSION: u8 = 2;
 const LOCATIONLESS_VERSION: u8 = 3;
 const STATE_FILE: &str = "state.json";
@@ -17,7 +20,9 @@ const STATE_FILE: &str = "state.json";
 #[derive(Deserialize, Serialize)]
 struct StateDocument {
     version: u8,
-    /// Absent only in version 3, which may carry a theme alone.
+    /// Absent only in version 3, which carries whatever else there is to
+    /// keep — a theme, a key hint style, a failed detection — with no
+    /// location to put beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     location: Option<ActiveLocation>,
     /// Absent in version 1, which had no concept of provenance. Its migration
@@ -32,6 +37,26 @@ struct StateDocument {
     /// same way `theme` is: most documents predate it or never toggled it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_hints: Option<String>,
+    /// When `virga now` last asked the network where the user is and got
+    /// no answer, as UTC seconds. Optional in every version, and ignored by
+    /// binaries that predate it: it only ever says "do not ask again just
+    /// yet", so a reader that does not understand it merely asks (#65).
+    #[serde(
+        default,
+        deserialize_with = "integer_or_nothing",
+        skip_serializing_if = "Option::is_none"
+    )]
+    detection_failed_at: Option<i64>,
+}
+
+/// Any value but an integer reads as no marker. The other fields fail the
+/// whole document when their type is wrong, and the next save then treats
+/// the file as corruption and writes it back without the remembered city or
+/// theme. The marker is not worth that: its only power is to hold off one
+/// request, so a hand-edit or some future reshaping of it costs one request
+/// and nothing else.
+fn integer_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_i64())
 }
 
 /// Everything the state file had to say, with the parts that could not be
@@ -41,6 +66,9 @@ pub(crate) struct Persisted {
     pub remembered: Option<Remembered>,
     pub theme: Option<Theme>,
     pub key_hint_style: Option<KeyHintStyle>,
+    /// The last detection `virga now` made that went unanswered, if it is
+    /// still on record. Cleared by the next location that is remembered.
+    pub detection_failed_at: Option<DateTime<Utc>>,
     /// A complaint about part of the document that did not stop the rest
     /// being used. Only an unknown theme or key hint style name produces one
     /// today.
@@ -62,13 +90,15 @@ fn remembered_of(document: &StateDocument) -> Result<Option<Remembered>> {
         document.version
     );
     let Some(location) = &document.location else {
-        // Only version 3 may omit the location, and only to carry a theme or
-        // a key hint style instead; a document recording nothing at all
-        // records a bug.
+        // Only version 3 may omit the location, and only to carry a theme,
+        // a key hint style, or a failed detection instead; a document
+        // recording nothing at all records a bug.
         anyhow::ensure!(document.version == LOCATIONLESS_VERSION, "no location");
         anyhow::ensure!(
-            document.theme.is_some() || document.key_hints.is_some(),
-            "neither a location, a theme, nor a key hint style"
+            document.theme.is_some()
+                || document.key_hints.is_some()
+                || document.detection_failed_at.is_some(),
+            "neither a location, a theme, a key hint style, nor a failed detection"
         );
         return Ok(None);
     };
@@ -148,10 +178,18 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     let remembered = remembered_of(&document)?;
     let (theme, theme_warning) = theme_of(&document);
     let (key_hint_style, key_hint_warning) = key_hint_style_of(&document);
+    // An integer `chrono` cannot place on a calendar did not come from this
+    // program either, and reads as no marker for the reason
+    // `integer_or_nothing` gives. Not worth a warning: nothing the user set
+    // is being ignored.
+    let detection_failed_at = document
+        .detection_failed_at
+        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0));
     Ok(Persisted {
         remembered,
         theme,
         key_hint_style,
+        detection_failed_at,
         warning: theme_warning.or(key_hint_warning),
     })
 }
@@ -261,70 +299,95 @@ fn tolerate_unsupported(locked: std::io::Result<()>) -> std::io::Result<()> {
     }
 }
 
+/// What a save starts from: the fields of the document already on disk,
+/// one of which each `save_*` replaces before the rest are written back.
+/// Read in one place so the four saves cannot disagree about what survives;
+/// the next optional field is one line here, not one per save.
+#[derive(Default)]
+struct Merged {
+    remembered: Option<Remembered>,
+    /// The raw names, not the parsed values: one this binary does not know
+    /// still belongs to somebody — a newer Virga, most likely — and
+    /// remembering a city must not erase it.
+    theme: Option<String>,
+    key_hints: Option<String>,
+    detection_failed_at: Option<i64>,
+}
+
+/// The surviving document's fields, ready for one to be replaced. Read under
+/// `exclusive`, and written back before it is released.
+///
+/// A location that no longer parses was unusable anyway; dropping it is
+/// the one lossy step here, and it loses nothing that worked.
+fn surviving(path: &Path) -> Result<Merged> {
+    let Some(document) = surviving_document(path)? else {
+        return Ok(Merged::default());
+    };
+    Ok(Merged {
+        remembered: remembered_of(&document).ok().flatten(),
+        theme: document.theme,
+        key_hints: document.key_hints,
+        detection_failed_at: document.detection_failed_at,
+    })
+}
+
 pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> {
-    let Remembered { location, source } = remembered;
     // Unreachable while `App::remembered` holds — it never offers one — and
     // checked anyway, because writing the compiled-in default is precisely how
     // the old format let a first run masquerade as a choice.
     anyhow::ensure!(
-        *source != LocationSource::Fallback,
+        remembered.source != LocationSource::Fallback,
         "the built-in fallback is not a remembered location"
     );
-    validate(location)?;
+    validate(&remembered.location)?;
     let _held = exclusive(path)?;
-    // The raw names, not the parsed values: one this binary does not know
-    // still belongs to somebody — a newer Virga, most likely — and
-    // remembering a city must not erase it.
-    let existing = surviving_document(path)?;
-    let theme = existing
-        .as_ref()
-        .and_then(|document| document.theme.clone());
-    let key_hints = existing.and_then(|document| document.key_hints);
-    save_document(path, Some(remembered), theme, key_hints)
+    let mut merged = surviving(path)?;
+    merged.remembered = Some(remembered.clone());
+    // A place to remember answers the question the marker was asking, so
+    // the marker goes: a stale one would otherwise outlive a later forget.
+    merged.detection_failed_at = None;
+    save_document(path, merged)
+}
+
+/// Note that `virga now` asked the network where the user is and got no
+/// answer, so the next poll can decline to ask again for a while. Everything
+/// else in the document is kept; only a remembered location displaces the
+/// marker, and that is `save_location`'s doing.
+pub(crate) fn save_detection_failure(path: &Path, at: DateTime<Utc>) -> Result<()> {
+    let _held = exclusive(path)?;
+    let mut merged = surviving(path)?;
+    merged.detection_failed_at = Some(at.timestamp());
+    save_document(path, merged)
 }
 
 pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
     let _held = exclusive(path)?;
-    // A location that no longer parses was unusable anyway; dropping it is
-    // the one lossy merge here, and it loses nothing that worked.
-    let existing = surviving_document(path)?;
-    let remembered = existing
-        .as_ref()
-        .and_then(|document| remembered_of(document).ok().flatten());
-    let key_hints = existing.and_then(|document| document.key_hints);
-    save_document(
-        path,
-        remembered.as_ref(),
-        Some(theme.name().to_string()),
-        key_hints,
-    )
+    let mut merged = surviving(path)?;
+    merged.theme = Some(theme.name().to_string());
+    save_document(path, merged)
 }
 
 pub(crate) fn save_key_hint_style(path: &Path, style: KeyHintStyle) -> Result<()> {
     let _held = exclusive(path)?;
-    let existing = surviving_document(path)?;
-    let remembered = existing
-        .as_ref()
-        .and_then(|document| remembered_of(document).ok().flatten());
-    let theme = existing.and_then(|document| document.theme);
-    save_document(
-        path,
-        remembered.as_ref(),
-        theme,
-        Some(style.name().to_string()),
-    )
+    let mut merged = surviving(path)?;
+    merged.key_hints = Some(style.name().to_string());
+    save_document(path, merged)
 }
 
-fn save_document(
-    path: &Path,
-    remembered: Option<&Remembered>,
-    theme: Option<String>,
-    key_hints: Option<String>,
-) -> Result<()> {
+fn save_document(path: &Path, merged: Merged) -> Result<()> {
+    let Merged {
+        remembered,
+        theme,
+        key_hints,
+        detection_failed_at,
+    } = merged;
     let version = match remembered {
         Some(_) => VERSION,
         None => LOCATIONLESS_VERSION,
     };
+    let (location, source) = remembered
+        .map(|remembered| (remembered.location, remembered.source))
+        .unzip();
     let parent = path.parent().context("state path has no parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
@@ -333,10 +396,11 @@ fn save_document(
         temporary.as_file_mut(),
         &StateDocument {
             version,
-            location: remembered.map(|remembered| remembered.location.clone()),
-            source: remembered.map(|remembered| remembered.source),
+            location,
+            source,
             theme,
             key_hints,
+            detection_failed_at,
         },
     )?;
     use std::io::Write as _;
@@ -615,6 +679,166 @@ mod tests {
         assert!(persisted.remembered.is_some());
         assert_eq!(persisted.key_hint_style, None);
         assert!(persisted.warning.unwrap().contains("compact"));
+    }
+
+    /// The marker is a version 3 document's third reason to exist, and it
+    /// is the only one of the three that a later save may erase: a place
+    /// to remember answers the question it was asking.
+    #[test]
+    fn a_failed_detection_is_noted_until_a_location_is_remembered() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_detection_failure(&path, at).unwrap();
+
+        assert_eq!(raw_version(&path), 3);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, None);
+        assert_eq!(persisted.detection_failed_at, Some(at));
+        assert_eq!(persisted.warning, None);
+
+        save_location(&path, &chosen("Berlin, Germany", 52.52437, 13.41053)).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        assert_eq!(load_from(&path).unwrap().detection_failed_at, None);
+    }
+
+    /// The other two saves are not about location and must not touch the
+    /// marker, the same way they must not touch each other.
+    #[test]
+    fn a_failed_detection_survives_theme_and_key_hint_saves() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_detection_failure(&path, at).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.detection_failed_at, Some(at));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// And the marker keeps everything it found, in the version the rest
+    /// already called for.
+    #[test]
+    fn noting_a_failed_detection_preserves_the_rest_of_the_document() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_location(&path, &berlin).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_detection_failure(&path, at).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.detection_failed_at, Some(at));
+    }
+
+    /// A marker `chrono` cannot represent did not come from this program.
+    /// It reads as no marker, which costs one more request and nothing else.
+    #[test]
+    fn an_unrepresentable_marker_reads_as_none() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        write_raw(
+            &path,
+            r#"{"version":3,"detection_failed_at":9223372036854775807}"#,
+        );
+
+        let persisted = load_from(&path).unwrap();
+
+        assert_eq!(persisted.detection_failed_at, None);
+        assert_eq!(persisted.warning, None);
+    }
+
+    /// A marker of the wrong type is the same story: every other field
+    /// would fail the document, but this one only ever holds off a request,
+    /// so it is not allowed to take the remembered city and theme with it.
+    #[test]
+    fn a_marker_of_the_wrong_type_reads_as_none_and_costs_nothing_else() {
+        for marker in ["\"1800000000\"", "1800000000.5", "null", "true", "[]"] {
+            let test = tempfile::tempdir().unwrap();
+            let path = test.path().join("state.json");
+            write_raw(
+                &path,
+                &format!(
+                    r#"{{"version":2,"location":{{"label":"Berlin","lat":52.0,"lon":13.0}},"source":"chosen","theme":"nord","detection_failed_at":{marker}}}"#
+                ),
+            );
+
+            let persisted = load_from(&path).unwrap();
+            assert_eq!(persisted.detection_failed_at, None, "{marker}");
+            assert_eq!(persisted.theme, Some(Theme::Nord), "{marker}");
+            assert!(persisted.remembered.is_some(), "{marker}");
+            assert_eq!(persisted.warning, None, "{marker}");
+
+            // The reviewer's scenario for #119: a save over such a document
+            // must merge into it, not treat it as corruption and start over.
+            save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+            let persisted = load_from(&path).unwrap();
+            assert!(persisted.remembered.is_some(), "{marker}");
+            assert_eq!(persisted.theme, Some(Theme::Nord), "{marker}");
+            assert_eq!(
+                persisted.key_hint_style,
+                Some(KeyHintStyle::Full),
+                "{marker}"
+            );
+            assert_eq!(persisted.detection_failed_at, None, "{marker}");
+        }
+    }
+
+    /// Every save replaces its one field and carries the other three, with
+    /// the location save's dropping of the marker as the one exception. A
+    /// sweep rather than a pair, so that a merge helper which forgot a
+    /// field could not slip past a test that only saved the other two.
+    #[test]
+    fn each_save_carries_every_field_it_does_not_replace() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+        let reykjavik = chosen("Reykjavík, Iceland", 64.14659, -21.94223);
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let later = at + chrono::TimeDelta::minutes(1);
+
+        save_location(&path, &berlin).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_detection_failure(&path, at).unwrap();
+
+        save_theme(&path, Theme::Dracula).unwrap();
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin.clone()));
+        assert_eq!(persisted.theme, Some(Theme::Dracula));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(persisted.detection_failed_at, Some(at));
+
+        save_key_hint_style(&path, KeyHintStyle::Hint).unwrap();
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.theme, Some(Theme::Dracula));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Hint));
+        assert_eq!(persisted.detection_failed_at, Some(at));
+
+        save_detection_failure(&path, later).unwrap();
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.theme, Some(Theme::Dracula));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Hint));
+        assert_eq!(persisted.detection_failed_at, Some(later));
+
+        save_location(&path, &reykjavik).unwrap();
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(reykjavik));
+        assert_eq!(persisted.theme, Some(Theme::Dracula));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Hint));
+        assert_eq!(persisted.detection_failed_at, None);
     }
 
     #[test]
