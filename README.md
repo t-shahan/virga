@@ -253,6 +253,22 @@ the one location lookup `virga now` makes is remembered afterwards, so a
 status bar polling by the minute asks the location provider once, not once
 per poll.
 
+`virga update` answers in its exit status as well, so a shell prompt or a
+cron job can act on it without reading the text:
+
+| Exit status | Meaning |
+|---|---|
+| 0 | Nothing to do: on the latest release, or ahead of it |
+| 1 | The check could not be made |
+| 2 | Usage error |
+| 3 | A newer release exists |
+
+1 and 2 are what every command means by them; 0 is `update`'s answer, and 3
+is the one `update` adds, non-zero because there is something to do, the way
+`brew outdated` is.
+A script that treated any non-zero status as a failed check now has to
+tell 1 from 3.
+
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went
 unanswered. Neither `virga update` nor the startup check replaces the binary; see

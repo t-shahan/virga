@@ -12,6 +12,17 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Changed
+
+- `virga update` exits 3 when a newer release exists, so a shell prompt or
+  a cron job can act on the answer without reading it. It used to exit 0
+  whether or not there was anything to do, on the reasoning that the
+  command had answered. 0 now means this is the latest release, 1 still
+  means the check could not be made, and 2 is still a usage error; the
+  text on stdout is unchanged. A script that treated every non-zero
+  status as a failed check has to tell 1 from 3 now. The table is in
+  `--help` (#110).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
