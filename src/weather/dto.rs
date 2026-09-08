@@ -13,7 +13,7 @@ pub struct GeocodeResultDto {
     pub country: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
-    /// These two decorate a row rather than define it, so a value of the
+    /// These three decorate a row rather than define it, so a value of the
     /// wrong shape — a population sent as a string, a timezone sent as a
     /// number — costs that one value and not the whole list. The name and
     /// coordinates above are held to the stricter rule because a row
@@ -22,7 +22,16 @@ pub struct GeocodeResultDto {
     #[serde(default, deserialize_with = "lenient")]
     pub timezone: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
+    pub country_code: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
     pub population: Option<u64>,
+}
+
+/// A string with nothing in it once `plain` has had its say is the same
+/// as no string: a blank zone would be a blank second line in the search
+/// list, and a blank code names no country.
+fn present(text: String) -> Option<String> {
+    Some(plain(text)).filter(|text| !text.is_empty())
 }
 
 /// A value of the expected type, or `None` for anything else. An untagged
@@ -79,7 +88,8 @@ impl GeocodeResultDto {
             country: self.country.map(plain),
             lat: self.latitude?,
             lon: self.longitude?,
-            timezone: self.timezone.map(plain),
+            timezone: self.timezone.and_then(present),
+            country_code: self.country_code.and_then(present),
             population: self.population,
         })
     }
@@ -143,6 +153,7 @@ impl GeoIpDto {
             // A detection never sits in the search list, which is the one
             // place these are read.
             timezone: None,
+            country_code: None,
             population: None,
         })
     }
@@ -774,6 +785,7 @@ mod tests {
             latitude: Some(48.85),
             longitude: Some(2.35),
             timezone: Some("Europe/\u{202e}Paris".to_string()),
+            country_code: None,
             population: None,
         };
         let location = geocode.into_location().expect("a location");
@@ -803,6 +815,7 @@ mod tests {
             latitude: Some(27.18),
             longitude: Some(56.26),
             timezone: None,
+            country_code: None,
             population: None,
         };
         let location = geocode.into_location().expect("a location");
@@ -847,24 +860,26 @@ mod tests {
         assert_eq!(dto.results[0].name, "Frederick");
         assert_eq!(dto.results[0].admin1.as_deref(), Some("Maryland"));
         assert_eq!(dto.results[0].timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(dto.results[0].country_code.as_deref(), Some("US"));
         assert_eq!(dto.results[0].population, Some(69479));
     }
 
-    /// The timezone and population decorate a row; the row stands without
-    /// them. Absent, null, and the wrong type all read as unknown, and none
-    /// of them costs the list the rows around it.
+    /// The timezone, country code and population decorate a row; the row
+    /// stands without them. Absent, null, and the wrong type all read as
+    /// unknown, and none of them costs the list the rows around it.
     #[test]
     fn a_geocode_row_survives_a_missing_or_malformed_timezone_and_population() {
         let json = r#"{"results": [
             {"name": "Absent", "latitude": 1.0, "longitude": 1.0},
             {"name": "Null", "latitude": 1.0, "longitude": 1.0,
-             "timezone": null, "population": null},
+             "timezone": null, "country_code": null, "population": null},
             {"name": "Wrong", "latitude": 1.0, "longitude": 1.0,
-             "timezone": 42, "population": "many"},
+             "timezone": 42, "country_code": 840, "population": "many"},
             {"name": "Negative", "latitude": 1.0, "longitude": 1.0,
              "population": -5},
             {"name": "Right", "latitude": 1.0, "longitude": 1.0,
-             "timezone": "Europe/Berlin", "population": 3644826}
+             "timezone": "Europe/Berlin", "country_code": "DE",
+             "population": 3644826}
         ]}"#;
 
         let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
@@ -877,10 +892,38 @@ mod tests {
         assert_eq!(locations.len(), 5, "every row is still a place");
         for location in &locations[..4] {
             assert!(location.timezone.is_none(), "{}", location.name);
+            assert!(location.country_code.is_none(), "{}", location.name);
             assert!(location.population.is_none(), "{}", location.name);
         }
         assert_eq!(locations[4].timezone.as_deref(), Some("Europe/Berlin"));
+        assert_eq!(locations[4].country_code.as_deref(), Some("DE"));
         assert_eq!(locations[4].population, Some(3_644_826));
+    }
+
+    /// An empty zone is an unknown one, and so is one that was nothing but
+    /// the characters `plain` strips: either would have drawn a blank second
+    /// line, or a coordinate fallback with a leading separator.
+    #[test]
+    fn an_empty_timezone_or_country_code_reads_as_unknown() {
+        let json = r#"{"results": [
+            {"name": "Empty", "latitude": 1.0, "longitude": 1.0,
+             "timezone": "", "country_code": ""},
+            {"name": "Hollow", "latitude": 1.0, "longitude": 1.0,
+             "timezone": "\u202e", "country_code": "\u200f"}
+        ]}"#;
+
+        let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
+        let locations: Vec<_> = dto
+            .results
+            .into_iter()
+            .filter_map(GeocodeResultDto::into_location)
+            .collect();
+
+        assert_eq!(locations.len(), 2);
+        for location in &locations {
+            assert_eq!(location.timezone, None, "{}", location.name);
+            assert_eq!(location.country_code, None, "{}", location.name);
+        }
     }
 
     #[test]

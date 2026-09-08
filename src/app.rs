@@ -1786,6 +1786,7 @@ mod tests {
             lat: 52.52437,
             lon: 13.41053,
             timezone: None,
+            country_code: None,
             population: None,
         }]);
         let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
@@ -2131,6 +2132,7 @@ mod tests {
                 lat: 52.52437,
                 lon: 13.41053,
                 timezone: None,
+                country_code: None,
                 population: None,
             }],
         });
@@ -2278,6 +2280,7 @@ mod tests {
             lat: 52.52437,
             lon: 13.41053,
             timezone: None,
+            country_code: None,
             population: None,
         };
 

@@ -599,6 +599,7 @@ mod tests {
                 lat: 39.414_27,
                 lon: -77.410_54,
                 timezone: None,
+                country_code: None,
                 population: None,
             },
             Location {
@@ -608,6 +609,7 @@ mod tests {
                 lat: 38.301_8,
                 lon: -77.460_5,
                 timezone: None,
+                country_code: None,
                 population: None,
             },
             // Reads the same as the first row, so the list draws its
@@ -619,6 +621,7 @@ mod tests {
                 lat: 38.9,
                 lon: -76.9,
                 timezone: Some("America/Chicago".to_string()),
+                country_code: None,
                 population: None,
             },
         ]

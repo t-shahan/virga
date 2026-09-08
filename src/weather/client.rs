@@ -184,8 +184,8 @@ fn search_locations_with(
         .filter_map(GeocodeResultDto::into_location)
         .collect();
     // The geocoder ranks by how well the name matched, which among five
-    // places all called Frederick is no ranking at all: the county seat of
-    // 70,000 came back between two towns a tenth its size. Biggest first
+    // places all called Frederick is no ranking at all: behind the county
+    // seat of 70,000 it put a town of 3,700 above one of 11,000. Biggest first
     // puts the one most people mean under the cursor, and makes it the one
     // `virga now frederick` answers for. The sort is stable, so places the
     // geocoder gave no population keep its order among themselves, at the
@@ -508,6 +508,7 @@ mod tests {
             [Some("Maryland"), Some("Colorado"), Some("Oklahoma")]
         );
         assert_eq!(found[0].timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(found[0].country_code.as_deref(), Some("US"));
     }
 
     /// A place the geocoder gave no population sinks below every place it
