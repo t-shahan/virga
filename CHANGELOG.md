@@ -12,6 +12,16 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Security
+
+- The weather and location clients refuse to speak plain HTTP, follow at
+  most two redirects, and cap every response body at 1 MiB before parsing
+  it. Neither provider redirects, so nothing changes on a healthy network;
+  what changes is that a redirect from either host to an `http://` URL is
+  now an error rather than the user's coordinates re-sent in the clear,
+  and the body ceiling is stated in the client instead of inherited from a
+  ureq default that only one read path applied (#72).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
