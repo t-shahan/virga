@@ -2,6 +2,7 @@ use crate::events::{Message, Request, RequestId};
 use crate::input::Action;
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
+use crate::update::Release;
 use crate::weather::model::{Location, Weather};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -275,9 +276,18 @@ pub struct App {
     /// better use — and on a narrow terminal it costs a whole binding.
     theme_readout_until: Option<Instant>,
     /// The one line of release news, when the background probe found any.
-    /// Composed in the probe, so this module never learns about versions,
-    /// paths, or the network — it holds a string and lets it go.
+    /// Composed in the probe, so this module never learns about paths or
+    /// the network — it holds a string and lets it go.
     pub update_notice: Option<String>,
+    /// The release `update_notice` is about, held only until the notice is
+    /// let go, so the dismissal can say which release it was. The string
+    /// stays the thing this module displays; this is the thing it records.
+    noticed_release: Option<Release>,
+    /// Set the moment the notice is cleared, so the caller knows to write
+    /// the release down — the same "persist the moment it changes" shape as
+    /// `key_hint_style_dirty`, carrying the value rather than a flag because
+    /// the notice it came from is gone by the time the caller asks.
+    dismissed_release: Option<Release>,
     /// Whether the key reference overlay is open. Only reachable from the
     /// weather screens: search binds `?` to text, and while the overlay is
     /// open every action closes it before it could change screen.
@@ -359,6 +369,8 @@ impl App {
             search_return: Screen::Weather,
             theme_readout_until: None,
             update_notice: None,
+            noticed_release: None,
+            dismissed_release: None,
             help_visible: false,
             key_hint_style: KeyHintStyle::default(),
             key_hint_style_dirty: false,
@@ -402,6 +414,12 @@ impl App {
         // screen a straight-to-quit launch never gave it a frame on.
         if !matches!(action, Action::Quit) && self.screen != Screen::Search {
             self.update_notice = None;
+            // Letting the notice go is the dismissal: the release it named
+            // is not news next launch either, and only the caller can
+            // write that down.
+            if let Some(release) = self.noticed_release.take() {
+                self.dismissed_release = Some(release);
+            }
         }
         match action {
             Action::Quit => self.should_quit = true,
@@ -469,8 +487,9 @@ impl App {
         match message {
             // No id and no staleness: at most one is ever sent, and news
             // about a release does not go stale over a session.
-            Message::UpdateAvailable { notice } => {
+            Message::UpdateAvailable { notice, latest } => {
                 self.update_notice = Some(notice);
+                self.noticed_release = Some(latest);
                 Outcome::nothing()
             }
             Message::Loaded {
@@ -640,6 +659,13 @@ impl App {
             self.key_hint_style_dirty = false;
             self.key_hint_style
         })
+    }
+
+    /// Takes the release whose notice a key just cleared, if one did, so
+    /// the caller can remember not to announce it again. Once per
+    /// dismissal, for the same reason `take_key_hint_style_save` is.
+    pub fn take_update_dismissal(&mut self) -> Option<Release> {
+        self.dismissed_release.take()
     }
 
     /// A request this app asked for that never reached the worker, because the
@@ -2457,6 +2483,7 @@ mod tests {
     fn news() -> Message {
         Message::UpdateAvailable {
             notice: "update: virga 9.9.9 is available — run `virga update`".to_string(),
+            latest: Release::parse("9.9.9").unwrap(),
         }
     }
 
@@ -2482,6 +2509,75 @@ mod tests {
 
         assert_eq!(app.update_notice, None);
         assert_eq!(app.unit, Unit::Metric, "the keypress still did its work");
+    }
+
+    /// The key that clears the notice is the one that dismisses the release,
+    /// and the dismissal is handed out once: a caller that asks on every
+    /// idle tick must not rewrite the state file forever.
+    #[test]
+    fn the_clearing_key_leaves_exactly_one_pending_dismissal() {
+        let mut app = App::new();
+        assert_eq!(app.take_update_dismissal(), None);
+        app.on_message(news());
+        assert_eq!(
+            app.take_update_dismissal(),
+            None,
+            "news that is still on screen has not been dismissed"
+        );
+
+        app.on_action(Action::ToggleUnits);
+
+        assert_eq!(
+            app.take_update_dismissal(),
+            Some(Release::parse("9.9.9").unwrap())
+        );
+        assert_eq!(
+            app.take_update_dismissal(),
+            None,
+            "the dismissal was not taken exactly once"
+        );
+
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(
+            app.take_update_dismissal(),
+            None,
+            "a key with no notice to clear dismissed something"
+        );
+    }
+
+    /// Keys that spare the notice — search keys that never saw it, the key
+    /// that closes the overlay covering it, and quit — dismiss nothing, or
+    /// the release would be silenced for a user who never read the line.
+    #[test]
+    fn keys_that_spare_the_notice_dismiss_nothing() {
+        let mut searching = App::new();
+        searching.on_action(Action::OpenSearch);
+        searching.on_message(news());
+        searching.on_action(Action::Insert('a'));
+        searching.on_action(Action::Back);
+        assert!(searching.update_notice.is_some());
+        assert_eq!(
+            searching.take_update_dismissal(),
+            None,
+            "a search key dismissed"
+        );
+
+        let mut reading = App::new();
+        reading.on_action(Action::ToggleHelp);
+        reading.on_message(news());
+        reading.on_action(Action::NextDay);
+        assert!(reading.update_notice.is_some());
+        assert_eq!(
+            reading.take_update_dismissal(),
+            None,
+            "closing the overlay dismissed"
+        );
+
+        let mut quitting = App::new();
+        quitting.on_message(news());
+        quitting.on_action(Action::Quit);
+        assert!(quitting.update_notice.is_some());
+        assert_eq!(quitting.take_update_dismissal(), None, "quitting dismissed");
     }
 
     /// The search screen never renders the notice, so keys pressed there —

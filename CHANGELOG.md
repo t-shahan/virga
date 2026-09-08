@@ -12,6 +12,15 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- A cleared update notice stays cleared. The keypress that dismisses the
+  startup notice now also writes the release it named into the state file,
+  and later launches announce only a release newer than that one. Quitting
+  with the notice still standing does not count: it is printed on the way
+  out, as before, and comes back next time. `VIRGA_UPDATE=off` still skips
+  the check entirely, and `virga update` always answers (#109).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

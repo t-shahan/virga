@@ -1,5 +1,6 @@
 use crate::app::ActiveLocation;
 use crate::cache;
+use crate::update::Release;
 use crate::weather::client::detect_location;
 use crate::weather::client::fetch_forecast;
 use crate::weather::client::search_locations;
@@ -78,11 +79,13 @@ pub enum Message {
         error: String,
     },
     /// A newer release exists. Carries the finished notice text, composed in
-    /// the probe, so the app holds one string and never learns about paths,
-    /// versions, or the network. No id: nothing chains off it, nothing
-    /// supersedes it, and at most one is ever sent.
+    /// the probe, so the app holds one string and never learns about paths
+    /// or the network. The release rides beside it only so that clearing
+    /// the notice can say which one was cleared. No id: nothing chains off
+    /// it, nothing supersedes it, and at most one is ever sent.
     UpdateAvailable {
         notice: String,
+        latest: Release,
     },
     /// A forecast reached the app but its copy for the next launch did not
     /// reach the disk. No id: the forecast it concerns is already on
@@ -102,13 +105,13 @@ pub enum Message {
 /// network deserves complaining about.
 pub fn spawn_update_check(
     messages: Sender<Message>,
-    probe: impl FnOnce() -> Option<String> + Send + 'static,
+    probe: impl FnOnce() -> Option<(String, Release)> + Send + 'static,
 ) {
     thread::spawn(move || {
-        if let Some(notice) = probe() {
+        if let Some((notice, latest)) = probe() {
             // A send after the app has quit is a dropped receiver, and
             // ignoring that error is the whole shutdown story.
-            let _ = messages.send(Message::UpdateAvailable { notice });
+            let _ = messages.send(Message::UpdateAvailable { notice, latest });
         }
     });
 }
@@ -195,13 +198,20 @@ mod tests {
     fn a_probe_with_news_sends_one_update_message() {
         let (tx, rx) = mpsc::channel();
 
-        spawn_update_check(tx, || Some("update: virga 9.9.9 is available".to_string()));
+        spawn_update_check(tx, || {
+            Some((
+                "update: virga 9.9.9 is available".to_string(),
+                Release::parse("9.9.9").unwrap(),
+            ))
+        });
 
-        let Ok(Message::UpdateAvailable { notice }) = rx.recv_timeout(Duration::from_secs(5))
+        let Ok(Message::UpdateAvailable { notice, latest }) =
+            rx.recv_timeout(Duration::from_secs(5))
         else {
             panic!("the probe's news never arrived");
         };
         assert!(notice.contains("9.9.9"));
+        assert_eq!(latest, Release::parse("9.9.9").unwrap());
         assert!(
             rx.recv_timeout(Duration::from_secs(5)).is_err(),
             "one probe must not send twice"
@@ -230,7 +240,9 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Message>();
         drop(rx);
 
-        spawn_update_check(tx, || Some("too late".to_string()));
+        spawn_update_check(tx, || {
+            Some(("too late".to_string(), Release::parse("9.9.9").unwrap()))
+        });
         // Nothing to assert beyond "no panic": the thread is detached, and
         // the send error is swallowed by design.
     }

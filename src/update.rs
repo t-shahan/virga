@@ -242,8 +242,19 @@ pub(crate) fn report(current: &Release, latest: &Release, method: &InstallMethod
 /// It points at `virga update` rather than carrying the instruction itself:
 /// one muted line has room to say that news exists, and the subcommand is
 /// where the full answer already lives.
-pub(crate) fn notice(current: &Release, latest: &Release) -> Option<String> {
-    latest.newer_than(current).then(|| {
+///
+/// `dismissed` is the release whose notice the user last cleared. That
+/// release, and anything older, is not news twice; only a release newer than
+/// it is. A dismissal never touches `virga update`, which is asked on
+/// purpose and always answers.
+pub(crate) fn notice(
+    current: &Release,
+    latest: &Release,
+    dismissed: Option<&Release>,
+) -> Option<String> {
+    let news = latest.newer_than(current)
+        && dismissed.is_none_or(|dismissed| latest.newer_than(dismissed));
+    news.then(|| {
         format!("update: virga {latest} is available (you have {current}) — run `virga update`")
     })
 }
@@ -655,8 +666,44 @@ mod tests {
         let current = Release::parse("0.2.0").unwrap();
         let behind = Release::parse("0.1.0").unwrap();
 
-        assert_eq!(notice(&current, &current), None);
-        assert_eq!(notice(&current, &behind), None, "being ahead is not news");
+        assert_eq!(notice(&current, &current, None), None);
+        assert_eq!(
+            notice(&current, &behind, None),
+            None,
+            "being ahead is not news"
+        );
+    }
+
+    /// The notice a user cleared last time stays cleared: the same release
+    /// is not announced again, and neither is one older than it. A newer
+    /// one is news again, since it is not what they dismissed.
+    #[test]
+    fn a_dismissed_release_is_not_announced_again_but_a_newer_one_is() {
+        let current = Release::parse("0.2.0").unwrap();
+        let dismissed = Release::parse("0.3.0").unwrap();
+
+        assert_eq!(notice(&current, &dismissed, Some(&dismissed)), None);
+        let older = Release::parse("0.2.1").unwrap();
+        assert_eq!(
+            notice(&current, &older, Some(&dismissed)),
+            None,
+            "a release behind the dismissed one is not news either"
+        );
+
+        let newer = Release::parse("0.3.1").unwrap();
+        let notice = notice(&current, &newer, Some(&dismissed)).expect("a newer release is news");
+        assert!(notice.contains("0.3.1"));
+    }
+
+    /// Dismissing an old notice does not silence a later one: the release
+    /// on offer is newer than what was cleared, so it is announced.
+    #[test]
+    fn dismissing_an_older_release_does_not_hide_the_latest() {
+        let current = Release::parse("0.2.0").unwrap();
+        let latest = Release::parse("0.4.0").unwrap();
+        let dismissed = Release::parse("0.3.0").unwrap();
+
+        assert!(notice(&current, &latest, Some(&dismissed)).is_some());
     }
 
     #[test]
@@ -664,7 +711,7 @@ mod tests {
         let current = Release::parse("0.2.0").unwrap();
         let latest = Release::parse("0.3.0").unwrap();
 
-        let notice = notice(&current, &latest).unwrap();
+        let notice = notice(&current, &latest, None).unwrap();
 
         assert!(notice.contains("0.3.0"));
         assert!(notice.contains("0.2.0"));

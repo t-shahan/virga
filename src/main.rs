@@ -178,7 +178,7 @@ fn main() -> Result<()> {
         eprintln!("{warning}");
     }
 
-    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style) =
+    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style, dismissed) =
         match state::path() {
             Ok(path) => {
                 let (persisted, warning) = load_persisted(&path);
@@ -204,6 +204,7 @@ fn main() -> Result<()> {
                     cache_path,
                     persisted.theme,
                     persisted.key_hint_style,
+                    persisted.dismissed,
                 )
             }
             // Nowhere to remember a location is not a reason to stop working out
@@ -211,7 +212,7 @@ fn main() -> Result<()> {
             // state directory still deserves their own city.
             Err(error) => {
                 eprintln!("virga: could not determine where to remember location: {error:#}");
-                (startup_location(None, detect), None, None, None, None)
+                (startup_location(None, detect), None, None, None, None, None)
             }
         };
 
@@ -243,7 +244,10 @@ fn main() -> Result<()> {
         },
         state_path.as_deref(),
         cache_path,
-        check_updates,
+        UpdateCheck {
+            enabled: check_updates,
+            dismissed,
+        },
         &mut warning,
         &mut notice,
     );
@@ -423,6 +427,17 @@ fn persist_key_hint_style(state_path: Option<&Path>, style: KeyHintStyle) -> Opt
     state::save_key_hint_style(path, style)
         .err()
         .map(|error| format!("virga: could not save the key hint style: {error:#}"))
+}
+
+/// Write a cleared notice down the moment it is cleared, so the release it
+/// named is not announced again. A write failure is a warning for the same
+/// reason as above: the notice is gone from the screen either way, and the
+/// worst a lost dismissal costs is one more line next launch.
+fn persist_dismissal(state_path: Option<&Path>, release: &update::Release) -> Option<String> {
+    let path = state_path?;
+    state::save_dismissed(path, release)
+        .err()
+        .map(|error| format!("virga: could not remember the dismissed update notice: {error:#}"))
 }
 
 fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
@@ -673,12 +688,19 @@ impl Opening {
     }
 }
 
+/// What the startup probe is told: whether to run at all, and which release
+/// the user last cleared a notice for, so it can stay quiet about that one.
+struct UpdateCheck {
+    enabled: bool,
+    dismissed: Option<update::Release>,
+}
+
 fn run(
     mut terminal: DefaultTerminal,
     opening: Opening,
     state_path: Option<&Path>,
     cache_path: Option<PathBuf>,
-    check_updates: bool,
+    update_check: UpdateCheck,
     warning: &mut Option<String>,
     notice: &mut Option<String>,
 ) -> Result<()> {
@@ -690,12 +712,14 @@ fn run(
     let (message_tx, message_rx) = mpsc::channel();
     // The probe rides its own thread and the shared message channel; the
     // worker's request queue is serial, and news must never stall a search.
-    if check_updates {
-        events::spawn_update_check(message_tx.clone(), || {
+    if update_check.enabled {
+        let dismissed = update_check.dismissed;
+        events::spawn_update_check(message_tx.clone(), move || {
             let current = update::Release::parse(env!("CARGO_PKG_VERSION")).ok()?;
             let latest =
                 update::Release::parse(&update::latest_tag(update::RELEASES_URL).ok()?).ok()?;
-            update::notice(&current, &latest)
+            let notice = update::notice(&current, &latest, dismissed.as_ref())?;
+            Some((notice, latest))
         });
     }
     events::spawn_worker(request_rx, message_tx, cache_path);
@@ -815,6 +839,9 @@ fn run(
                                 persist_key_hint_style(state_path, style),
                             );
                         }
+                        if let Some(release) = app.take_update_dismissal() {
+                            retain_first_warning(warning, persist_dismissal(state_path, &release));
+                        }
                         if app.should_quit {
                             // A message already in the queue — above all the
                             // update probe's one answer, which may have
@@ -850,6 +877,7 @@ mod tests {
 
     use crate::app::ActiveLocation;
     use crate::events::Message;
+    use crate::input::Action;
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
@@ -1336,6 +1364,44 @@ mod tests {
     #[test]
     fn without_a_state_path_the_toggle_is_a_silent_no_op() {
         assert_eq!(persist_key_hint_style(None, KeyHintStyle::Full), None);
+    }
+
+    /// The whole path from the key that clears the notice to the file: the
+    /// dismissal the app hands out is written where the next launch's probe
+    /// reads it, and a launch with nowhere to write clears the line for the
+    /// session and complains about nothing.
+    #[test]
+    fn a_cleared_notice_is_persisted_as_the_dismissed_release() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let latest = update::Release::parse("9.9.9").unwrap();
+        let mut app = App::new();
+        app.on_message(Message::UpdateAvailable {
+            notice: "update: virga 9.9.9 is available".to_string(),
+            latest: latest.clone(),
+        });
+
+        app.on_action(Action::ToggleUnits);
+        let release = app.take_update_dismissal().expect("the key dismissed");
+
+        assert_eq!(persist_dismissal(Some(&path), &release), None);
+        assert_eq!(state::load_from(&path).unwrap().dismissed, Some(latest));
+        assert_eq!(persist_dismissal(None, &release), None);
+    }
+
+    /// A state directory that cannot take the write is a warning, not a
+    /// reason to stop the loop: the notice is gone from the screen either way.
+    #[test]
+    fn a_dismissal_that_cannot_be_written_is_a_warning() {
+        let test = tempfile::tempdir().unwrap();
+        let parent = test.path().join("not-a-directory");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("state.json");
+
+        let warning = persist_dismissal(Some(&path), &update::Release::parse("9.9.9").unwrap())
+            .expect("the failed write warned");
+
+        assert!(warning.contains("dismissed update notice"));
     }
 
     #[test]
