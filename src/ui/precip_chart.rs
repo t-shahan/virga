@@ -11,7 +11,7 @@
 //! vertical bars, not up versus down. So this writes cells itself.
 
 use crate::theme::Palette;
-use crate::ui::axis::{hour_ticks_render, put, put_right};
+use crate::ui::axis::{hour_ticks_render, put, put_right, window_label};
 use crate::ui::bars::{Columns, GAP, window_start};
 use crate::units::Unit;
 use crate::weather::model::{HourlyForecast, Weather};
@@ -144,8 +144,16 @@ pub(super) fn precip_chart_render(
         // A block title takes the block's own style, not the border's, so both
         // of these are given the header role explicitly rather than left on
         // the terminal's default foreground.
-        .title(Line::from(chart_title(shown, amount_scale, unit, inner.width)).fg(palette.muted))
-        .title_bottom(Line::from(dry_spell(visible, shown)).fg(palette.muted));
+        .title(
+            Line::from(chart_title(
+                &window_label(start, shown, visible.first().map(|h| h.time.as_str())),
+                amount_scale,
+                unit,
+                inner.width,
+            ))
+            .fg(palette.muted),
+        )
+        .title_bottom(Line::from(dry_spell(visible, shown, start)).fg(palette.muted));
     frame.render_widget(block, area);
 
     // The ticks come off the bottom before anything else: an axis the plot has
@@ -339,10 +347,12 @@ fn falling_column(fraction: f64, rows: usize) -> Vec<&'static str> {
 
 /// Longest form that fits. The span matters most — it is what the arrows move
 /// through — then the fact that the halves are different quantities, then the
-/// amount scale that stops the two inviting a meaningless comparison.
-fn chart_title(hours: usize, scale_mm: f64, unit: Unit, width: u16) -> String {
-    let span = format!("Precipitation · next {hours} h");
-    let legend = format!("{span} · chance ▲ · amount ▼");
+/// amount scale that stops the two inviting a meaningless comparison. At the
+/// 34-column floor a paged span outgrows the name beside it, and the name is
+/// the part the screen can spare: the box is the only chart on it.
+fn chart_title(span: &str, scale_mm: f64, unit: Unit, width: u16) -> String {
+    let named = format!("Precipitation · {span}");
+    let legend = format!("{named} · chance ▲ · amount ▼");
     let full = format!(
         "{legend} 0–{:.*} {}",
         unit.precip_decimals(),
@@ -353,7 +363,7 @@ fn chart_title(hours: usize, scale_mm: f64, unit: Unit, width: u16) -> String {
     // Two corners plus a column of breathing room inside each, as the current
     // pane's border budget does.
     let room = width.saturating_sub(2) as usize;
-    for candidate in [full, legend, span] {
+    for candidate in [full, legend, named, span.to_string()] {
         if candidate.chars().count() <= room {
             return candidate;
         }
@@ -364,11 +374,17 @@ fn chart_title(hours: usize, scale_mm: f64, unit: Unit, width: u16) -> String {
 /// With most hours dry most weeks, an empty lower half is the screen's normal
 /// state rather than an edge case. Say so in words, or the chart looks broken
 /// rather than reassuring.
-fn dry_spell(visible: &[HourlyForecast], hours: usize) -> String {
+///
+/// "Next" is only true of the page that starts now; a later page describes
+/// the hours it shows (#78).
+fn dry_spell(visible: &[HourlyForecast], hours: usize, start: usize) -> String {
     if visible.iter().any(HourlyForecast::is_wet) {
         return String::new();
     }
-    format!("no rain or snow in the next {hours} h")
+    if start == 0 {
+        return format!("no rain or snow in the next {hours} h");
+    }
+    format!("no rain or snow in these {hours} h")
 }
 
 fn is_midnight(time: &str) -> bool {
@@ -575,7 +591,7 @@ mod tests {
     /// that means nothing — they are percentages against inches.
     #[test]
     fn the_title_names_the_amount_scale_when_it_fits() {
-        let title = chart_title(26, 2.0, Unit::Imperial, 78);
+        let title = chart_title("next 26 h", 2.0, Unit::Imperial, 78);
         assert!(title.contains("chance ▲"), "{title}");
         assert!(title.contains("amount ▼"), "{title}");
         assert!(title.contains("in"), "{title}");
@@ -586,15 +602,80 @@ mod tests {
     #[test]
     fn the_title_sheds_detail_rather_than_overflowing() {
         for width in 4u16..=120 {
-            let title = chart_title(26, 2.0, Unit::Metric, width);
+            let title = chart_title("next 26 h", 2.0, Unit::Metric, width);
             assert!(
                 title.chars().count()
                     <= (width.saturating_sub(2) as usize).max("Precipitation".len()),
                 "width {width}: {title:?} does not fit"
             );
         }
-        assert_eq!(chart_title(26, 2.0, Unit::Metric, 10), "Precipitation");
-        assert!(chart_title(26, 2.0, Unit::Metric, 34).contains("next 26 h"));
+        assert_eq!(
+            chart_title("next 26 h", 2.0, Unit::Metric, 10),
+            "Precipitation"
+        );
+        assert!(chart_title("next 26 h", 2.0, Unit::Metric, 34).contains("next 26 h"));
+    }
+
+    /// A paged span is longer than "next 26 h", and at the app's narrowest
+    /// width it is the name that goes: the position is what the reader who
+    /// paged there needs, and the box is the only chart on the screen.
+    #[test]
+    fn a_paged_title_keeps_its_position_at_the_narrowest_width() {
+        let span = "11 h from Thu 12a";
+        assert_eq!(chart_title(span, 2.0, Unit::Metric, 34), span);
+        assert_eq!(
+            chart_title(span, 2.0, Unit::Metric, 36),
+            "Precipitation · 11 h from Thu 12a"
+        );
+        for width in 4u16..=120 {
+            let title = chart_title(span, 2.0, Unit::Metric, width);
+            assert!(
+                title.chars().count()
+                    <= (width.saturating_sub(2) as usize).max("Precipitation".len()),
+                "width {width}: {title:?} does not fit"
+            );
+        }
+    }
+
+    /// Nothing used to render a scrolled page and read its text back: the
+    /// title named the window's size on every page, so four days ahead it
+    /// still said "next 24 h" over an axis reading `Thu 12a`.
+    #[test]
+    fn a_later_page_is_titled_from_where_it_opens() {
+        let first = buffer_text(60, 10, 0);
+        assert!(first.contains("next 18 h"), "\n{first}");
+
+        // Eighteen hours a page at this width, so hour 40 is on the third
+        // page, which opens 36 hours after the fixture's Sunday midnight.
+        let paged = buffer_text(60, 10, 40);
+        let top = paged.lines().next().unwrap_or_default();
+        assert!(top.contains("18 h from Mon 12p"), "{top:?}");
+        assert!(!top.contains("next"), "{top:?}");
+    }
+
+    /// The dry caption describes the page it sits under, in the same tense
+    /// as the title above it.
+    #[test]
+    fn a_dry_later_page_describes_these_hours_not_the_next_ones() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in &mut weather.hourly {
+            hour.precip_mm = Some(0.0);
+        }
+
+        for (selected, expected) in [(0, "in the next 18 h"), (40, "in these 18 h")] {
+            let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+            terminal
+                .draw(|f| {
+                    precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, selected)
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let bottom: String = (0..60).map(|x| buffer[(x, 9)].symbol()).collect();
+            assert!(
+                bottom.contains(expected),
+                "selection {selected}: {bottom:?} should say {expected:?}"
+            );
+        }
     }
 
     #[test]

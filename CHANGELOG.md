@@ -12,6 +12,22 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The hourly charts title a page by where it sits, not only by its size.
+  Both said `next 24 h` on every page, so four days ahead the weathergram
+  read `next 24 h` over an axis saying `Thu 12a`, and the classic chart's
+  dry caption promised no rain "in the next 24 h" about Thursday. A page
+  that has left now is titled `24 h from Thu 12a`, its caption says "in
+  these 24 h", and at the narrowest widths the pane's name gives way
+  before the position does. In the same panes, the weathergram's rain
+  summary now totals the hours on screen like the temperature and wind
+  beside it rather than the day ahead of the selection, which the
+  inspector already prints as "24 h total"; a flat freezing window reads
+  `-5°C` instead of `-5–-5°C`; and "no rain in the next N days" rounds a
+  partial last day up, so a forecast a few hours short of eight days no
+  longer says seven while the strip below it draws eight rows (#78).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

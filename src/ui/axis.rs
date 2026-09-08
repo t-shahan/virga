@@ -117,6 +117,22 @@ fn tick(time: &str) -> Option<String> {
     }
 }
 
+/// How a chart names the hours it shows. The first page is "next N h"; a
+/// later one names the hour it opens on, because "next 24 h" over an axis
+/// reading `Thu 12a` described a different day (#78). Shared so the two
+/// hourly charts cannot phrase the same window two ways. A first stamp that
+/// will not parse falls back to its distance from now, which is still a
+/// position rather than a size.
+pub(super) fn window_label(start: usize, hours: usize, first: Option<&str>) -> String {
+    if start == 0 {
+        return format!("next {hours} h");
+    }
+    let from = first
+        .and_then(anchor)
+        .unwrap_or_else(|| format!("{start} h ahead"));
+    format!("{hours} h from {from}")
+}
+
 /// Two or three columns, which is what a tick has between its neighbours at the
 /// narrowest stride either chart draws at.
 pub(super) fn clock(hour: u32) -> String {
@@ -149,6 +165,26 @@ mod tests {
         assert_eq!(tick("2026-08-10T12:00").as_deref(), Some("12p"));
         assert_eq!(tick("2026-08-10T07:00"), None);
         assert_eq!(tick("nonsense"), None);
+    }
+
+    /// The first page is the one that starts now, so "next" is true there
+    /// and nowhere else; every later page says where it opens instead.
+    #[test]
+    fn a_window_is_named_by_its_position_once_it_leaves_now() {
+        assert_eq!(window_label(0, 24, Some("2026-08-10T00:00")), "next 24 h");
+        assert_eq!(
+            window_label(96, 24, Some("2026-08-14T00:00")),
+            "24 h from Fri 12a"
+        );
+        assert_eq!(
+            window_label(168, 24, Some("2026-08-17T06:00")),
+            "24 h from Mon 6a"
+        );
+        assert_eq!(
+            window_label(48, 12, Some("nonsense")),
+            "12 h from 48 h ahead"
+        );
+        assert_eq!(window_label(48, 12, None), "12 h from 48 h ahead");
     }
 
     #[test]

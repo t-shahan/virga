@@ -741,8 +741,8 @@ mod tests {
                     }
                     "flat below-zero temperatures and threshold readings" => {
                         assert!(
-                            track_text(&buffer, width, height, "temp").contains("-5–-5°C"),
-                            "flat below-zero range changed meaning:\n{text}"
+                            track_text(&buffer, width, height, "temp").contains(" -5°C"),
+                            "flat below-zero range should be one value:\n{text}"
                         );
                         let flat = track_glyph_coordinates(
                             &buffer,

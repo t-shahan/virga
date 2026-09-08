@@ -15,7 +15,7 @@
 //! the hourly screen now states the size it needs instead (#50).
 
 use crate::theme::Palette;
-use crate::ui::axis::{hour_ticks_render, put, put_right, put_styled, put_text};
+use crate::ui::axis::{hour_ticks_render, put, put_right, put_styled, put_text, window_label};
 use crate::ui::bars::window_start;
 use crate::ui::condition_symbol;
 use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
@@ -172,24 +172,24 @@ fn clock_hour(time: &str) -> Option<u32> {
         .map(|at| at.hour())
 }
 
+/// A window whose extremes round to the same degree states it once: the en
+/// dash against a minus sign made a flat freezing day read `-5–-5°C`.
 fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
-    temperature_range(hours).map_or_else(
-        || "—".to_string(),
-        |(low, high)| {
-            format!(
-                "{:.0}–{:.0}{}",
-                unit.temp_rounded(low),
-                unit.temp_rounded(high),
-                unit.temp_symbol()
-            )
-        },
-    )
+    let Some((low, high)) = temperature_range(hours) else {
+        return "—".to_string();
+    };
+    let (low, high) = (unit.temp_rounded(low), unit.temp_rounded(high));
+    if low == high {
+        return format!("{low:.0}{}", unit.temp_symbol());
+    }
+    format!("{low:.0}–{high:.0}{}", unit.temp_symbol())
 }
 
-fn precipitation_summary(hours: &[HourlyForecast], selected: usize, unit: Unit) -> String {
-    let end = selected.saturating_add(24).min(hours.len());
-    let window = hours.get(selected..end).unwrap_or_default();
-    let total = aggregate(window, unit);
+/// The visible window, like the temperature and wind summaries beside it.
+/// It used to total the day ahead of the selection, which is the figure the
+/// inspector already prints two rows up as "24 h total" (#78).
+fn precipitation_summary(hours: &[HourlyForecast], unit: Unit) -> String {
+    let total = aggregate(hours, unit);
     match total {
         PrecipitationAggregate::Unavailable => "—".to_string(),
         PrecipitationAggregate::Zero => format!("0 {}", unit.precip_label()),
@@ -250,7 +250,7 @@ pub(super) fn weathergram_render(
     let visible = hours.get(window.start..end).unwrap_or_default();
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title(Line::from(format!(" Hourly weather · next {} h ", window.hours)).fg(palette.muted));
+        .title(Line::from(title(window, visible, area.width)).fg(palette.muted));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -265,13 +265,25 @@ pub(super) fn weathergram_render(
         summary_x: content_x + LABEL_WIDTH + plot_width + SUMMARY_GAP,
     };
 
-    full_tracks_render(frame, hours, visible, palette, unit, selected, &plot, inner);
+    full_tracks_render(frame, visible, palette, unit, selected, &plot, inner);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The pane's name gives way before the window does. At the 36-column floor
+/// "Hourly weather · 12 h from Sun 12p" overruns the 34 title cells, and the
+/// position is the part a reader who has paged forward needs.
+fn title(window: Window, visible: &[HourlyForecast], width: u16) -> String {
+    let first = visible.first().map(|hour| hour.time.as_str());
+    let span = window_label(window.start, window.hours, first);
+    let room = width.saturating_sub(BORDER_COLS) as usize;
+    let full = format!(" Hourly weather · {span} ");
+    if full.chars().count() <= room {
+        return full;
+    }
+    format!(" Hourly · {span} ")
+}
+
 fn full_tracks_render(
     frame: &mut Frame,
-    hours: &[HourlyForecast],
     visible: &[HourlyForecast],
     palette: Palette,
     unit: Unit,
@@ -294,11 +306,7 @@ fn full_tracks_render(
     for (label, summary, y) in [
         ("sky", String::new(), sky_y),
         ("temp", temperature_summary(visible, unit), temp_label_y),
-        (
-            "rain",
-            precipitation_summary(hours, selected, unit),
-            rain_label_y,
-        ),
+        ("rain", precipitation_summary(visible, unit), rain_label_y),
         ("wind", wind_summary(visible, unit), wind_y),
     ] {
         put_text(frame, plot.content_x, y, label, palette.muted);
@@ -1069,6 +1077,92 @@ mod tests {
         }
     }
 
+    /// Nothing used to render a scrolled page and read its title back, so
+    /// every page said "next 24 h" — four days ahead, over an axis reading
+    /// `Thu 12a`. A later page names the hour it opens on instead.
+    #[test]
+    fn a_scrolled_page_is_titled_from_where_it_opens() {
+        let weather = Weather::fixture(22, 14);
+
+        let first = rendered(&weather, 80, FULL_ROWS, 3);
+        assert!(first.contains("Hourly weather · next 24 h"), "\n{first}");
+
+        let paged = rendered(&weather, 80, FULL_ROWS, 24);
+        let top = paged.lines().next().unwrap_or_default();
+        assert!(
+            top.contains("Hourly weather · 24 h from Mon 12a"),
+            "{top:?}"
+        );
+        assert!(!top.contains("next"), "{top:?}");
+    }
+
+    /// At the 36-column floor the long form overruns the border, so the
+    /// pane's name shortens and the position survives whole, corner to
+    /// corner.
+    #[test]
+    fn a_narrow_scrolled_page_keeps_its_position_in_the_title() {
+        let weather = Weather::fixture(22, 14);
+        let width = 36;
+        assert_eq!(window_for(width, 12, 192).start, 12);
+
+        let text = rendered(&weather, width, FULL_ROWS, 12);
+        let top = text.lines().next().unwrap_or_default();
+        assert!(top.contains("Hourly · 12 h from Sun 12p"), "{top:?}");
+        assert!(top.ends_with('┐'), "the title overran the corner: {top:?}");
+        assert_eq!(top.chars().count(), width as usize);
+    }
+
+    #[test]
+    fn a_flat_temperature_window_states_one_value() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in weather.hourly.iter_mut() {
+            hour.temp_c = Some(-5.0);
+        }
+        let flat = &weather.forecast_hours()[..12];
+        assert_eq!(temperature_summary(flat, Unit::Metric), "-5°C");
+        assert_eq!(temperature_summary(flat, Unit::Imperial), "23°F");
+
+        // Different readings that round to the same degree are flat too.
+        weather.hourly[weather.now_hour].temp_c = Some(-5.2);
+        assert_eq!(
+            temperature_summary(&weather.forecast_hours()[..12], Unit::Metric),
+            "-5°C"
+        );
+        weather.hourly[weather.now_hour].temp_c = Some(-6.0);
+        assert_eq!(
+            temperature_summary(&weather.forecast_hours()[..12], Unit::Metric),
+            "-6–-5°C"
+        );
+    }
+
+    /// One window for all three summaries: the rain total describes the
+    /// hours on screen, not the day ahead of the selection, which is the
+    /// inspector's "24 h total" already.
+    #[test]
+    fn the_rain_summary_totals_the_visible_window() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.precip_mm = Some(0.0);
+        }
+        // Wet only in the second page's hours.
+        weather.hourly[now + 30].precip_mm = Some(5.0);
+
+        let first = rendered(&weather, 80, FULL_ROWS, 20);
+        let rain = first
+            .lines()
+            .find(|line| line.contains("rain"))
+            .unwrap_or_else(|| panic!("rain row missing:\n{first}"));
+        assert!(rain.contains("0 mm"), "{rain:?}");
+
+        let second = rendered(&weather, 80, FULL_ROWS, 24);
+        let rain = second
+            .lines()
+            .find(|line| line.contains("rain"))
+            .unwrap_or_else(|| panic!("rain row missing:\n{second}"));
+        assert!(rain.contains("5.0 mm"), "{rain:?}");
+    }
+
     #[test]
     fn empty_and_missing_weathergrams_draw_without_panicking() {
         let mut empty = Weather::fixture(22, 14);
@@ -1096,7 +1190,7 @@ mod tests {
         }
 
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "—"
         );
         let text = rendered(&weather, 80, FULL_ROWS, 0);
@@ -1120,7 +1214,7 @@ mod tests {
         weather.hourly[now + 7].precip_mm = None;
 
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "—"
         );
     }
@@ -1134,21 +1228,21 @@ mod tests {
         }
 
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "0 mm"
         );
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Imperial),
             "0 in"
         );
 
         weather.hourly[now].precip_mm = Some(0.01);
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "<0.1 mm"
         );
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Imperial),
             "<0.01 in"
         );
     }
