@@ -11,6 +11,16 @@ use crate::weather::model::HourlyForecast;
 pub(super) enum PrecipitationAggregate {
     Unavailable,
     Zero,
+    Positive(Positive),
+}
+
+/// An amount that is definitely there. Its own type so a caller that has
+/// matched it can print it without a second match, or an `expect`, on the
+/// two cases that have no text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Positive {
+    /// Present, but below the display precision; carries the quantum it
+    /// rounds under.
     Trace(f64),
     Measured(f64),
 }
@@ -45,11 +55,11 @@ fn classify(total_mm: f64, unit: Unit) -> PrecipitationAggregate {
 
     let value = unit.precip(total_mm);
     let quantum = 0.1_f64.powi(unit.precip_decimals() as i32);
-    if value < quantum / 2.0 {
-        PrecipitationAggregate::Trace(quantum)
+    PrecipitationAggregate::Positive(if value < quantum / 2.0 {
+        Positive::Trace(quantum)
     } else {
-        PrecipitationAggregate::Measured(value)
-    }
+        Positive::Measured(value)
+    })
 }
 
 /// One positive reading at the unit's precision, under the same trace rule
@@ -63,17 +73,23 @@ pub(super) fn measured(mm: f64, unit: Unit) -> String {
 
 impl PrecipitationAggregate {
     pub(super) fn positive_text(self, unit: Unit, separator: &str) -> Option<String> {
+        match self {
+            Self::Positive(amount) => Some(amount.text(unit, separator)),
+            Self::Unavailable | Self::Zero => None,
+        }
+    }
+}
+
+impl Positive {
+    pub(super) fn text(self, unit: Unit, separator: &str) -> String {
         let decimals = unit.precip_decimals();
         match self {
-            Self::Trace(quantum) => Some(format!(
-                "<{quantum:.decimals$}{separator}{}",
-                unit.precip_label()
-            )),
-            Self::Measured(value) => Some(format!(
-                "{value:.decimals$}{separator}{}",
-                unit.precip_label()
-            )),
-            Self::Unavailable | Self::Zero => None,
+            Self::Trace(quantum) => {
+                format!("<{quantum:.decimals$}{separator}{}", unit.precip_label())
+            }
+            Self::Measured(value) => {
+                format!("{value:.decimals$}{separator}{}", unit.precip_label())
+            }
         }
     }
 }

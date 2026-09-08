@@ -170,13 +170,10 @@ pub(super) fn precip_week_render(
     let total_gutters = DAY_WIDTH + TOTAL_GAP + TOTAL_WIDTH;
     let cell_with_totals = (inner.width >= total_gutters + hours)
         .then(|| ((inner.width - total_gutters) / hours).clamp(1, MAX_CELL));
-    let totals = cell_with_totals == Some(cell_without_totals);
+    let with_totals = cell_with_totals.filter(|cell| *cell == cell_without_totals);
+    let totals = with_totals.is_some();
     let gutters = if totals { total_gutters } else { DAY_WIDTH };
-    let cell = if totals {
-        cell_with_totals.expect("a visible total has a measured cell width")
-    } else {
-        cell_without_totals
-    };
+    let cell = with_totals.unwrap_or(cell_without_totals);
 
     // Centred on what it measures, like both charts. Pinned left, a 48-column
     // grid in a 118-column box reads as a chart that failed to load the rest.
