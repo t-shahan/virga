@@ -12,6 +12,13 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The daily-highs chart no longer titles itself `Daily Highs · inf–-inf°`
+  when the forecast carries no days. The range was folded from the
+  infinities, so an empty series printed them; with no days there is no
+  range, and the title now stops at the name (#84).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

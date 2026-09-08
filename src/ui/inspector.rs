@@ -525,6 +525,20 @@ mod tests {
         assert_eq!(total_line(&trace, Unit::Imperial), "<0.01 in");
     }
 
+    /// The window, not the series, is what has to be whole: a hole a day and
+    /// more ahead of the selection is no reason to withhold today's total,
+    /// and a hole inside the window is every reason.
+    #[test]
+    fn a_total_is_withheld_only_when_the_hole_falls_inside_its_window() {
+        let mut hours = dry_hours(48);
+        hours[2].precip_mm = Some(3.0);
+        hours[30].precip_mm = None;
+
+        assert_eq!(total_line(window_from(&hours, 0), Unit::Metric), "3.0 mm");
+        assert_eq!(total_line(window_from(&hours, 10), Unit::Metric), UNKNOWN);
+        assert_eq!(total_line(&[], Unit::Metric), UNKNOWN);
+    }
+
     #[test]
     fn a_snowy_window_flags_its_total() {
         let mut hours = dry_hours(24);

@@ -938,6 +938,44 @@ mod tests {
         }
     }
 
+    /// The title names the page's span, and a page is the same size wherever
+    /// the selection has scrolled it to — the last page is pulled back to
+    /// stay full rather than shortened — so the title must not change with
+    /// the page. The stock fixture cannot show this: 192 forecast hours is
+    /// eight whole 24 h pages, so nothing is ever pulled back and a title
+    /// that read the visible count would pass. The series is cut to 173
+    /// hours so the last selection lands on a page that only the pull-back
+    /// keeps full.
+    #[test]
+    fn the_title_names_the_same_span_on_every_page() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.hourly.truncate(weather.now_hour + 173);
+        let last = weather.forecast_hours().len() - 1;
+        assert_eq!(last % 24, 4, "the last page must be a partial one");
+
+        let page = |selected: usize| {
+            let buffer = rendered_buffer_in(
+                &weather,
+                80,
+                FULL_ROWS,
+                selected,
+                Theme::default().palette(),
+                Unit::Metric,
+            );
+            let title: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
+            let on_page = !marker_coordinates(&buffer, 80, FULL_ROWS, "▲").is_empty();
+            (title, on_page)
+        };
+
+        let (first, _) = page(0);
+        assert!(first.contains("Hourly weather · next 24 h"), "{first:?}");
+        for selected in [24, 100, 168, last] {
+            let (scrolled, on_page) = page(selected);
+            assert!(on_page, "selection {selected} is not on the page");
+            assert_eq!(scrolled, first, "selection {selected} changed the title");
+        }
+    }
+
     /// Once navigation has moved to a later page there is no current-hour
     /// marker in the first plot cell. The axis must stop reserving a phantom
     /// column for it and put the leading anchor on the first hour.

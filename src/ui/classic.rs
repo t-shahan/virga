@@ -226,6 +226,18 @@ mod tests {
         assert_eq!(wet_hours_line(&hours), UNKNOWN);
     }
 
+    /// Only the window has to be whole. A hole beyond it must not blank the
+    /// count for a selection whose day ahead was fully reported.
+    #[test]
+    fn a_wet_hour_count_is_withheld_only_when_the_hole_falls_inside_its_window() {
+        let mut hours = dry_hours(48);
+        hours[2].precip_mm = Some(3.0);
+        hours[30].precip_mm = None;
+
+        assert_eq!(wet_hours_line(window_from(&hours, 0)), "1 of 24");
+        assert_eq!(wet_hours_line(window_from(&hours, 10)), UNKNOWN);
+    }
+
     #[test]
     fn the_peak_names_the_hour_it_falls_in() {
         let mut hours = dry_hours(48);
