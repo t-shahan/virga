@@ -113,16 +113,19 @@ fn main() -> Result<()> {
                 },
                 None => asked_location(),
             };
-            // Only a bare `virga now` may answer from the last forecast the
-            // app kept, and only for the place the state file gave it or
-            // the fallback standing in for one: a named city is a question
-            // about somewhere else, and a place detected just now has
-            // nothing on disk to match. Whether what is there is that place,
-            // and fresh, is the cache's own judgement.
-            let cache_path = match (&city, freshly_detected) {
-                (None, false) => report_cache_path(),
-                _ => None,
-            };
+            // A state directory that cannot be found was complained about by
+            // `asked_location` a moment ago, when it went looking for the
+            // remembered city; the same complaint twice on one report is
+            // noise, so the error is dropped here.
+            let (cache_path, warning) = report_cache_path(
+                city.as_deref(),
+                freshly_detected,
+                std::env::var("VIRGA_CACHE").ok().as_deref(),
+                state::path().ok().as_deref(),
+            );
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
             match report_weather(
                 cache_path.as_deref(),
                 &location,
@@ -316,21 +319,33 @@ fn load_cached_within(
     }
 }
 
-/// Where a bare `virga now` may look for the app's last forecast: nowhere
-/// with `VIRGA_CACHE` off, the switch that also keeps the app from writing
-/// one.
-fn report_cache_path() -> Option<PathBuf> {
-    let (caching, warning) = caching_enabled(std::env::var("VIRGA_CACHE").ok().as_deref());
-    if let Some(warning) = warning {
-        eprintln!("{warning}");
+/// Where `virga now` may look for the app's last forecast, given what was
+/// asked, how the place was found, the `VIRGA_CACHE` value, and the state
+/// file the cache sits beside; and any complaint about that value, for the
+/// caller to print.
+///
+/// Only a bare report may answer from the cache, and only for the place the
+/// state file gave it or the fallback standing in for one: a named city is
+/// a question about somewhere else, and a place detected just now has
+/// nothing on disk to match. Neither consults the switch, so a typo in it
+/// is not complained about on a report the cache could not have served.
+/// Nowhere with `VIRGA_CACHE` off, the switch that also keeps the app from
+/// writing one. Whether what is there is that place, and fresh, is the
+/// cache's own judgement.
+fn report_cache_path(
+    city: Option<&str>,
+    freshly_detected: bool,
+    cache_switch: Option<&str>,
+    state: Option<&Path>,
+) -> (Option<PathBuf>, Option<String>) {
+    if city.is_some() || freshly_detected {
+        return (None, None);
     }
+    let (caching, warning) = caching_enabled(cache_switch);
     if !caching {
-        return None;
+        return (None, warning);
     }
-    // A state directory that cannot be found was complained about by
-    // `asked_location` a moment ago, when it went looking for the
-    // remembered city; the same complaint twice on one report is noise.
-    state::path().ok().map(|path| cache::path_beside(&path))
+    (state.map(cache::path_beside), warning)
 }
 
 /// The forecast a bare `virga now` prints: the app's last one when it
@@ -1272,6 +1287,47 @@ mod tests {
         let (enabled, warning) = caching_enabled(Some("maybe"));
         assert!(enabled);
         assert!(warning.unwrap().contains("VIRGA_CACHE"));
+    }
+
+    /// The issue's gates (#111), one row each: only a bare report about the
+    /// remembered city reads the cache, and only while the switch that
+    /// governs writing it is on.
+    #[test]
+    fn only_a_bare_report_about_a_remembered_city_reads_the_cache() {
+        let state = Path::new("/state/virga/state.json");
+        let beside = Some(PathBuf::from("/state/virga/forecast.json"));
+        for (city, fresh, switch, expected, why) in [
+            (None, false, None, beside.clone(), "a bare remembered read"),
+            (Some("berlin"), false, None, None, "a named city fetches"),
+            (None, true, None, None, "a fresh detection fetches"),
+            (
+                None,
+                false,
+                Some("off"),
+                None,
+                "VIRGA_CACHE=off disables the read",
+            ),
+        ] {
+            assert_eq!(
+                report_cache_path(city, fresh, switch, Some(state)),
+                (expected, None),
+                "{why}"
+            );
+        }
+
+        assert_eq!(
+            report_cache_path(None, false, None, None),
+            (None, None),
+            "no state directory means nowhere to look beside"
+        );
+        let (path, warning) = report_cache_path(None, false, Some("maybe"), Some(state));
+        assert_eq!(path, beside, "an unusable value leaves the read on");
+        assert!(warning.unwrap().contains("VIRGA_CACHE"));
+        assert_eq!(
+            report_cache_path(Some("berlin"), false, Some("maybe"), Some(state)),
+            (None, None),
+            "a report the cache could not serve does not complain about the switch"
+        );
     }
 
     #[test]
