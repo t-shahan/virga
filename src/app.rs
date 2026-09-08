@@ -1253,6 +1253,58 @@ mod tests {
         assert_eq!(app.selected_day, 0);
     }
 
+    fn results(count: usize) -> Vec<Location> {
+        (0..count)
+            .map(|i| Location {
+                name: format!("Place {i}"),
+                admin1: None,
+                country: None,
+                lat: 10.0 + i as f64,
+                lon: 20.0 + i as f64,
+            })
+            .collect()
+    }
+
+    /// `↓` stops on the last result rather than walking off the list, and
+    /// `↑` stops on the first: the cursor picks with `Enter`, so one step
+    /// too far would submit nothing or, worse, index past the end.
+    #[test]
+    fn the_result_cursor_stops_at_both_ends_of_the_list() {
+        let mut app = App::new();
+        app.results = Fetch::Ready(results(3));
+
+        for _ in 0..5 {
+            app.on_action(Action::NextResult);
+        }
+        assert_eq!(app.selected, 2, "past the last result");
+
+        for _ in 0..5 {
+            app.on_action(Action::PrevResult);
+        }
+        assert_eq!(app.selected, 0, "before the first result");
+    }
+
+    /// With nothing to pick from the arrows must not move: a cursor that
+    /// advanced against an empty or pending list would be pointing at a
+    /// result that arrives later, or at none at all.
+    #[test]
+    fn result_navigation_is_inert_without_a_ready_list() {
+        for (name, results) in [
+            ("idle", Fetch::Idle),
+            ("loading", Fetch::Loading),
+            ("failed", Fetch::Failed("upstream down".to_string())),
+            ("empty", Fetch::Ready(Vec::new())),
+        ] {
+            let mut app = App::new();
+            app.results = results;
+
+            app.on_action(Action::NextResult);
+            assert_eq!(app.selected, 0, "{name}: next moved the cursor");
+            app.on_action(Action::PrevResult);
+            assert_eq!(app.selected, 0, "{name}: prev moved the cursor");
+        }
+    }
+
     #[test]
     fn navigation_is_inert_with_an_empty_forecast() {
         let mut app = App::new();
@@ -1322,6 +1374,37 @@ mod tests {
         assert_eq!(app_with(22, 14).hours_left_today(), HOURS_PER_DAY);
         // Nothing loaded is not nothing left; the arrows still have to behave.
         assert_eq!(App::new().hours_left_today(), HOURS_PER_DAY);
+    }
+
+    /// The stamp is the provider's, and the slice at `11..13` is the one place
+    /// a short or non-ASCII value could panic. Each of the three exits — no
+    /// slice, no number, a number that is not a clock hour — folds to a whole
+    /// day, which keeps the arrows stepping rather than guessing at a day
+    /// boundary the stamp does not name.
+    #[test]
+    fn a_malformed_first_stamp_counts_as_a_whole_day_rather_than_panicking() {
+        for stamp in [
+            "",
+            "2026-08-10",
+            "2026-08-10T1",
+            "2026-08-10Txx:00",
+            "2026-08-10T24:00",
+            "2026-08-10T99:00",
+            // `get(11..13)` lands inside a two-byte character.
+            "2026-08-10T1é:00",
+            // And here it lands on one, which parses as no number at all.
+            "2026-08-10Té9:00",
+        ] {
+            let mut app = app_with(22, 14);
+            if let Fetch::Ready(weather) = &mut app.weather {
+                weather.hourly[weather.now_hour].time = stamp.to_string();
+            }
+            assert_eq!(
+                app.hours_left_today(),
+                HOURS_PER_DAY,
+                "stamp {stamp:?} was read as a clock hour"
+            );
+        }
     }
 
     /// The complaint. With the window opened at 6 PM, today holds six hours,

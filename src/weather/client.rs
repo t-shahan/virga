@@ -218,6 +218,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn hourly_request_names_every_weathergram_field() {
@@ -237,7 +238,90 @@ mod tests {
             ]
         );
     }
-    use std::time::Instant;
+
+    /// The forecast's window and zone are what the rest of the app is built
+    /// on: two weeks of history for the daily chart, eight days ahead, and
+    /// local time so the series lines up with the clock on the wall. None of
+    /// it was asserted before; the request was read and thrown away.
+    #[test]
+    fn the_forecast_request_asks_for_the_window_the_app_is_built_on() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54).expect("a forecast");
+
+        let forecast = request_with(&log, "forecast_days", "8");
+        assert_eq!(value_of(&forecast, "past_days"), Some("14"));
+        assert_eq!(value_of(&forecast, "timezone"), Some("auto"));
+        assert_eq!(value_of(&forecast, "latitude"), Some("39.41427"));
+        assert_eq!(value_of(&forecast, "longitude"), Some("-77.41054"));
+        assert_eq!(
+            value_of(&forecast, "hourly"),
+            Some(HOURLY_FIELDS),
+            "the hourly fields the screens read must be the ones asked for"
+        );
+        for field in [
+            "weather_code",
+            "temperature_2m_max",
+            "sunrise",
+            "daylight_duration",
+        ] {
+            assert!(
+                value_of(&forecast, "daily")
+                    .is_some_and(|daily| daily.split(',').any(|f| f == field)),
+                "the daily request lost {field}: {forecast:?}"
+            );
+        }
+    }
+
+    /// The air-quality request shares the forecast's coordinates and window,
+    /// and names its model domain outright rather than taking the provider's
+    /// default. The per-day figures line up with the daily chart only while
+    /// the two windows agree, which nothing checked before this.
+    #[test]
+    fn the_air_quality_request_matches_the_forecast_window_on_the_global_domain() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54).expect("a forecast");
+
+        let aqi = request_with(&log, "domains", "cams_global");
+        assert_eq!(value_of(&aqi, "current"), Some("us_aqi"));
+        assert_eq!(value_of(&aqi, "hourly"), Some("us_aqi"));
+        assert_eq!(value_of(&aqi, "timezone"), Some("auto"));
+        assert_eq!(value_of(&aqi, "past_days"), Some("14"));
+        assert_eq!(value_of(&aqi, "forecast_days"), Some("7"));
+        assert_eq!(value_of(&aqi, "latitude"), Some("39.41427"));
+        assert_eq!(value_of(&aqi, "longitude"), Some("-77.41054"));
+    }
+
+    /// Five results is what the search screen has rows for, and the query
+    /// goes across as typed: a space must not split it into two parameters.
+    #[test]
+    fn the_search_request_carries_the_query_and_asks_for_five_results() {
+        let (endpoints, log) = serving_recorded("200 OK", "application/json", r#"{"results":[]}"#);
+        search_locations_with(&test_agent(), &endpoints, "new york").expect("a result list");
+
+        let search = request_with(&log, "count", "5");
+        assert_eq!(value_of(&search, "name"), Some("new york"));
+        assert_eq!(value_of(&search, "language"), Some("en"));
+        assert_eq!(value_of(&search, "format"), Some("json"));
+    }
+
+    /// Detection sends nothing about the caller beyond the connection itself.
+    #[test]
+    fn the_detection_request_carries_no_query_at_all() {
+        let (endpoints, log) = serving_recorded("200 OK", "application/json", DETECTED);
+        detect_location_with(&test_agent(), &endpoints).expect("a detection");
+
+        let lines = log.lock().expect("request log").clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("GET / HTTP/1.1"), "{:?}", lines[0]);
+    }
 
     /// A loopback server that answers every request with the same canned
     /// response, and `Endpoints` pointing all three URLs at it.
@@ -247,32 +331,139 @@ mod tests {
     /// and wrongly: an error status, a body that is not JSON, or the hotel
     /// wifi's login page delivered with a cheerful 200.
     fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
+        serving_recorded(status, content_type, body).0
+    }
+
+    /// The request lines the loopback server has answered, in arrival order.
+    /// The forecast and its air-quality request run on two threads, so a
+    /// test picks its line out by content rather than by position.
+    type RequestLog = Arc<Mutex<Vec<String>>>;
+
+    /// `serving`, plus a log of every request line it answered. What the
+    /// client *sends* was unverified until this: the server read the request
+    /// to unblock the client and threw it away, so a dropped `past_days` or a
+    /// renamed field would have failed nothing here.
+    fn serving_recorded(status: &str, content_type: &str, body: &str) -> (Endpoints, RequestLog) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
+        let log: RequestLog = Arc::default();
+        let recorder = Arc::clone(&log);
 
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                // Drain enough of the request that the client is not blocked
-                // writing while we are blocked replying.
-                let mut scratch = [0u8; 4096];
-                let _ = stream.read(&mut scratch);
+                // Read the whole header block, not just the first chunk: it
+                // both unblocks the client, which may be waiting to finish
+                // writing before it reads, and guarantees the request line
+                // was seen whole before it is logged.
+                let head = read_request_head(&mut stream);
+                if let Some(line) = head.lines().next()
+                    && let Ok(mut log) = recorder.lock()
+                {
+                    log.push(line.to_string());
+                }
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
             }
         });
 
         let base = format!("http://{addr}/");
-        Endpoints {
+        let endpoints = Endpoints {
             forecast: base.clone(),
             geocode: base.clone(),
             air_quality: base.clone(),
             geoip: base,
+        };
+        (endpoints, log)
+    }
+
+    /// Everything up to the blank line that ends the headers, or as much as
+    /// arrived before the client stopped sending. Bounded so a client that
+    /// never sends the blank line cannot grow the buffer without limit.
+    fn read_request_head(stream: &mut impl Read) -> String {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while head.len() < 64 * 1024 {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+            }
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
         }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    /// The query pairs of a logged request line, percent-decoded, so a test
+    /// can assert on the field list it reads rather than on `%2C`.
+    fn query_pairs(request_line: &str) -> Vec<(String, String)> {
+        let target = request_line.split(' ').nth(1).unwrap_or_default();
+        let Some((_, query)) = target.split_once('?') else {
+            return Vec::new();
+        };
+        query
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (percent_decode(key), percent_decode(value))
+            })
+            .collect()
+    }
+
+    fn percent_decode(encoded: &str) -> String {
+        let bytes = encoded.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => out.push(b' '),
+                b'%' if i + 2 < bytes.len() => {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                    match u8::from_str_radix(hex, 16) {
+                        Ok(byte) => {
+                            out.push(byte);
+                            i += 2;
+                        }
+                        Err(_) => out.push(b'%'),
+                    }
+                }
+                byte => out.push(byte),
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// The one logged request whose query carries `key=value`, as decoded
+    /// pairs. Panics on none or several: each test expects exactly one
+    /// request of each kind, and a duplicate would be its own finding.
+    fn request_with(log: &RequestLog, key: &str, value: &str) -> Vec<(String, String)> {
+        let lines = log.lock().expect("request log").clone();
+        let mut matching = lines
+            .iter()
+            .map(|line| query_pairs(line))
+            .filter(|pairs| pairs.iter().any(|(k, v)| k == key && v == value));
+        let found = matching
+            .next()
+            .unwrap_or_else(|| panic!("no request carried {key}={value}: {lines:?}"));
+        assert!(
+            matching.next().is_none(),
+            "more than one request carried {key}={value}: {lines:?}"
+        );
+        found
+    }
+
+    fn value_of<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Short bounds: these servers answer at once, so a test that hangs is a
@@ -498,6 +689,10 @@ mod tests {
     /// nothing at all. This is the case that used to block the sole worker
     /// thread forever while the UI sat on "Loading…" with no way to recover.
     /// Run against a short-bounded agent so the test costs a moment, not 15s.
+    ///
+    /// Only the error is asserted. The bound is what produces it, since the
+    /// server never answers, so measuring the wait as well proved nothing the
+    /// error had not and would fail on a starved runner.
     #[test]
     fn a_silent_server_times_out_instead_of_blocking_forever() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -516,32 +711,28 @@ mod tests {
         });
 
         let agent = bounded_agent(Duration::from_millis(400), Duration::from_millis(200));
-        let started = Instant::now();
         let result = agent.get(format!("http://{addr}/")).call();
-        let waited = started.elapsed();
 
         assert!(result.is_err(), "a silent server must not read as success");
-        assert!(
-            waited < Duration::from_secs(5),
-            "gave up after {waited:?}, which is not a bound"
-        );
     }
 
-    /// Nothing is listening, so the connect bound is what has to fire.
+    /// A port that is bound but never accepted from. The earlier form bound a
+    /// port, dropped it, and assumed nothing would claim it before the call;
+    /// but every `serving()` in this process binds an ephemeral port on the
+    /// same loopback, so another test could take it and answer, and the
+    /// assertion here would fail for no fault in the client. A listener that
+    /// is held and never accepted from is the same port for the whole test:
+    /// the kernel completes the handshake into the backlog and the request
+    /// then waits on nobody, so the end-to-end bound is what fires.
     #[test]
-    fn an_unreachable_port_fails_rather_than_waiting() {
-        // Bind then drop, so the port is almost certainly free and unserved.
-        let addr = {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-            listener.local_addr().expect("local addr")
-        };
+    fn a_port_nobody_accepts_from_fails_rather_than_waiting() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
 
         let agent = bounded_agent(Duration::from_millis(400), Duration::from_millis(200));
-        let started = Instant::now();
         let result = agent.get(format!("http://{addr}/")).call();
 
-        assert!(result.is_err(), "nothing is listening on {addr}");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(result.is_err(), "nobody accepts on {addr}");
     }
 }
 

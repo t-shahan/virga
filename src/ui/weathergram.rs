@@ -938,6 +938,33 @@ mod tests {
         }
     }
 
+    /// The title names the page's span, and a page is the same size wherever
+    /// the selection has scrolled it to — the last page is pulled back to
+    /// stay full rather than shortened — so the title must not change with
+    /// the page. What it says on the first page is pinned by the horizon
+    /// tests; this pins that scrolling does not move it.
+    #[test]
+    fn the_title_names_the_same_span_on_every_page() {
+        let weather = Weather::fixture(22, 14);
+        let title = |selected: usize| {
+            rendered(&weather, 80, FULL_ROWS, selected)
+                .lines()
+                .next()
+                .expect("a top border")
+                .to_string()
+        };
+
+        let first = title(0);
+        assert!(first.contains("Hourly weather · next 24 h"), "{first:?}");
+        for selected in [24, 100, 191] {
+            let scrolled = title(selected);
+            assert!(
+                scrolled.contains("next 24 h"),
+                "selection {selected} changed the title: {scrolled:?}"
+            );
+        }
+    }
+
     /// Once navigation has moved to a later page there is no current-hour
     /// marker in the first plot cell. The axis must stop reserving a phantom
     /// column for it and put the leading anchor on the first hour.

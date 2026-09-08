@@ -108,25 +108,53 @@ mod tests {
         assert_eq!(aqi_label(400), "Hazardous");
     }
 
+    /// Every code the `description` match names. Kept as a list rather than
+    /// derived from the function, because the point is to catch a code the
+    /// match has quietly lost: a test that asks the function what it covers
+    /// can only ever agree with it.
+    const DOCUMENTED: [u8; 28] = [
+        0, 1, 2, 3, 45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 71, 73, 75, 77, 80, 81, 82, 85,
+        86, 95, 96, 99,
+    ];
+
+    /// The old form of this test asserted the strings were non-empty, which
+    /// the fallback arm satisfies for every code, so nothing could fail it.
+    /// Comparing against the fallback is the assertion that has teeth.
     #[test]
-    fn every_wmo_code_has_a_description_and_icon() {
-        for code in 0u8..=99 {
-            assert!(
-                !description(code).is_empty(),
-                "code {code} has no description"
-            );
-            assert!(!emoji(code).is_empty(), "code {code} has no icon");
+    fn every_documented_code_has_its_own_description_and_icon() {
+        let unknown = description(200);
+        let no_icon = emoji(200);
+        for code in DOCUMENTED {
+            assert_ne!(description(code), unknown, "code {code} fell through");
+            assert_ne!(emoji(code), no_icon, "code {code} has no icon of its own");
         }
     }
 
+    /// The other direction: a code the table does not know must say so rather
+    /// than borrow a neighbour's phrase, and the same fallback must serve the
+    /// whole byte, not just the range WMO uses.
     #[test]
-    fn documented_codes_are_not_the_unknown_fallback() {
-        for code in [0, 1, 2, 3, 45, 48, 51, 61, 71, 80, 95] {
-            assert_ne!(
-                description(code),
-                description(200),
-                "code {code} fell through"
-            );
+    fn undocumented_codes_all_read_as_unknown() {
+        let unknown = description(200);
+        let no_icon = emoji(200);
+        for code in (0..=u8::MAX).filter(|code| !DOCUMENTED.contains(code)) {
+            assert_eq!(description(code), unknown, "code {code} claimed a phrase");
+            assert_eq!(emoji(code), no_icon, "code {code} claimed an icon");
+        }
+    }
+
+    /// One phrase per code is the contract at the top of the file; two codes
+    /// sharing a phrase is the lumping it replaced creeping back.
+    #[test]
+    fn documented_descriptions_are_distinct() {
+        for (i, a) in DOCUMENTED.iter().enumerate() {
+            for b in &DOCUMENTED[i + 1..] {
+                assert_ne!(
+                    description(*a),
+                    description(*b),
+                    "codes {a} and {b} share a description"
+                );
+            }
         }
     }
 }

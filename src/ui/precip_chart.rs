@@ -545,6 +545,35 @@ mod tests {
         );
     }
 
+    /// The span in the title is the page's, and the page keeps its size as
+    /// the selection scrolls — the last page is pulled back to stay full — so
+    /// the title on a scrolled page reads exactly as it does on the first.
+    #[test]
+    fn the_title_names_the_same_span_on_a_scrolled_page() {
+        let title = |selected: usize| {
+            buffer_text(100, 10, selected)
+                .lines()
+                .next()
+                .expect("a top border")
+                .to_string()
+        };
+
+        let first = title(0);
+        assert!(first.contains("next "), "{first:?}");
+        for selected in [50, 100, 191] {
+            let text = buffer_text(100, 10, selected);
+            assert!(
+                text.contains(RULE_SELECTED),
+                "selection {selected} is not on the page:\n{text}"
+            );
+            assert_eq!(
+                title(selected),
+                first,
+                "selection {selected} changed the title"
+            );
+        }
+    }
+
     #[test]
     fn a_dry_window_says_so_in_words() {
         let mut weather = Weather::fixture(22, 14);
