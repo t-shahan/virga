@@ -141,14 +141,17 @@ fn main() -> Result<()> {
             }
         }
         Invocation::Update => {
-            match check_for_update() {
-                Ok(answer) => println!("{answer}"),
+            let outcome = match check_for_update() {
+                Ok((answer, outcome)) => {
+                    println!("{answer}");
+                    outcome
+                }
                 Err(error) => {
                     eprintln!("virga: could not check the latest release: {error:#}");
-                    std::process::exit(1);
+                    update::Outcome::Failed
                 }
-            }
-            return Ok(());
+            };
+            std::process::exit(update::exit_code(outcome));
         }
         Invocation::Usage(complaint) => {
             eprintln!("virga: {complaint}\n");
@@ -559,15 +562,19 @@ fn theme_blurb(theme: Theme) -> &'static str {
 }
 
 /// The whole of `virga update`: one probe, one comparison, one answer whose
-/// instruction matches how this copy was installed.
-fn check_for_update() -> Result<String> {
+/// instruction matches how this copy was installed, and the verdict behind
+/// it for the exit status.
+fn check_for_update() -> Result<(String, update::Outcome)> {
     let current = update::Release::parse(env!("CARGO_PKG_VERSION"))
         .context("parse this binary's own version")?;
     let latest = update::Release::parse(&update::latest_tag(update::RELEASES_URL)?)?;
     let exe = update::running_binary();
     let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
     let method = update::install_method(exe.as_deref(), home.as_deref(), cfg!(windows));
-    Ok(update::report(&current, &latest, &method))
+    Ok((
+        update::report(&current, &latest, &method),
+        update::outcome(&current, &latest),
+    ))
 }
 
 fn theme_set_message(theme: Theme) -> String {
