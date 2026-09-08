@@ -112,6 +112,17 @@ fn main() -> Result<()> {
                     }
                 },
                 None => {
+                    // Read before the state directory is resolved, so a
+                    // double fault complains in the order it always has:
+                    // the variable first, the directory second.
+                    let (detect, warning) = env_switch(
+                        "VIRGA_GEOIP",
+                        std::env::var("VIRGA_GEOIP").ok().as_deref(),
+                        "location detection",
+                    );
+                    if let Some(warning) = warning {
+                        eprintln!("{warning}");
+                    }
                     // Resolved once, here, so the same missing directory is
                     // complained about once: the read below and the write
                     // after the fetch both go through this answer.
@@ -127,7 +138,7 @@ fn main() -> Result<()> {
                             None
                         }
                     };
-                    let (location, fresh) = asked_location(state_path.as_deref());
+                    let (location, fresh) = asked_location(detect, state_path.as_deref());
                     (location, fresh, state_path)
                 }
             };
@@ -448,20 +459,13 @@ fn startup_theme(requested: Option<&str>, persisted: Option<Theme>) -> Theme {
 }
 
 /// Where a bare `virga now` asks about: the remembered city, a fresh
-/// detection when nothing is remembered and `VIRGA_GEOIP` allows one, and
-/// the compiled-in fallback when the network will not say — a worse guess is
-/// not a reason to withhold the forecast, and the stderr note says which
-/// guess it was. The second value reports whether the place came from a
-/// detection made just now, which is the caller's cue to remember it.
-fn asked_location(state_path: Option<&Path>) -> (ActiveLocation, bool) {
-    let (detect, warning) = env_switch(
-        "VIRGA_GEOIP",
-        std::env::var("VIRGA_GEOIP").ok().as_deref(),
-        "location detection",
-    );
-    if let Some(warning) = warning {
-        eprintln!("{warning}");
-    }
+/// detection when nothing is remembered and `detect` (what `VIRGA_GEOIP`
+/// settled) allows one, and the compiled-in fallback when the network will
+/// not say — a worse guess is not a reason to withhold the forecast, and the
+/// stderr note says which guess it was. The second value reports whether the
+/// place came from a detection made just now, which is the caller's cue to
+/// remember it.
+fn asked_location(detect: bool, state_path: Option<&Path>) -> (ActiveLocation, bool) {
     let remembered = state_path.and_then(|path| {
         let (persisted, warning) = load_persisted(path);
         if let Some(warning) = warning {
@@ -1182,6 +1186,16 @@ mod tests {
     /// variable and the feature, so the user knows which line to fix.
     #[test]
     fn every_switch_reads_the_same_grammar() {
+        // The sentence `detection_enabled` produced before the three
+        // switches shared one template, verbatim; `contains` below would
+        // let the clause between the name and the feature drift.
+        assert_eq!(
+            env_switch("VIRGA_GEOIP", Some("maybe"), "location detection").1,
+            Some(
+                "virga: VIRGA_GEOIP=\"maybe\" is not on or off; leaving location detection on."
+                    .to_string()
+            )
+        );
         for (name, what_stays_on) in [
             ("VIRGA_GEOIP", "location detection"),
             ("VIRGA_UPDATE", "the update check"),
@@ -1384,9 +1398,11 @@ mod tests {
     }
 
     /// The quit-time drain exists for exactly this: a load that landed after
-    /// the last frame was drawn and before `q` was read. The frame still
-    /// shows the spinner, so nothing on screen says it arrived, and without
-    /// the drain it would die with the receiver instead of being remembered.
+    /// the last frame was drawn and before `q` was read. Nothing on screen
+    /// says it arrived, and without the drain it would die with the receiver
+    /// instead of being remembered. The drain never touches the terminal, so
+    /// no frame is drawn here; the app still being in `Loading` is the
+    /// whole of "after the last frame".
     #[test]
     fn a_load_landing_after_the_last_frame_is_still_remembered_at_quit() {
         let test = tempfile::tempdir().unwrap();
@@ -1394,9 +1410,6 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut app = App::with_location(berlin());
         let request = app.startup_request();
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
-        let last_frame = terminal.backend().buffer().clone();
         assert!(matches!(app.weather, Fetch::Loading));
 
         tx.send(loaded(request)).unwrap();
@@ -1409,11 +1422,6 @@ mod tests {
         assert_eq!(
             state::load_from(&path).unwrap().remembered,
             Some(chosen(berlin()))
-        );
-        assert_eq!(
-            terminal.backend().buffer(),
-            &last_frame,
-            "nothing was drawn between the last frame and the drain"
         );
     }
 
