@@ -12,6 +12,17 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- `virga now` no longer asks the location provider again on every poll
+  once a detection has failed. Only a detection that succeeded was
+  remembered, so a status bar polling by the minute after a 429 from
+  ipapi.co kept knocking on a door that had already closed, sixty times an
+  hour. A failed detection is now written down beside the rest of the
+  state, and the report names the fallback city for a quarter of an hour
+  before asking again; the marker is dropped the moment a place is
+  remembered (#65).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

@@ -6,7 +6,9 @@ use crate::cli::Invocation;
 use crate::events::{Message, Request};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
+use crate::weather::client::Endpoints;
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use ratatui::backend::{Backend, ClearType};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
@@ -93,14 +95,14 @@ fn main() -> Result<()> {
             // with it — not the state file, not detection. Asking about
             // somewhere is a question, not a move: the remembered city
             // stays whatever it was.
-            let (location, freshly_detected) = match &city {
+            let (location, detection) = match &city {
                 Some(query) => match weather::client::search_locations(query) {
                     // The geocoder answered and knows no such place: the
                     // argument is wrong, which is `theme`'s unknown-name
                     // treatment. A lookup that failed to happen is the
                     // environment's fault instead, and exits like `update`'s.
                     Ok(found) => match found.first() {
-                        Some(first) => (ActiveLocation::from(first), false),
+                        Some(first) => (ActiveLocation::from(first), Detection::Skipped),
                         None => {
                             eprintln!("virga: no city matched {query:?}.");
                             std::process::exit(2);
@@ -120,16 +122,12 @@ fn main() -> Result<()> {
                     // written down it must be — remembering the answer is
                     // what lets a status bar poll `virga now` all day without
                     // asking the location provider anything after the first.
-                    if freshly_detected {
-                        let remembered = Remembered {
-                            location: location.clone(),
-                            source: LocationSource::Detected,
-                        };
-                        if let Err(error) =
-                            state::path().and_then(|path| state::save_location(&path, &remembered))
-                        {
-                            eprintln!("virga: could not remember location: {error:#}");
-                        }
+                    // A detection that found nothing waits for the weather
+                    // too: with the network down both fail, and a marker
+                    // written then would hold the fallback in place for the
+                    // whole backoff after the network came back.
+                    if let Some(warning) = remember_detection(&location, detection, Utc::now()) {
+                        eprintln!("{warning}");
                     }
                     println!("{}", now::report(&location.label, &weather, unit));
                     return Ok(());
@@ -456,25 +454,32 @@ fn startup_theme(requested: Option<&str>, persisted: Option<Theme>) -> Theme {
     })
 }
 
+/// What a bare `virga now` learned from the network about where the user
+/// is. The caller writes it down once weather has loaded, whichever way it
+/// went.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Detection {
+    /// Nothing was asked: a place was remembered, detection is off, or a
+    /// recent failure is still standing in for one.
+    Skipped,
+    /// The network named the place returned beside this.
+    Found,
+    /// The network did not answer; the place returned is the fallback.
+    Failed,
+}
+
 /// Where a bare `virga now` asks about: the remembered city, a fresh
 /// detection when nothing is remembered and `VIRGA_GEOIP` allows one, and
 /// the compiled-in fallback when the network will not say — a worse guess is
 /// not a reason to withhold the forecast, and the stderr note says which
-/// guess it was. The second value reports whether the place came from a
-/// detection made just now, which is the caller's cue to remember it.
-fn asked_location() -> (ActiveLocation, bool) {
+/// guess it was.
+fn asked_location() -> (ActiveLocation, Detection) {
     let (detect, warning) = detection_enabled(std::env::var("VIRGA_GEOIP").ok().as_deref());
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
-    let remembered = match state::path() {
-        Ok(path) => {
-            let (persisted, warning) = load_persisted(&path);
-            if let Some(warning) = warning {
-                eprintln!("{warning}");
-            }
-            persisted.remembered
-        }
+    let state_path = match state::path() {
+        Ok(path) => Some(path),
         // Nowhere to remember a location is not a reason to stop working
         // out where the user is — the app's judgement, applied here too.
         Err(error) => {
@@ -482,18 +487,89 @@ fn asked_location() -> (ActiveLocation, bool) {
             None
         }
     };
-    match now::where_to_ask(remembered, detect) {
-        now::Ask::Location(location) => (location, false),
-        now::Ask::Detect { fallback } => match weather::client::detect_location() {
-            Ok(found) => (ActiveLocation::from(&found), true),
+    asked_location_from(
+        state_path.as_deref(),
+        detect,
+        &Endpoints::default(),
+        Utc::now(),
+    )
+}
+
+/// `asked_location` with the environment taken out, so a test can hand it a
+/// state file, a host, and a clock of its own.
+fn asked_location_from(
+    state_path: Option<&Path>,
+    detect: bool,
+    endpoints: &Endpoints,
+    now: DateTime<Utc>,
+) -> (ActiveLocation, Detection) {
+    let persisted = match state_path {
+        Some(path) => {
+            let (persisted, warning) = load_persisted(path);
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            persisted
+        }
+        None => state::Persisted::default(),
+    };
+    match now::where_to_ask(
+        persisted.remembered,
+        detect,
+        persisted.detection_failed_at,
+        now,
+    ) {
+        now::Ask::Location(location) => (location, Detection::Skipped),
+        now::Ask::Detect { fallback } => match weather::client::detect_location_at(endpoints) {
+            Ok(found) => (ActiveLocation::from(&found), Detection::Found),
             Err(error) => {
                 eprintln!(
                     "virga: could not work out where you are: {error:#}; asking about {}.",
                     fallback.label
                 );
-                (fallback, false)
+                (fallback, Detection::Failed)
             }
         },
+    }
+}
+
+/// Write down what the detection found, or that it found nothing, in the
+/// user's state file. A write that fails is a warning to print, never a
+/// reason to withhold a report that has already loaded.
+fn remember_detection(
+    location: &ActiveLocation,
+    detection: Detection,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    if detection == Detection::Skipped {
+        return None;
+    }
+    match state::path() {
+        Ok(path) => remember_detection_at(&path, location, detection, now),
+        Err(error) => Some(format!("virga: could not remember location: {error:#}")),
+    }
+}
+
+fn remember_detection_at(
+    path: &Path,
+    location: &ActiveLocation,
+    detection: Detection,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    match detection {
+        Detection::Skipped => None,
+        Detection::Found => {
+            let remembered = Remembered {
+                location: location.clone(),
+                source: LocationSource::Detected,
+            };
+            state::save_location(path, &remembered)
+                .err()
+                .map(|error| format!("virga: could not remember location: {error:#}"))
+        }
+        Detection::Failed => state::save_detection_failure(path, now)
+            .err()
+            .map(|error| format!("virga: could not note the failed detection: {error:#}")),
     }
 }
 
@@ -856,6 +932,8 @@ mod tests {
     use ratatui::buffer::Cell;
     use ratatui::layout::{Position, Size};
     use std::convert::Infallible;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A backend that counts how often the terminal is asked where its
     /// cursor is, so a test can prove the answer is never waited on.
@@ -1313,6 +1391,137 @@ mod tests {
 
         assert!(warning.contains("could not remember location"));
         assert!(warning.contains("create"));
+    }
+
+    /// A loopback host answering every detection with the same canned
+    /// response, and a count of how many it was asked for — the count is
+    /// the assertion (#65): the server is the one party that knows whether
+    /// a report asked the network.
+    fn detection_host(status: &str, body: &str) -> (Endpoints, Arc<AtomicUsize>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut scratch = [0u8; 4096];
+                let _ = stream.read(&mut scratch);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let endpoints = Endpoints {
+            geoip: format!("http://{addr}/"),
+            ..Endpoints::default()
+        };
+        (endpoints, hits)
+    }
+
+    fn instant(seconds: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(seconds, 0).expect("a representable instant")
+    }
+
+    /// The README's promise, held on the failure path too: a status bar
+    /// polling by the minute asks the location provider once, not once per
+    /// poll. A rate-limited client stays rate-limited, so the next report
+    /// after a refusal must not knock again until the backoff has passed.
+    #[test]
+    fn a_refused_detection_is_not_asked_again_by_the_next_report() {
+        let (endpoints, hits) = detection_host("429 Too Many Requests", r#"{"error":true}"#);
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let first_poll = instant(1_800_000_000);
+
+        let (location, detection) = asked_location_from(Some(&path), true, &endpoints, first_poll);
+        assert_eq!(detection, Detection::Failed);
+        assert_eq!(location, ActiveLocation::default());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            remember_detection_at(&path, &location, detection, first_poll),
+            None
+        );
+
+        let next_poll = first_poll + chrono::TimeDelta::minutes(1);
+        let (location, detection) = asked_location_from(Some(&path), true, &endpoints, next_poll);
+        assert_eq!(detection, Detection::Skipped);
+        assert_eq!(location, ActiveLocation::default());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the next report asked the provider again"
+        );
+
+        let after_backoff = first_poll + now::DETECTION_BACKOFF;
+        let (_, detection) = asked_location_from(Some(&path), true, &endpoints, after_backoff);
+        assert_eq!(detection, Detection::Failed);
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the backoff never lifted");
+    }
+
+    /// Once the provider answers, the place is remembered and the marker
+    /// goes with it: the next report asks nothing.
+    #[test]
+    fn a_detection_that_answers_after_a_refusal_is_remembered() {
+        let (endpoints, hits) = detection_host(
+            "200 OK",
+            r#"{"city":"Reykjavík","region":"Capital Region","country_name":"Iceland","latitude":64.14659,"longitude":-21.94223}"#,
+        );
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let now = instant(1_800_000_000);
+        state::save_detection_failure(&path, now - now::DETECTION_BACKOFF).unwrap();
+
+        let (location, detection) = asked_location_from(Some(&path), true, &endpoints, now);
+        assert_eq!(detection, Detection::Found);
+        assert!(location.label.contains("Reykjavík"), "{}", location.label);
+        assert_eq!(
+            remember_detection_at(&path, &location, detection, now),
+            None
+        );
+
+        let persisted = state::load_from(&path).unwrap();
+        assert_eq!(
+            persisted.remembered,
+            Some(Remembered {
+                location: location.clone(),
+                source: LocationSource::Detected,
+            })
+        );
+        assert_eq!(persisted.detection_failed_at, None);
+
+        let (again, detection) = asked_location_from(Some(&path), true, &endpoints, now);
+        assert_eq!(detection, Detection::Skipped);
+        assert_eq!(again, location);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// A report that asked nothing has nothing to write, and one that cannot
+    /// write says so without withholding the weather.
+    #[test]
+    fn remembering_a_detection_that_was_skipped_or_cannot_be_written_is_a_warning_at_most() {
+        let test = tempfile::tempdir().unwrap();
+        let parent = test.path().join("not-a-directory");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("state.json");
+        let now = instant(1_800_000_000);
+
+        assert_eq!(
+            remember_detection_at(&path, &berlin(), Detection::Skipped, now),
+            None
+        );
+        let warning = remember_detection_at(&path, &berlin(), Detection::Failed, now).unwrap();
+        assert!(
+            warning.contains("could not note the failed detection"),
+            "{warning}"
+        );
+        assert!(!path.exists());
     }
 
     #[test]

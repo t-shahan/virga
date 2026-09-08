@@ -1,6 +1,7 @@
 use crate::app::{ActiveLocation, KeyHintStyle, LocationSource, Remembered};
 use crate::theme::Theme;
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,12 @@ struct StateDocument {
     /// same way `theme` is: most documents predate it or never toggled it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_hints: Option<String>,
+    /// When `virga now` last asked the network where the user is and got
+    /// no answer, as UTC seconds. Optional in every version, and ignored by
+    /// binaries that predate it: it only ever says "do not ask again just
+    /// yet", so a reader that does not understand it merely asks (#65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detection_failed_at: Option<i64>,
 }
 
 /// Everything the state file had to say, with the parts that could not be
@@ -41,6 +48,9 @@ pub(crate) struct Persisted {
     pub remembered: Option<Remembered>,
     pub theme: Option<Theme>,
     pub key_hint_style: Option<KeyHintStyle>,
+    /// The last detection `virga now` made that went unanswered, if it is
+    /// still on record. Cleared by the next location that is remembered.
+    pub detection_failed_at: Option<DateTime<Utc>>,
     /// A complaint about part of the document that did not stop the rest
     /// being used. Only an unknown theme or key hint style name produces one
     /// today.
@@ -62,13 +72,15 @@ fn remembered_of(document: &StateDocument) -> Result<Option<Remembered>> {
         document.version
     );
     let Some(location) = &document.location else {
-        // Only version 3 may omit the location, and only to carry a theme or
-        // a key hint style instead; a document recording nothing at all
-        // records a bug.
+        // Only version 3 may omit the location, and only to carry a theme,
+        // a key hint style, or a failed detection instead; a document
+        // recording nothing at all records a bug.
         anyhow::ensure!(document.version == LOCATIONLESS_VERSION, "no location");
         anyhow::ensure!(
-            document.theme.is_some() || document.key_hints.is_some(),
-            "neither a location, a theme, nor a key hint style"
+            document.theme.is_some()
+                || document.key_hints.is_some()
+                || document.detection_failed_at.is_some(),
+            "neither a location, a theme, a key hint style, nor a failed detection"
         );
         return Ok(None);
     };
@@ -148,10 +160,18 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     let remembered = remembered_of(&document)?;
     let (theme, theme_warning) = theme_of(&document);
     let (key_hint_style, key_hint_warning) = key_hint_style_of(&document);
+    // A timestamp `chrono` cannot represent did not come from this program.
+    // It is treated as no marker, which errs toward asking the network once
+    // more rather than never; not worth a warning, since nothing the user
+    // set is being ignored.
+    let detection_failed_at = document
+        .detection_failed_at
+        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0));
     Ok(Persisted {
         remembered,
         theme,
         key_hint_style,
+        detection_failed_at,
         warning: theme_warning.or(key_hint_warning),
     })
 }
@@ -280,7 +300,32 @@ pub(crate) fn save_location(path: &Path, remembered: &Remembered) -> Result<()> 
         .as_ref()
         .and_then(|document| document.theme.clone());
     let key_hints = existing.and_then(|document| document.key_hints);
-    save_document(path, Some(remembered), theme, key_hints)
+    // A place to remember answers the question the marker was asking, so
+    // the marker goes: a stale one would otherwise outlive a later forget.
+    save_document(path, Some(remembered), theme, key_hints, None)
+}
+
+/// Note that `virga now` asked the network where the user is and got no
+/// answer, so the next poll can decline to ask again for a while. Everything
+/// else in the document is kept; only a remembered location displaces the
+/// marker, and that is `save_location`'s doing.
+pub(crate) fn save_detection_failure(path: &Path, at: DateTime<Utc>) -> Result<()> {
+    let _held = exclusive(path)?;
+    let existing = surviving_document(path)?;
+    let remembered = existing
+        .as_ref()
+        .and_then(|document| remembered_of(document).ok().flatten());
+    let theme = existing
+        .as_ref()
+        .and_then(|document| document.theme.clone());
+    let key_hints = existing.and_then(|document| document.key_hints);
+    save_document(
+        path,
+        remembered.as_ref(),
+        theme,
+        key_hints,
+        Some(at.timestamp()),
+    )
 }
 
 pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
@@ -291,12 +336,16 @@ pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
     let remembered = existing
         .as_ref()
         .and_then(|document| remembered_of(document).ok().flatten());
-    let key_hints = existing.and_then(|document| document.key_hints);
+    let key_hints = existing
+        .as_ref()
+        .and_then(|document| document.key_hints.clone());
+    let detection_failed_at = existing.and_then(|document| document.detection_failed_at);
     save_document(
         path,
         remembered.as_ref(),
         Some(theme.name().to_string()),
         key_hints,
+        detection_failed_at,
     )
 }
 
@@ -306,12 +355,16 @@ pub(crate) fn save_key_hint_style(path: &Path, style: KeyHintStyle) -> Result<()
     let remembered = existing
         .as_ref()
         .and_then(|document| remembered_of(document).ok().flatten());
-    let theme = existing.and_then(|document| document.theme);
+    let theme = existing
+        .as_ref()
+        .and_then(|document| document.theme.clone());
+    let detection_failed_at = existing.and_then(|document| document.detection_failed_at);
     save_document(
         path,
         remembered.as_ref(),
         theme,
         Some(style.name().to_string()),
+        detection_failed_at,
     )
 }
 
@@ -320,6 +373,7 @@ fn save_document(
     remembered: Option<&Remembered>,
     theme: Option<String>,
     key_hints: Option<String>,
+    detection_failed_at: Option<i64>,
 ) -> Result<()> {
     let version = match remembered {
         Some(_) => VERSION,
@@ -337,6 +391,7 @@ fn save_document(
             source: remembered.map(|remembered| remembered.source),
             theme,
             key_hints,
+            detection_failed_at,
         },
     )?;
     use std::io::Write as _;
@@ -615,6 +670,84 @@ mod tests {
         assert!(persisted.remembered.is_some());
         assert_eq!(persisted.key_hint_style, None);
         assert!(persisted.warning.unwrap().contains("compact"));
+    }
+
+    /// The marker is a version 3 document's third reason to exist, and it
+    /// is the only one of the three that a later save may erase: a place
+    /// to remember answers the question it was asking.
+    #[test]
+    fn a_failed_detection_is_noted_until_a_location_is_remembered() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_detection_failure(&path, at).unwrap();
+
+        assert_eq!(raw_version(&path), 3);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, None);
+        assert_eq!(persisted.detection_failed_at, Some(at));
+        assert_eq!(persisted.warning, None);
+
+        save_location(&path, &chosen("Berlin, Germany", 52.52437, 13.41053)).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        assert_eq!(load_from(&path).unwrap().detection_failed_at, None);
+    }
+
+    /// The other two saves are not about location and must not touch the
+    /// marker, the same way they must not touch each other.
+    #[test]
+    fn a_failed_detection_survives_theme_and_key_hint_saves() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_detection_failure(&path, at).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.detection_failed_at, Some(at));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// And the marker keeps everything it found, in the version the rest
+    /// already called for.
+    #[test]
+    fn noting_a_failed_detection_preserves_the_rest_of_the_document() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+        let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_location(&path, &berlin).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_detection_failure(&path, at).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.detection_failed_at, Some(at));
+    }
+
+    /// A marker `chrono` cannot represent did not come from this program.
+    /// It reads as no marker, which costs one more request and nothing else.
+    #[test]
+    fn an_unrepresentable_marker_reads_as_none() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        write_raw(
+            &path,
+            r#"{"version":3,"detection_failed_at":9223372036854775807}"#,
+        );
+
+        let persisted = load_from(&path).unwrap();
+
+        assert_eq!(persisted.detection_failed_at, None);
+        assert_eq!(persisted.warning, None);
     }
 
     #[test]

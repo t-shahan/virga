@@ -251,7 +251,9 @@ first frame. Asking about a named city is a question, not a move — the
 remembered city stays whatever it was. And when nothing is remembered yet,
 the one location lookup `virga now` makes is remembered afterwards, so a
 status bar polling by the minute asks the location provider once, not once
-per poll.
+per poll. A lookup the provider does not answer is remembered too, for a
+quarter of an hour: the report names the fallback city meanwhile, and asks
+again once that has passed.
 
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went

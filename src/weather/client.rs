@@ -87,7 +87,13 @@ impl Default for Endpoints {
 
 /// Where the caller is, as far as their IP address gives them away.
 pub fn detect_location() -> Result<Location> {
-    detect_location_with(geoip_agent(), &Endpoints::default())
+    detect_location_at(&Endpoints::default())
+}
+
+/// The same detection, at a host the caller names: the seam through which
+/// `virga now`'s own tests answer with a refusal.
+pub(crate) fn detect_location_at(endpoints: &Endpoints) -> Result<Location> {
+    detect_location_with(geoip_agent(), endpoints)
 }
 
 fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location> {
