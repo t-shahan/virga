@@ -11,7 +11,7 @@
 //! vertical bars, not up versus down. So this writes cells itself.
 
 use crate::theme::Palette;
-use crate::ui::axis::{hour_ticks_render, put, put_right};
+use crate::ui::axis::{hour_ticks_render, put, put_right, widest_window_label, window_label};
 use crate::ui::bars::{Columns, GAP, window_start};
 use crate::units::Unit;
 use crate::weather::model::{HourlyForecast, Weather};
@@ -144,8 +144,17 @@ pub(super) fn precip_chart_render(
         // A block title takes the block's own style, not the border's, so both
         // of these are given the header role explicitly rather than left on
         // the terminal's default foreground.
-        .title(Line::from(chart_title(shown, amount_scale, unit, inner.width)).fg(palette.muted))
-        .title_bottom(Line::from(dry_spell(visible, shown)).fg(palette.muted));
+        .title(
+            Line::from(chart_title(
+                &window_label(start, shown, visible.first().map(|h| h.time.as_str())),
+                &widest_window_label(start, shown),
+                amount_scale,
+                unit,
+                inner.width,
+            ))
+            .fg(palette.muted),
+        )
+        .title_bottom(Line::from(dry_spell(visible, shown, start)).fg(palette.muted));
     frame.render_widget(block, area);
 
     // The ticks come off the bottom before anything else: an axis the plot has
@@ -337,38 +346,54 @@ fn falling_column(fraction: f64, rows: usize) -> Vec<&'static str> {
     cells
 }
 
-/// Longest form that fits. The span matters most — it is what the arrows move
-/// through — then the fact that the halves are different quantities, then the
-/// amount scale that stops the two inviting a meaningless comparison.
-fn chart_title(hours: usize, scale_mm: f64, unit: Unit, width: u16) -> String {
-    let span = format!("Precipitation · next {hours} h");
-    let legend = format!("{span} · chance ▲ · amount ▼");
-    let full = format!(
-        "{legend} 0–{:.*} {}",
-        unit.precip_decimals(),
-        unit.precip(scale_mm),
-        unit.precip_label()
-    );
+/// Longest form that fits `width`, the block's inner width. The span matters
+/// most — it is what the arrows move through — then the fact that the halves
+/// are different quantities, then the amount scale that stops the two
+/// inviting a meaningless comparison. In a 34-column terminal a paged span
+/// outgrows the name beside it, and the name is the part the screen can
+/// spare: the box is the only chart on it.
+///
+/// Each form is measured against `widest`, the longest span any page can
+/// carry, as well as this page's own, so the name does not appear on one
+/// page and vanish on the next as the anchor's digits change.
+fn chart_title(span: &str, widest: &str, scale_mm: f64, unit: Unit, width: u16) -> String {
+    let forms = |span: &str| {
+        let named = format!("Precipitation · {span}");
+        let legend = format!("{named} · chance ▲ · amount ▼");
+        let full = format!(
+            "{legend} 0–{:.*} {}",
+            unit.precip_decimals(),
+            unit.precip(scale_mm),
+            unit.precip_label()
+        );
+        [full, legend, named, span.to_string()]
+    };
 
     // Two corners plus a column of breathing room inside each, as the current
     // pane's border budget does.
     let room = width.saturating_sub(2) as usize;
-    for candidate in [full, legend, span] {
-        if candidate.chars().count() <= room {
-            return candidate;
-        }
-    }
-    "Precipitation".to_string()
+    let fits = |form: &String| form.chars().count() <= room;
+    forms(span)
+        .into_iter()
+        .zip(forms(widest))
+        .find(|(shown, measured)| fits(shown) && fits(measured))
+        .map_or_else(|| "Precipitation".to_string(), |(shown, _)| shown)
 }
 
 /// With most hours dry most weeks, an empty lower half is the screen's normal
 /// state rather than an edge case. Say so in words, or the chart looks broken
 /// rather than reassuring.
-fn dry_spell(visible: &[HourlyForecast], hours: usize) -> String {
+///
+/// "Next" is only true of the page that starts now; a later page describes
+/// the hours it shows (#78).
+fn dry_spell(visible: &[HourlyForecast], hours: usize, start: usize) -> String {
     if visible.iter().any(HourlyForecast::is_wet) {
         return String::new();
     }
-    format!("no rain or snow in the next {hours} h")
+    if start == 0 {
+        return format!("no rain or snow in the next {hours} h");
+    }
+    format!("no rain or snow in these {hours} h")
 }
 
 fn is_midnight(time: &str) -> bool {
@@ -575,7 +600,7 @@ mod tests {
     /// that means nothing — they are percentages against inches.
     #[test]
     fn the_title_names_the_amount_scale_when_it_fits() {
-        let title = chart_title(26, 2.0, Unit::Imperial, 78);
+        let title = chart_title("next 26 h", "next 26 h", 2.0, Unit::Imperial, 78);
         assert!(title.contains("chance ▲"), "{title}");
         assert!(title.contains("amount ▼"), "{title}");
         assert!(title.contains("in"), "{title}");
@@ -586,15 +611,123 @@ mod tests {
     #[test]
     fn the_title_sheds_detail_rather_than_overflowing() {
         for width in 4u16..=120 {
-            let title = chart_title(26, 2.0, Unit::Metric, width);
+            let title = chart_title("next 26 h", "next 26 h", 2.0, Unit::Metric, width);
             assert!(
                 title.chars().count()
                     <= (width.saturating_sub(2) as usize).max("Precipitation".len()),
                 "width {width}: {title:?} does not fit"
             );
         }
-        assert_eq!(chart_title(26, 2.0, Unit::Metric, 10), "Precipitation");
-        assert!(chart_title(26, 2.0, Unit::Metric, 34).contains("next 26 h"));
+        assert_eq!(
+            chart_title("next 26 h", "next 26 h", 2.0, Unit::Metric, 10),
+            "Precipitation"
+        );
+        // The inner width of a 34-column terminal, the app's floor.
+        assert!(chart_title("next 26 h", "next 26 h", 2.0, Unit::Metric, 32).contains("next 26 h"));
+    }
+
+    /// A paged span is longer than "next 26 h", and at the app's narrowest
+    /// widths it is the name that goes: the position is what the reader who
+    /// paged there needs, and the box is the only chart on the screen. The
+    /// name goes on every page at such a width, not only the pages whose
+    /// anchor happens to be long, so paging never makes it flicker.
+    #[test]
+    fn a_paged_title_keeps_its_position_at_the_narrowest_widths() {
+        let widest = "11 h from Wed 12a";
+        let short = "11 h from Mon 8p";
+        // `chart_title` measures the block's inner width, two less than the
+        // terminal's.
+        let inner = |terminal: u16| terminal - 2;
+
+        for terminal in [34, 36] {
+            assert_eq!(
+                chart_title(widest, widest, 2.0, Unit::Metric, inner(terminal)),
+                widest
+            );
+            assert_eq!(
+                chart_title(short, widest, 2.0, Unit::Metric, inner(terminal)),
+                short
+            );
+        }
+        assert_eq!(
+            chart_title(short, widest, 2.0, Unit::Metric, inner(37)),
+            "Precipitation · 11 h from Mon 8p"
+        );
+
+        for width in 4u16..=120 {
+            for span in [widest, short] {
+                let title = chart_title(span, widest, 2.0, Unit::Metric, width);
+                assert!(
+                    title.chars().count()
+                        <= (width.saturating_sub(2) as usize).max("Precipitation".len()),
+                    "width {width}: {title:?} does not fit"
+                );
+            }
+        }
+    }
+
+    /// Rendered rather than computed: at 36 columns the pages open on
+    /// anchors of both widths, and the title kept its name on the short ones
+    /// only, so paging made "Precipitation ·" come and go.
+    #[test]
+    fn a_narrow_title_keeps_one_shape_from_page_to_page() {
+        let first = buffer_text(36, 19, 0);
+        let top = first.lines().next().unwrap_or_default();
+        assert!(top.starts_with("┌Precipitation · next 11 h"), "{top:?}");
+
+        // Eleven hours a page at this width; every later page opens on a
+        // bare span, whatever its anchor's width.
+        for selected in (11..192).step_by(11) {
+            let text = buffer_text(36, 19, selected);
+            let top = text.lines().next().unwrap_or_default();
+            assert!(
+                top.starts_with("┌11 h from "),
+                "selection {selected}: {top:?}"
+            );
+            assert!(top.ends_with('┐'), "selection {selected}: {top:?}");
+            assert_eq!(top.chars().count(), 36, "selection {selected}: {top:?}");
+        }
+    }
+
+    /// Nothing used to render a scrolled page and read its text back: the
+    /// title named the window's size on every page, so four days ahead it
+    /// still said "next 24 h" over an axis reading `Thu 12a`.
+    #[test]
+    fn a_later_page_is_titled_from_where_it_opens() {
+        let first = buffer_text(60, 10, 0);
+        assert!(first.contains("next 18 h"), "\n{first}");
+
+        // Eighteen hours a page at this width, so hour 40 is on the third
+        // page, which opens 36 hours after the fixture's Sunday midnight.
+        let paged = buffer_text(60, 10, 40);
+        let top = paged.lines().next().unwrap_or_default();
+        assert!(top.contains("18 h from Mon 12p"), "{top:?}");
+        assert!(!top.contains("next"), "{top:?}");
+    }
+
+    /// The dry caption describes the page it sits under, in the same tense
+    /// as the title above it.
+    #[test]
+    fn a_dry_later_page_describes_these_hours_not_the_next_ones() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in &mut weather.hourly {
+            hour.precip_mm = Some(0.0);
+        }
+
+        for (selected, expected) in [(0, "in the next 18 h"), (40, "in these 18 h")] {
+            let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+            terminal
+                .draw(|f| {
+                    precip_chart_render(f, &weather, palette(), f.area(), Unit::Imperial, selected)
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let bottom: String = (0..60).map(|x| buffer[(x, 9)].symbol()).collect();
+            assert!(
+                bottom.contains(expected),
+                "selection {selected}: {bottom:?} should say {expected:?}"
+            );
+        }
     }
 
     #[test]
