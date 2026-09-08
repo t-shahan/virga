@@ -163,9 +163,10 @@ Virga checks for a newer release once per launch, in the background, and
 shows one muted line above the key bar when it finds one. The next keypress
 on a screen that shows it clears it — letters typed into the city search
 leave it standing, because that screen never shows it — and news that
-arrived before you quit is printed on the way out instead. Set
-`VIRGA_UPDATE=off` to skip the check; a launch that cannot reach GitHub — or
-that quits before GitHub answers — simply shows no notice.
+arrived before you quit is printed on the way out instead. Clearing it is
+remembered: the release it named is not announced again, only one newer
+than it. Set `VIRGA_UPDATE=off` to skip the check; a launch that cannot
+reach GitHub — or that quits before GitHub answers — simply shows no notice.
 
 `virga update` asks the same question on demand and, judging from where the
 running binary lives, says which row of this table applies to you. Neither
@@ -541,9 +542,10 @@ the launch-time request is not made at all.
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
 chose it or it was detected — and, if you set them, the name of your startup
-theme (with `virga theme`) and your key bar style (with `,`). Your IP address
-is never written to disk — the resolved city is. It does not store weather
-responses, searches, or history.
+theme (with `virga theme`), your key bar style (with `,`), and the version of
+the last update notice you cleared. Your IP address is never written to disk —
+the resolved city is. It does not store weather responses, searches, or
+history.
 Weather and air-quality requests send the location coordinates to Open-Meteo;
 city searches submit their search text to its geocoder. Open-Meteo's
 free-service logs may retain IP addresses and coordinates for 90 days. See
