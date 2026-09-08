@@ -14,6 +14,12 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- A city search no longer waits behind a stalled forecast. One thread served
+  every request in the order it arrived, so pressing `l`, typing a city and
+  hitting Enter while a fetch was hung showed the search spinner for up to
+  the fetch's fifteen-second timeout with nothing to say. Fetches,
+  detections and searches now each have a thread of their own, and the only
+  thing a search can wait behind is another search (#75).
 - Choosing a city while the launch is still working out where you are no
   longer risks losing the choice. A detection that answered after the pick
   could chain its own fetch over the chosen one, so the guess was what got

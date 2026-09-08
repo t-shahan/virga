@@ -7,7 +7,8 @@ use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use chrono::Utc;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread;
 
 /// Correlates a request with the message that answers it. The worker's
@@ -15,12 +16,14 @@ use std::thread;
 /// flight, and the app has to be able to tell which one came back.
 pub type RequestId = u64;
 
-/// How many requests may sit unclaimed before the channel refuses more.
+/// How many requests may sit unclaimed in one worker's queue before it
+/// refuses more.
 ///
 /// `App` already declines to queue a duplicate — `refresh` and `submit` both
-/// bail while their fetch is `Loading` — so the reachable depth is one search
-/// plus a weather fetch the user superseded by picking a new city. Two slots
-/// is that invariant; four is headroom for it being wrong.
+/// bail while their fetch is `Loading` — so the reachable depth of any one
+/// queue is a request plus the one the user superseded, by picking a new
+/// city or by editing the query. Two slots is that invariant; four is
+/// headroom for it being wrong.
 ///
 /// The bound is the point. The guards in `App` are a promise made in prose,
 /// and prose does not survive a refactor: drop one and an unbounded channel
@@ -113,56 +116,121 @@ pub fn spawn_update_check(
     });
 }
 
+/// The request queues, one per kind of request, behind one handle.
+///
+/// One queue and one thread used to serve everything in arrival order, and
+/// the forecast's fifteen-second timeout was the price of that: a city
+/// search typed while a fetch was stalled sat behind it, spinner and all,
+/// with nothing to say. Each kind now has a thread of its own, so the only
+/// request a search can wait behind is another search. The kinds are
+/// independent by construction — `App` matches every answer to the request
+/// it is waiting on by id — so nothing relied on the old order except the
+/// detection race `App::fetch` now closes for itself.
+pub struct Workers {
+    fetch: SyncSender<Request>,
+    detect: SyncSender<Request>,
+    search: SyncSender<Request>,
+}
+
+impl Workers {
+    /// Queue a request on its kind's worker without waiting. The bound is
+    /// per queue, so the error carries the request back exactly as one
+    /// channel's would, and the caller's handling need not know how many
+    /// queues there are.
+    pub fn try_send(&self, request: Request) -> Result<(), TrySendError<Request>> {
+        match request {
+            Request::Fetch { .. } => self.fetch.try_send(request),
+            Request::Detect { .. } => self.detect.try_send(request),
+            Request::Search { .. } => self.search.try_send(request),
+        }
+    }
+}
+
 /// `cache` is where a fetched forecast is kept for the next launch, or
-/// `None` to keep nothing. The write happens here, on the thread that
-/// already waits on the network, and only after the forecast has been sent:
-/// the app must never sit behind an fsync for its frame.
-pub fn spawn_worker(
+/// `None` to keep nothing.
+pub fn spawn_workers(messages: Sender<Message>, cache: Option<PathBuf>) -> Workers {
+    spawn_workers_with(messages, cache, serve)
+}
+
+/// The workers with the network swapped out. `serve` answers each request;
+/// `main` passes the real one, and a test passes one that can be told to
+/// stall, which is how "a search is answered while a fetch is stalled" is
+/// proved rather than timed.
+fn spawn_workers_with(
+    messages: Sender<Message>,
+    cache: Option<PathBuf>,
+    serve: impl Fn(Request) -> Message + Send + Sync + 'static,
+) -> Workers {
+    let serve = Arc::new(serve);
+    let spawn = |cache: Option<PathBuf>| {
+        let (tx, rx) = mpsc::sync_channel(REQUEST_QUEUE);
+        spawn_worker(rx, messages.clone(), cache, Arc::clone(&serve));
+        tx
+    };
+    // Only a fetch produces a forecast, so only its worker is told where to
+    // keep one; the others would never write.
+    Workers {
+        fetch: spawn(cache),
+        detect: spawn(None),
+        search: spawn(None),
+    }
+}
+
+fn serve(request: Request) -> Message {
+    match request {
+        Request::Fetch { id, location } => match fetch_forecast(location.lat, location.lon) {
+            Ok(weather) => Message::Loaded {
+                id,
+                location,
+                weather,
+            },
+            Err(e) => Message::LoadFailed {
+                id,
+                error: e.to_string(),
+            },
+        },
+        Request::Detect { id } => match detect_location() {
+            Ok(found) => Message::Detected {
+                id,
+                location: ActiveLocation::from(&found),
+            },
+            Err(e) => Message::DetectFailed {
+                id,
+                error: e.to_string(),
+            },
+        },
+        Request::Search { id, query } => match search_locations(&query) {
+            Ok(locations) => Message::Located { id, locations },
+            Err(e) => Message::SearchFailed {
+                id,
+                error: e.to_string(),
+            },
+        },
+    }
+}
+
+/// One thread serving one queue in order. The cache write happens here, on
+/// the thread that already waits on the network, and only after the forecast
+/// has been sent: the app must never sit behind an fsync for its frame.
+fn spawn_worker(
     requests: Receiver<Request>,
     messages: Sender<Message>,
     cache: Option<PathBuf>,
+    serve: Arc<impl Fn(Request) -> Message + Send + Sync + 'static>,
 ) {
     thread::spawn(move || {
         for request in requests {
-            let mut keep = None;
-            let message = match request {
-                Request::Fetch { id, location } => {
-                    match fetch_forecast(location.lat, location.lon) {
-                        Ok(weather) => {
-                            // Encoded before the forecast is handed over,
-                            // because handing it over moves it.
-                            keep = cache.as_ref().map(|path| {
-                                (path.clone(), cache::encode(&location, &weather, Utc::now()))
-                            });
-                            Message::Loaded {
-                                id,
-                                location,
-                                weather,
-                            }
-                        }
-                        Err(e) => Message::LoadFailed {
-                            id,
-                            error: e.to_string(),
-                        },
-                    }
-                }
-                Request::Detect { id } => match detect_location() {
-                    Ok(found) => Message::Detected {
-                        id,
-                        location: ActiveLocation::from(&found),
+            let message = serve(request);
+            // Encoded before the forecast is handed over, because handing it
+            // over moves it.
+            let keep = match (&cache, &message) {
+                (
+                    Some(path),
+                    Message::Loaded {
+                        location, weather, ..
                     },
-                    Err(e) => Message::DetectFailed {
-                        id,
-                        error: e.to_string(),
-                    },
-                },
-                Request::Search { id, query } => match search_locations(&query) {
-                    Ok(locations) => Message::Located { id, locations },
-                    Err(e) => Message::SearchFailed {
-                        id,
-                        error: e.to_string(),
-                    },
-                },
+                ) => Some((path.clone(), cache::encode(location, weather, Utc::now()))),
+                _ => None,
             };
             if messages.send(message).is_err() {
                 break;
@@ -184,8 +252,160 @@ pub fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// Workers whose fetches block until `release` is signalled, once per
+    /// fetch, and whose other requests answer at once. A blocking channel
+    /// rather than a slow server: the stall is under the test's control
+    /// and lasts exactly as long as the test says.
+    fn stalling_workers(messages: Sender<Message>) -> (Workers, Sender<()>) {
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let workers = spawn_workers_with(messages, None, move |request| match request {
+            Request::Fetch { id, .. } => {
+                // A dropped sender ends the stall too, so a failing test
+                // finishes rather than hangs.
+                let _ = released.lock().unwrap().recv();
+                Message::LoadFailed {
+                    id,
+                    error: "released".to_string(),
+                }
+            }
+            Request::Detect { id } => Message::Detected {
+                id,
+                location: ActiveLocation::default(),
+            },
+            Request::Search { id, .. } => Message::Located {
+                id,
+                locations: Vec::new(),
+            },
+        });
+        (workers, release)
+    }
+
+    fn fetch(id: RequestId) -> Request {
+        Request::Fetch {
+            id,
+            location: ActiveLocation::default(),
+        }
+    }
+
+    fn search(id: RequestId) -> Request {
+        Request::Search {
+            id,
+            query: "reykjavik".to_string(),
+        }
+    }
+
+    /// The complaint: pressing `l`, typing a city and hitting Enter while a
+    /// fetch was stalled showed the spinner for the whole of the fetch's
+    /// timeout, because the search sat behind it in the one queue. The
+    /// search, and a detection, must answer while the fetch is still held.
+    #[test]
+    fn a_search_and_a_detection_are_answered_while_a_fetch_is_stalled() {
+        let (tx, rx) = mpsc::channel();
+        let (workers, release) = stalling_workers(tx);
+
+        workers.try_send(fetch(1)).expect("room for a fetch");
+        workers.try_send(search(2)).expect("room for a search");
+        workers
+            .try_send(Request::Detect { id: 3 })
+            .expect("room for a detection");
+
+        // Nothing can answer the fetch until it is released, so the first
+        // two answers are the other two kinds, in whichever order.
+        let mut answered = Vec::new();
+        for _ in 0..2 {
+            match rx.recv_timeout(PATIENCE) {
+                Ok(Message::Located { id, .. }) | Ok(Message::Detected { id, .. }) => {
+                    answered.push(id);
+                }
+                Ok(_) => panic!("the stalled fetch answered first"),
+                Err(e) => panic!("an answer sat behind the stalled fetch: {e}"),
+            }
+        }
+        answered.sort_unstable();
+        assert_eq!(answered, vec![2, 3]);
+
+        release.send(()).expect("the fetch worker is waiting");
+        assert!(
+            matches!(
+                rx.recv_timeout(PATIENCE),
+                Ok(Message::LoadFailed { id: 1, .. })
+            ),
+            "the fetch answers once released"
+        );
+    }
+
+    /// Each kind has its own bound. Filling one queue must refuse only that
+    /// kind — the request handed back is the one that did not fit, which is
+    /// what `on_dispatch_dropped` needs — and leave the others open.
+    #[test]
+    fn a_full_queue_refuses_its_own_kind_and_no_other() {
+        let (tx, rx) = mpsc::channel();
+        let (workers, release) = stalling_workers(tx);
+
+        // The first fetch is held on the gate and the rest pile up behind
+        // it. Whether the worker has taken that first one off the queue yet
+        // is not the test's to know, so it pushes until refused rather than
+        // counting to the bound.
+        let mut id = 0;
+        let refused = loop {
+            match workers.try_send(fetch(id)) {
+                Ok(()) => id += 1,
+                Err(TrySendError::Full(Request::Fetch { id: back, .. })) => break back,
+                Err(e) => panic!("a full queue must hand the request back: {e}"),
+            }
+        };
+        assert_eq!(refused, id, "the request handed back is the one refused");
+        assert!(
+            id >= REQUEST_QUEUE as RequestId,
+            "refused after {id} fetches, which is fewer than the bound"
+        );
+
+        workers
+            .try_send(search(7))
+            .expect("a full fetch queue must not refuse a search");
+        assert!(matches!(
+            rx.recv_timeout(PATIENCE),
+            Ok(Message::Located { id: 7, .. })
+        ));
+        drop(release);
+    }
+
+    /// A worker sends nothing after the app has stopped listening, and a
+    /// send into a worker that has gone is reported, not swallowed.
+    #[test]
+    fn workers_end_with_the_message_channel() {
+        let (tx, rx) = mpsc::channel();
+        let workers = spawn_workers_with(tx, None, |request| match request {
+            Request::Fetch { id, .. } | Request::Detect { id } | Request::Search { id, .. } => {
+                Message::SearchFailed {
+                    id,
+                    error: "unused".to_string(),
+                }
+            }
+        });
+        workers.try_send(search(1)).expect("room for a search");
+        assert!(matches!(
+            rx.recv_timeout(PATIENCE),
+            Ok(Message::SearchFailed { id: 1, .. })
+        ));
+
+        drop(rx);
+        // The worker only learns the receiver is gone when it next sends, so
+        // requests are accepted, and may even pile up, until it has served
+        // one more. Every one of them is refused once it has.
+        while !matches!(
+            workers.try_send(search(2)),
+            Err(TrySendError::Disconnected(_))
+        ) {
+            thread::yield_now();
+        }
+    }
 
     /// The check thread's whole contract: at most one message, and it ends
     /// either way. Once the probe's sender is dropped the receiver reports
