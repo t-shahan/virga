@@ -320,16 +320,17 @@ mod tests {
         );
     }
 
-    /// The one-shot report's bound, an hour, is the same edge one tier down:
-    /// the minute after it, the file is still a launch's cache and no longer
-    /// a report's.
+    /// The one-shot report's bound is the hour `--help` promises, written
+    /// here as a literal rather than as the constant so the two cannot drift
+    /// apart unnoticed. The same edge one tier down: the minute after it,
+    /// the file is still a launch's cache and no longer a report's.
     #[test]
     fn a_report_is_held_to_a_tighter_bound_than_a_launch() {
         let dir = tempfile::tempdir().unwrap();
         let fetched = local(2026, 8, 2, 12, 0);
         let path = written(dir.path(), fetched);
 
-        let just_inside = fetched + REPORT_MAX_AGE;
+        let just_inside = fetched + TimeDelta::hours(1);
         assert!(
             load(&path, &frederick(), just_inside, REPORT_MAX_AGE)
                 .unwrap()
