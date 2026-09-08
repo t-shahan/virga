@@ -466,6 +466,22 @@ That is not bookkeeping for its own sake: release notes are generated from that
 file, and both the release script and CI refuse to publish a version it does not
 describe.
 
+### Manual render check
+
+CI compiles and tests on all three platforms but never looks at a terminal,
+so a change to layout or drawing is checked by eye before it merges, in at
+least one of the terminals named under [Limitations](#limitations):
+
+- Every screen at the floor size, 34×12 and 36×19 for the hourly
+  weathergram, and at a wide one.
+- The hourly weathergram's `┬` under the current hour and `▲` under the
+  selected hour sit beneath their columns at the one-, two-, and three-cell
+  hour widths, and the classic chart's `┬` and `═` match.
+- The `▲`, `┬`, `═`, and box-drawing borders are East Asian ambiguous-width
+  glyphs. In a terminal that draws those two cells wide, such as one set to
+  an East Asian locale, the hourly views' markers still sit under their
+  columns and the week strip's rows still share one axis.
+
 ### Cutting a release
 
 ```bash
@@ -497,9 +513,12 @@ still publishes and only the tap update is skipped, with a warning.
 - Terminals below 34×12 show a size warning instead of the interface. The
   hourly weathergram needs 36 columns and 19 rows above the key bar, and
   shows the same warning below that.
-- “Today” is distinguished by colour alone in the daily chart. The selection
-  is not: every screen marks it by shape as well — a `>` in the forecast
-  table's gutter and a `▲` in the hourly weathergram.
+- “Today” is distinguished by colour alone in the daily chart. The current
+  hour is not: both hourly views hang a `┬` under it, which the selection
+  marker covers while the selection sits there, and the week strip sets it in
+  bold. Nor is the selection: every screen marks it by shape as well — a `>`
+  in the forecast table's gutter and before the week strip's day, and a `▲`
+  in the hourly weathergram.
 - Ghostty and Apple's Terminal app have been tested manually on macOS.
 - Automated tests run on Linux, macOS, and Windows. They do not validate
   real-terminal rendering, font fallback, or held-key behavior.

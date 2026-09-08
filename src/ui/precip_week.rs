@@ -117,8 +117,11 @@ const AXIS_ROWS: u16 = 1;
 const MAX_CELL: u16 = 3;
 
 /// Marks the day the selection is on, so the strip says which row is live
-/// without relying on the cell colour alone.
-const SELECTED_DAY: &str = "▸";
+/// without relying on the cell colour alone. The same `>` the forecast
+/// table's gutter and the search screen use, so one glyph means "selected"
+/// everywhere. Width is not the reason: the `▸` this replaced is East Asian
+/// Width neutral, unlike `▲`, `┬`, and the box drawing, which are ambiguous.
+const SELECTED_DAY: &str = ">";
 
 /// One clause, so it needs no interpunct to join two halves.
 const TITLE: &str = "Chance of precipitation this week";
