@@ -15,7 +15,9 @@
 //! the hourly screen now states the size it needs instead (#50).
 
 use crate::theme::Palette;
-use crate::ui::axis::{hour_ticks_render, put, put_right, put_styled, put_text, window_label};
+use crate::ui::axis::{
+    hour_ticks_render, put, put_right, put_styled, put_text, widest_window_label, window_label,
+};
 use crate::ui::bars::window_start;
 use crate::ui::condition_symbol;
 use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
@@ -187,7 +189,10 @@ fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
 
 /// The visible window, like the temperature and wind summaries beside it.
 /// It used to total the day ahead of the selection, which is the figure the
-/// inspector already prints two rows up as "24 h total" (#78).
+/// inspector already prints two rows up as "24 h ahead" (#78). At 80 columns
+/// both windows are a day long and, once the selection has left the page's
+/// first hour, not the same day: that is why the inspector's row names its
+/// anchor.
 fn precipitation_summary(hours: &[HourlyForecast], unit: Unit) -> String {
     let total = aggregate(hours, unit);
     match total {
@@ -270,14 +275,17 @@ pub(super) fn weathergram_render(
 
 /// The pane's name gives way before the window does. At the 36-column floor
 /// "Hourly weather · 12 h from Sun 12p" overruns the 34 title cells, and the
-/// position is the part a reader who has paged forward needs.
+/// position is the part a reader who has paged forward needs. The long form
+/// has to fit the widest span a page can carry, not only this page's, so
+/// the name does not come and go as the anchor's digits change.
 fn title(window: Window, visible: &[HourlyForecast], width: u16) -> String {
     let first = visible.first().map(|hour| hour.time.as_str());
     let span = window_label(window.start, window.hours, first);
+    let widest = widest_window_label(window.start, window.hours);
     let room = width.saturating_sub(BORDER_COLS) as usize;
-    let full = format!(" Hourly weather · {span} ");
-    if full.chars().count() <= room {
-        return full;
+    let fits = |span: &str| format!(" Hourly weather · {span} ").chars().count() <= room;
+    if fits(&span) && fits(&widest) {
+        return format!(" Hourly weather · {span} ");
     }
     format!(" Hourly · {span} ")
 }
@@ -1112,6 +1120,59 @@ mod tests {
         assert_eq!(top.chars().count(), width as usize);
     }
 
+    /// The last page stops at the end of the series rather than past it, so
+    /// it opens where the clamp puts it and not on a page boundary. The
+    /// fixture's 192 hours hide that: its last page opens at hour 168, which
+    /// is `Sun 12a` again. One hour fewer and the clamp shows.
+    #[test]
+    fn the_clamped_last_page_is_titled_from_its_real_first_hour() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.hourly.truncate(weather.now_hour + 191);
+        assert_eq!(window_for(80, 190, 191).start, 167);
+
+        let text = rendered(&weather, 80, FULL_ROWS, 190);
+        let top = text.lines().next().unwrap_or_default();
+        assert!(
+            top.contains("Hourly weather · 24 h from Sat 11p"),
+            "{top:?}"
+        );
+    }
+
+    /// One column above the floor the long form fits a one-digit clock and
+    /// not a two-digit one, and the clamped last page is where the two meet:
+    /// from 1 AM every page opens at `1a` or `1p` until the last, which opens
+    /// at `12p`. Kept wherever it fit, the name would be on every page but
+    /// that one.
+    #[test]
+    fn a_narrow_title_keeps_one_shape_from_page_to_page() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.now_hour += 1;
+        let count = weather.forecast_hours().len();
+        assert_eq!(count, 191);
+        let width = 37;
+
+        let pages: Vec<String> = (12..count)
+            .step_by(12)
+            .map(|selected| {
+                let text = rendered(&weather, width, FULL_ROWS, selected);
+                text.lines().next().unwrap_or_default().to_string()
+            })
+            .collect();
+        assert!(
+            pages.iter().any(|top| top.contains("12 h from Sun 1a")),
+            "{pages:#?}"
+        );
+        assert!(
+            pages.iter().any(|top| top.contains("12 h from Sun 12p")),
+            "{pages:#?}"
+        );
+        for top in &pages {
+            assert!(top.contains("┌ Hourly · 12 h from "), "{top:?}");
+            assert!(top.ends_with('┐'), "the title overran the corner: {top:?}");
+            assert_eq!(top.chars().count(), width as usize);
+        }
+    }
+
     #[test]
     fn a_flat_temperature_window_states_one_value() {
         let mut weather = Weather::fixture(22, 14);
@@ -1137,7 +1198,7 @@ mod tests {
 
     /// One window for all three summaries: the rain total describes the
     /// hours on screen, not the day ahead of the selection, which is the
-    /// inspector's "24 h total" already.
+    /// inspector's "24 h ahead" already.
     #[test]
     fn the_rain_summary_totals_the_visible_window() {
         let mut weather = Weather::fixture(22, 14);

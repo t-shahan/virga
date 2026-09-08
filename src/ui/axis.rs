@@ -133,6 +133,21 @@ pub(super) fn window_label(start: usize, hours: usize, first: Option<&str>) -> S
     format!("{hours} h from {from}")
 }
 
+/// The longest `window_label` any page of this size can carry. A chart that
+/// decides whether its own name fits beside the span measures this as well
+/// as the page's actual label, so the name does not come and go as the
+/// anchor's digits change from page to page: at 36 columns the classic
+/// chart read `11 h from Sun 10p` on one page and `Precipitation · 11 h
+/// from Mon 8p` on the next. A three-letter day and a two-digit clock is
+/// the widest anchor `anchor` produces; the unparsable-stamp fallback can be
+/// wider still, which is why callers measure both.
+pub(super) fn widest_window_label(start: usize, hours: usize) -> String {
+    if start == 0 {
+        return format!("next {hours} h");
+    }
+    format!("{hours} h from Wed 12a")
+}
+
 /// Two or three columns, which is what a tick has between its neighbours at the
 /// narrowest stride either chart draws at.
 pub(super) fn clock(hour: u32) -> String {
@@ -185,6 +200,22 @@ mod tests {
             "12 h from 48 h ahead"
         );
         assert_eq!(window_label(48, 12, None), "12 h from 48 h ahead");
+    }
+
+    /// Whatever hour a page opens on, its label is never wider than the
+    /// measure a chart sizes its title by, or the title would overrun on
+    /// the one page whose anchor is longest.
+    #[test]
+    fn no_page_label_is_wider_than_the_widest() {
+        let widest = widest_window_label(12, 12).chars().count();
+        for day in 10..=16 {
+            for hour in 0..24 {
+                let stamp = format!("2026-08-{day}T{hour:02}:00");
+                let label = window_label(12, 12, Some(&stamp));
+                assert!(label.chars().count() <= widest, "{label:?}");
+            }
+        }
+        assert_eq!(widest_window_label(0, 24), window_label(0, 24, None));
     }
 
     #[test]

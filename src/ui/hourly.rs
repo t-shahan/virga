@@ -130,7 +130,10 @@ fn detail_lines(
         detail_line("humidity", &humidity_line(hour), palette),
         detail_line("precip", &precip_line(hour, unit), palette),
         detail_line("wind", &wind_line(hour, unit), palette),
-        detail_line("24 h total", &total_line(ahead, unit), palette),
+        // "24 h ahead" rather than "24 h total": the weathergram below sums
+        // the page on screen, and at 80 columns that is a different day from
+        // the one ahead of the selection, so the row says which day it means.
+        detail_line("24 h ahead", &total_line(ahead, unit), palette),
     ]
 }
 
@@ -307,6 +310,35 @@ mod tests {
         );
     }
 
+    /// Two rain figures on one screen describe two windows: the inspector's
+    /// row the day ahead of the selection, the weathergram's rain row the
+    /// page on screen. With the selection past the page's first hour they
+    /// disagree, so the inspector's label names its anchor rather than
+    /// calling itself a total of nothing in particular.
+    #[test]
+    fn the_inspector_total_names_the_window_the_weathergram_does_not_show() {
+        let mut hours = dry_hours(192);
+        hours[25].precip_mm = Some(2.0);
+        let app = app_showing(hours, 3);
+        let text = rendered(80, 24, &app);
+
+        let ahead = text
+            .lines()
+            .find(|line| line.contains("24 h ahead"))
+            .unwrap_or_else(|| panic!("no 24 h ahead row:\n{text}"));
+        assert!(ahead.contains("0.08 in"), "{ahead:?}");
+        assert!(!text.contains("24 h total"), "\n{text}");
+
+        assert!(text.contains("Hourly weather · next 24 h"), "\n{text}");
+        // The inspector's bottom border says "next rain" too; the track
+        // label sits inside the weathergram's left border.
+        let rain = text
+            .lines()
+            .find(|line| line.starts_with("│     rain "))
+            .unwrap_or_else(|| panic!("no rain row:\n{text}"));
+        assert!(rain.contains(" 0 in"), "{rain:?}");
+    }
+
     #[test]
     fn full_total_is_unavailable_when_every_measurement_is_missing() {
         let mut hours = dry_hours(24);
@@ -318,7 +350,7 @@ mod tests {
         let text = rendered(100, FULL_PAIR_ROWS, &app);
         let total = text
             .lines()
-            .find(|line| line.contains("24 h total"))
+            .find(|line| line.contains("24 h ahead"))
             .expect("full total line");
         assert!(
             total.contains(UNKNOWN),
@@ -521,7 +553,7 @@ mod tests {
         let app = app_showing(dry_hours(192), 3);
         let text = rendered(100, 24, &app);
 
-        for label in ["feels like", "humidity", "precip", "wind", "24 h total"] {
+        for label in ["feels like", "humidity", "precip", "wind", "24 h ahead"] {
             assert!(text.contains(label), "lost {label:?}:\n{text}");
         }
         assert!(text.contains("Hourly"), "weathergram missing:\n{text}");
