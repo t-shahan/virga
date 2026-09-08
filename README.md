@@ -42,7 +42,7 @@ https://github.com/user-attachments/assets/5044c045-0f86-448c-9000-19c9fe541134
 
 ## Hourly weathergram
 
-<img width="2000" height="1609" alt="The hourly weathergram: a temperature silhouette, a rising precipitation-chance band, weather emoji along the sky row, and wind arrows, all on one shared hour axis, with the selected hour's details in a pane alongside and a week-long precipitation strip below" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
+<img width="2000" height="1609" alt="Animated: the hourly weathergram, with the selected hour's readings in a pane above it and the week's precipitation strip below. Temperature, precipitation chance, sky and wind share one hour axis; the selection steps through hours and days, then v flips to the classic precipitation bars" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
 
 Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
 share one clock, so a change in the forecast reads down a column instead of
@@ -183,9 +183,10 @@ name.
 
 Removing the binary leaves the files Virga writes: a `state.json` holding
 the last location you chose and, if you set them, your startup theme and key
-bar style, an empty `state.json.lock` beside it that serialises saves, and a
-`forecast.json` holding the last forecast it fetched. All of them live in the
-platform's per-user state directory:
+bar style, a `forecast.json` holding the last forecast it fetched, and beside
+each an empty `.lock` file — `state.json.lock` and `forecast.json.lock` — that
+serialises writes to it. All of them live in the platform's per-user state
+directory:
 
 | Platform | Directory |
 |---|---|
@@ -210,7 +211,7 @@ platform's per-user state directory:
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `?` | Every key for the current screen, on a card — any key closes it |
 | `,` | Switch the bar between hinting at `?` and naming every binding itself — persisted, like the theme |
-| `q` / `Ctrl-C` | Quit — `Esc` too, except on the hourly screen, where it goes back |
+| `q` / `Ctrl-C` | Quit — `Esc` too, except on the hourly and search screens, where it only backs out |
 
 The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
 hour, a weather emoji marks the sky every three hours, and wind arrows every
@@ -298,8 +299,9 @@ API conversion independently testable.
 ## Engineering Quality
 
 Virga's default locked test suite passes **several hundred deterministic
-tests**; four provider-dependent live tests — three against Open-Meteo, one
-against GitHub's release redirect — are ignored during normal runs.
+tests**; four provider-dependent live tests — two against Open-Meteo, one
+against ipapi.co, one against GitHub's release redirect — are ignored during
+normal runs.
 Coverage includes:
 
 - deterministic rendering checks built with Ratatui's `TestBackend`, including

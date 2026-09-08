@@ -23,9 +23,9 @@ body:
       description: >
         How you imagine it working. Virga is deliberately light on
         configuration — the command line takes no options, and outside the
-        app there is only a persisted startup theme and four environment
-        variables — so a proposal that works without adding a knob has a
-        head start.
+        app there is only a persisted startup theme and a handful of
+        environment variables — so a proposal that works without adding a
+        knob has a head start.
     validations:
       required: true
 
