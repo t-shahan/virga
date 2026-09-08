@@ -4,3 +4,5 @@
 # vhs writes the README demo here; the tape is committed, the render is not.
 /demo.mp4
 /demo.gif
+# Claude Code writes per-user permission grants here; they are not project config.
+/.claude/settings.local.json
