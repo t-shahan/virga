@@ -12,6 +12,14 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- Choosing a city while the launch is still working out where you are no
+  longer risks losing the choice. A detection that answered after the pick
+  could chain its own fetch over the chosen one, so the guess was what got
+  saved and the city you asked for was thrown away as stale. The pick now
+  abandons the detection outright (#75).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed

@@ -704,6 +704,15 @@ impl App {
     /// forecast showing would be a lie under the new name.
     fn fetch(&mut self, location: ActiveLocation, source: LocationSource) -> Request {
         let id = self.next_id();
+        // A choice outranks a detection still in flight, so the detection is
+        // abandoned here, not merely outvoted later. Left pending, its answer
+        // would chain a fetch that replaces this one, and the chosen city's
+        // load would be thrown away as stale while the guess got saved.
+        // Nothing in the message order prevents that: the two are answered
+        // by different threads.
+        if source == LocationSource::Chosen {
+            self.pending_detect = None;
+        }
         let showing_it =
             matches!(self.weather, Fetch::Ready(_)) && self.location.same_place(&location);
         self.pending = Some(Pending {
@@ -1788,6 +1797,78 @@ mod tests {
         }]);
         let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
 
+        assert_eq!(
+            deliver(&mut app, picked, Weather::fixture(5, 2)),
+            Some(Remembered {
+                location: berlin(),
+                source: LocationSource::Chosen,
+            })
+        );
+    }
+
+    /// The race the serial worker used to hide: a detection that answers
+    /// after the user has already picked a city. Its fetch must not replace
+    /// the chosen one, and the choice is what gets saved.
+    #[test]
+    fn a_detection_answered_after_a_choice_is_ignored() {
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+
+        app.on_action(Action::OpenSearch);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52437,
+            lon: 13.41053,
+        }]);
+        let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
+        assert!(!app.is_locating(), "a choice abandons the detection");
+
+        let late = app.on_message(Message::Detected {
+            id,
+            location: reykjavik(),
+        });
+        assert!(
+            late.request.is_none(),
+            "a detection answered after a choice chained a fetch"
+        );
+
+        assert_eq!(
+            deliver(&mut app, picked, Weather::fixture(5, 2)),
+            Some(Remembered {
+                location: berlin(),
+                source: LocationSource::Chosen,
+            })
+        );
+        assert_eq!(app.location, berlin());
+    }
+
+    /// The failing half of the same race: a detection that gives up after
+    /// the choice must not fetch the fallback over the chosen city.
+    #[test]
+    fn a_detection_failing_after_a_choice_is_ignored() {
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+        let picked = app.fetch(berlin(), LocationSource::Chosen);
+
+        let late = app.on_message(Message::DetectFailed {
+            id,
+            error: "no route to host".to_string(),
+        });
+
+        assert!(
+            late.request.is_none(),
+            "the fallback fetch replaced the choice"
+        );
+        assert!(
+            late.warning.is_none(),
+            "nothing went wrong that the user can see"
+        );
         assert_eq!(
             deliver(&mut app, picked, Weather::fixture(5, 2)),
             Some(Remembered {
