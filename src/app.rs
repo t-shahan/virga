@@ -206,6 +206,13 @@ impl Outcome {
     }
 }
 
+/// The warning for a forecast that arrived without its air quality, in one
+/// place because the TUI prints it on the way out and `virga now` prints it
+/// to stderr, and two copies of the sentence would drift apart.
+pub fn air_quality_warning(error: &str) -> String {
+    format!("virga: the forecast loaded without air quality: {error}")
+}
+
 /// The weather request in flight: which one it is, the place it is for, and
 /// where that place came from. Refresh and retry aim at the place, so a failed
 /// switch retries the city you asked for rather than the one still on screen —
@@ -494,9 +501,7 @@ impl App {
                 self.shown = Shown::default();
                 Outcome {
                     remember: self.remembered(),
-                    warning: air_quality_error.map(|error| {
-                        format!("virga: the forecast loaded without air quality: {error}")
-                    }),
+                    warning: air_quality_error.as_deref().map(air_quality_warning),
                     ..Outcome::nothing()
                 }
             }

@@ -121,7 +121,7 @@ fn main() -> Result<()> {
                     // Stderr, so a status bar parsing stdout still gets its
                     // report and a human still learns why the AQI is missing.
                     if let Some(error) = air_quality_error {
-                        eprintln!("virga: the forecast loaded without air quality: {error}");
+                        eprintln!("{}", app::air_quality_warning(&error));
                     }
                     // The app's rule, kept here too: a detection is written
                     // down only once weather has actually loaded for it. And

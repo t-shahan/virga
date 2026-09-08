@@ -90,15 +90,28 @@ pub fn detect_location() -> Result<Location> {
     detect_location_with(geoip_agent(), &Endpoints::default())
 }
 
+/// The context every request carries, one for the call and one for reading
+/// its body. Noun phrases naming the service and its host, never verbs: each
+/// place they are printed already opens with one (`could not fetch the
+/// weather:`, `could not work out where you are:`), and `fetch the forecast
+/// from ...` under `could not fetch` read the same thing twice.
+fn service_at(service: &str, url: &str) -> String {
+    format!("the {service} at {url}")
+}
+
+fn reply_from(service: &str, url: &str) -> String {
+    format!("the reply from the {service} at {url}")
+}
+
 fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location> {
     let mut response = agent
         .get(&endpoints.geoip)
         .call()
-        .with_context(|| format!("ask {} where you are", endpoints.geoip))?;
+        .with_context(|| service_at("location service", &endpoints.geoip))?;
     let dto: GeoIpDto = response
         .body_mut()
         .read_json()
-        .with_context(|| format!("read the location from {}", endpoints.geoip))?;
+        .with_context(|| reply_from("location service", &endpoints.geoip))?;
 
     dto.into_location()
         .context("the location service did not name a place")
@@ -136,9 +149,13 @@ fn fetch_forecast_with(
         let (report, air_quality_error) = match aqi.join() {
             Ok(Ok(report)) => (report, None),
             Ok(Err(error)) => (AirQualityReport::default(), Some(format!("{error:#}"))),
-            // A panic in the child is a bug rather than a network condition,
-            // but the forecast still arrived and re-raising it here would take
-            // the terminal down with it. Degrade, and say why.
+            // A panic in the child is a bug rather than a network condition.
+            // Re-raising it would not take the terminal down: ratatui's panic
+            // hook has already restored it and printed the payload by the
+            // time `join` returns `Err`. It would kill the worker thread,
+            // after which no request is ever answered and the app sits on
+            // "fetching" with no way back. Degrade, and say why; the payload
+            // is not repeated because the hook has already printed it.
             Err(_) => (
                 AirQualityReport::default(),
                 Some("the air-quality request panicked".to_string()),
@@ -179,12 +196,12 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
         .query("forecast_days", "8")
         .query("past_days", "14")
         .call()
-        .with_context(|| format!("fetch the forecast from {}", endpoints.forecast))?;
+        .with_context(|| service_at("forecast service", &endpoints.forecast))?;
 
     let dto: ForecastDto = response
         .body_mut()
         .read_json()
-        .with_context(|| format!("read the forecast from {}", endpoints.forecast))?;
+        .with_context(|| reply_from("forecast service", &endpoints.forecast))?;
     Ok(dto.into())
 }
 
@@ -204,12 +221,12 @@ fn search_locations_with(
         .query("language", "en")
         .query("format", "json")
         .call()
-        .with_context(|| format!("search for cities at {}", endpoints.geocode))?;
+        .with_context(|| service_at("geocoder", &endpoints.geocode))?;
 
     let dto: GeocodeDto = response
         .body_mut()
         .read_json()
-        .with_context(|| format!("read the city list from {}", endpoints.geocode))?;
+        .with_context(|| reply_from("geocoder", &endpoints.geocode))?;
 
     Ok(dto
         .results
@@ -241,12 +258,12 @@ fn fetch_air_quality_with(
         .query("forecast_days", "7")
         .query("domains", "cams_global")
         .call()
-        .with_context(|| format!("fetch air quality from {}", endpoints.air_quality))?;
+        .with_context(|| service_at("air-quality service", &endpoints.air_quality))?;
 
     let dto: AqiDto = response
         .body_mut()
         .read_json()
-        .with_context(|| format!("read the air quality from {}", endpoints.air_quality))?;
+        .with_context(|| reply_from("air-quality service", &endpoints.air_quality))?;
 
     Ok(dto.into())
 }
