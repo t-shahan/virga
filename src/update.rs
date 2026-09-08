@@ -19,8 +19,8 @@ pub(crate) const RELEASES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/re
 
 /// A user asked and is waiting at a prompt, so the budget is the tight one:
 /// the detection budget, not the forecast's fifteen seconds.
-const TIMEOUT_GLOBAL: Duration = Duration::from_secs(5);
-const TIMEOUT_CONNECT: Duration = Duration::from_secs(3);
+const PROBE_TIMEOUT_GLOBAL: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT_CONNECT: Duration = Duration::from_secs(3);
 
 /// Redirects off is the whole request: the `Location` header of the redirect
 /// *is* the answer, and following it would download a release page nobody
@@ -28,8 +28,8 @@ const TIMEOUT_CONNECT: Duration = Duration::from_secs(3);
 fn probe_agent() -> Agent {
     Agent::new_with_config(
         Agent::config_builder()
-            .timeout_global(Some(TIMEOUT_GLOBAL))
-            .timeout_connect(Some(TIMEOUT_CONNECT))
+            .timeout_global(Some(PROBE_TIMEOUT_GLOBAL))
+            .timeout_connect(Some(PROBE_TIMEOUT_CONNECT))
             .max_redirects(0)
             .build(),
     )
@@ -370,9 +370,9 @@ mod tests {
         let agent = probe_agent();
         let config = agent.config();
 
-        assert_eq!(config.timeouts().global, Some(TIMEOUT_GLOBAL));
-        assert_eq!(config.timeouts().connect, Some(TIMEOUT_CONNECT));
-        assert!(TIMEOUT_CONNECT < TIMEOUT_GLOBAL);
+        assert_eq!(config.timeouts().global, Some(PROBE_TIMEOUT_GLOBAL));
+        assert_eq!(config.timeouts().connect, Some(PROBE_TIMEOUT_CONNECT));
+        assert!(PROBE_TIMEOUT_CONNECT < PROBE_TIMEOUT_GLOBAL);
         assert_eq!(config.max_redirects(), 0, "the redirect is the answer");
     }
 
