@@ -1,12 +1,21 @@
 use crate::theme::Palette;
 use crate::ui::bars::{Columns, GAP};
+use crate::ui::pane::framed;
 use crate::units::Unit;
 use crate::weather::model::{DailyForecast, Weather};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Bar, BarChart, BarGroup, Block};
+use ratatui::widgets::{Bar, BarChart, BarGroup};
+
+const TITLE: &str = "Daily Highs";
+
+/// The pane on a cache miss: its border and heading, without the range the
+/// heading carries once there are highs to take it from.
+pub(super) fn chart_skeleton_render(frame: &mut Frame, palette: Palette, area: Rect) {
+    frame.render_widget(framed(TITLE, palette), area);
+}
 
 /// The chart covers past days as well as the forecast, so it gets its own box
 /// with the range in the title — that also saves the caption its own row.
@@ -18,11 +27,7 @@ pub(super) fn chart_area_render(
     unit: Unit,
     selected: usize,
 ) {
-    let block = Block::bordered()
-        .border_style(Style::new().fg(palette.border))
-        // Styled rather than left to the block: a title takes the block's own
-        // style, not the border's, so unstyled it ignores the theme entirely.
-        .title(Line::from(title(&weather.daily, unit)).fg(palette.muted));
+    let block = framed(&title(&weather.daily, unit), palette);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -127,12 +132,12 @@ fn high_range(days: &[DailyForecast]) -> Option<(f64, f64)> {
 fn title(days: &[DailyForecast], unit: Unit) -> String {
     match high_range(days) {
         Some((coolest, warmest)) => format!(
-            "Daily Highs · {:.0}–{:.0}{}",
+            "{TITLE} · {:.0}–{:.0}{}",
             unit.temp_rounded(coolest),
             unit.temp_rounded(warmest),
             unit.temp_symbol(),
         ),
-        None => "Daily Highs".to_string(),
+        None => TITLE.to_string(),
     }
 }
 
