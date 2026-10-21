@@ -189,7 +189,7 @@ mod tests {
         );
         assert!(rows[0].contains("Today"), "{:?}", rows[0]);
         assert!(
-            rows[3].contains('▸'),
+            rows[3].contains('>'),
             "the selection is on the fourth date but no row is marked:\n{text}"
         );
     }

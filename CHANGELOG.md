@@ -118,6 +118,15 @@ refuse to publish a version this file does not describe.
   a terminal too short to give it a row, so on a short terminal the news
   was gone before it was ever drawn and never printed on the way out either
   (#75).
+- The hourly weathergram marks the current hour by shape. Only the colour of
+  hour 0's column and of the axis label said which hour was now, and the
+  label is drawn on every page, so a monochrome terminal or a colour-blind
+  reading of the default palette could not tell the current hour from its
+  neighbours. A `┬` now hangs under it on the marker row, the same glyph the
+  classic chart uses, and the `▲` selection marker takes the cell while the
+  selection is on that hour. The week strip's selected-day marker is now the
+  same `>` the forecast table and the search screen use, rather than `▸`
+  (#79).
 
 ### Security
 
