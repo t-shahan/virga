@@ -11,6 +11,15 @@ use crate::app::{ActiveLocation, Remembered};
 use crate::units::Unit;
 use crate::weather::code;
 use crate::weather::model::Weather;
+use chrono::{DateTime, TimeDelta, Utc};
+
+/// How long a detection that went unanswered keeps the next report from
+/// asking again. The failure this is for is a 429: a client the provider
+/// has rate-limited stays rate-limited, and a status bar polling by the
+/// minute would otherwise knock on that door sixty times an hour for nothing
+/// (#65). Short, because the only thing the wait costs is the fallback city
+/// on a first run whose detection hit a passing outage.
+pub(crate) const DETECTION_BACKOFF: TimeDelta = TimeDelta::minutes(15);
 
 /// Where the report should ask about, given what the state file remembered
 /// and whether the IP lookup is allowed.
@@ -21,7 +30,9 @@ use crate::weather::model::Weather;
 /// the location provider's whole daily allowance before dinner, and
 /// yesterday's city is a fine answer to a question this casual. Detection
 /// runs only when nothing is remembered at all — and the caller remembers
-/// what it finds, so it runs once, not once per poll.
+/// what it finds, so it runs once, not once per poll. A detection that found
+/// nothing is remembered too, for `DETECTION_BACKOFF`, so that a provider
+/// that has stopped answering is not asked again by the very next poll.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Ask {
     /// Fetch for this place directly.
@@ -32,14 +43,29 @@ pub(crate) enum Ask {
     Detect { fallback: ActiveLocation },
 }
 
-pub(crate) fn where_to_ask(remembered: Option<Remembered>, detect: bool) -> Ask {
+pub(crate) fn where_to_ask(
+    remembered: Option<Remembered>,
+    detect: bool,
+    last_failure: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Ask {
     match remembered {
         Some(Remembered { location, .. }) => Ask::Location(location),
-        None if detect => Ask::Detect {
+        None if detect && !recently_failed(last_failure, now) => Ask::Detect {
             fallback: ActiveLocation::default(),
         },
         None => Ask::Location(ActiveLocation::default()),
     }
+}
+
+/// Whether a failed detection is still fresh enough to stand in for a new
+/// one. A marker from the future is a clock that moved, not a recent
+/// failure, and is not trusted — the forecast cache's rule for its own age.
+fn recently_failed(last_failure: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    last_failure.is_some_and(|failed| {
+        let age = now - failed;
+        age >= TimeDelta::zero() && age < DETECTION_BACKOFF
+    })
 }
 
 /// The report: the place and its sky, the conditions this hour, and today's
@@ -154,10 +180,14 @@ mod tests {
         }
     }
 
+    fn at(seconds: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(seconds, 0).expect("a representable instant")
+    }
+
     #[test]
     fn a_remembered_choice_is_asked_about_directly() {
         assert_eq!(
-            where_to_ask(Some(remembered(LocationSource::Chosen)), true),
+            where_to_ask(Some(remembered(LocationSource::Chosen)), true, None, at(0)),
             Ask::Location(berlin())
         );
     }
@@ -168,7 +198,12 @@ mod tests {
     #[test]
     fn a_remembered_detection_is_not_re_detected() {
         assert_eq!(
-            where_to_ask(Some(remembered(LocationSource::Detected)), true),
+            where_to_ask(
+                Some(remembered(LocationSource::Detected)),
+                true,
+                None,
+                at(0)
+            ),
             Ask::Location(berlin())
         );
     }
@@ -176,7 +211,7 @@ mod tests {
     #[test]
     fn nothing_remembered_detects_with_the_builtin_fallback() {
         assert_eq!(
-            where_to_ask(None, true),
+            where_to_ask(None, true, None, at(0)),
             Ask::Detect {
                 fallback: ActiveLocation::default()
             }
@@ -186,7 +221,60 @@ mod tests {
     #[test]
     fn opting_out_of_detection_asks_about_the_fallback_directly() {
         assert_eq!(
-            where_to_ask(None, false),
+            where_to_ask(None, false, None, at(0)),
+            Ask::Location(ActiveLocation::default())
+        );
+    }
+
+    /// A detection that just went unanswered is not asked again by the next
+    /// poll; the fallback stands in until the backoff has passed.
+    #[test]
+    fn a_fresh_failure_holds_detection_off() {
+        let failed = at(1_800_000_000);
+        let still_fresh = failed + DETECTION_BACKOFF - TimeDelta::seconds(1);
+
+        assert_eq!(
+            where_to_ask(None, true, Some(failed), still_fresh),
+            Ask::Location(ActiveLocation::default())
+        );
+        assert_eq!(
+            where_to_ask(None, true, Some(failed), failed + DETECTION_BACKOFF),
+            Ask::Detect {
+                fallback: ActiveLocation::default()
+            }
+        );
+    }
+
+    /// A marker dated after now is a clock that moved, not a recent failure.
+    #[test]
+    fn a_failure_from_the_future_is_not_trusted() {
+        let now = at(1_800_000_000);
+
+        assert_eq!(
+            where_to_ask(None, true, Some(now + TimeDelta::seconds(1)), now),
+            Ask::Detect {
+                fallback: ActiveLocation::default()
+            }
+        );
+    }
+
+    /// The marker only ever stands in for a detection. With one opted out of
+    /// or a place remembered, it changes nothing.
+    #[test]
+    fn a_failure_is_moot_when_detection_would_not_run_anyway() {
+        let now = at(1_800_000_000);
+
+        assert_eq!(
+            where_to_ask(
+                Some(remembered(LocationSource::Detected)),
+                true,
+                Some(now),
+                now
+            ),
+            Ask::Location(berlin())
+        );
+        assert_eq!(
+            where_to_ask(None, false, Some(now), now),
             Ask::Location(ActiveLocation::default())
         );
     }
