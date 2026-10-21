@@ -244,8 +244,9 @@ fn fetch_air_quality_with(
 /// because ureq's limit reader sits *under* its gzip decoder: `limit()` counts
 /// bytes off the wire, ureq inflates whatever the response's `Content-Encoding`
 /// says regardless of what was requested, and a few kilobytes of gzip inflate
-/// to gigabytes. `take` counts the decoded bytes, with one of slack so a body
-/// of exactly the limit is told apart from one that ran past it. Buffered and
+/// to gigabytes. `take` counts the decoded bytes, with one of slack so a
+/// decoded body of exactly the limit is told apart from one that ran past it.
+/// Buffered and
 /// then parsed, rather than streamed into `from_reader`, so that the check
 /// happens before a padded `String` field is allocated; serde_json documents
 /// the buffered path as the faster one anyway.
