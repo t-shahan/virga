@@ -14,6 +14,25 @@ refuse to publish a version this file does not describe.
 
 ### Fixed
 
+- The install script no longer hangs on a stalled connection. Every
+  `curl` now carries a connect and overall timeout and is pinned to
+  https, including across redirects (#69).
+- The install script says which of three things went wrong when a
+  download fails. A tag that does not exist, a tag that predates prebuilt
+  binaries, and a release with no build for the current platform each get
+  their own message; all three used to read "No such archive". A tag is
+  only reported missing when GitHub answers 404 for it; a rate limit or
+  an unreachable github.com is reported as that (#69).
+- A `gh attestation verify` that could not reach GitHub, for a rate limit
+  or an unreachable API, is reported by the install script as not
+  verified, with gh's own error and the command to run by hand. It used to
+  be called a failed attestation and stop the install. Every other
+  failure still stops it, with gh's error now shown: no attestation, a
+  signature or policy check that failed, and any message the script does
+  not recognise (#69).
+- Ctrl-C or a kill during the install now exits through the cleanup trap
+  rather than returning into the step it interrupted, so an interrupted
+  copy cannot be followed by the rename that puts it on `PATH` (#69).
 - A `kill`, or a terminal that delivers Ctrl-C as a signal rather than a
   key, no longer leaves the tty in raw mode on the alternate screen.
   SIGTERM and SIGINT ended the process before anything could restore the
@@ -22,6 +41,20 @@ refuse to publish a version this file does not describe.
   sees what it always did. Ctrl-C in the app is unchanged, and on Windows,
   where crossterm already reports Ctrl-C and Ctrl-Break as keys, nothing is
   hooked (#85).
+
+### Security
+
+- The weather and location clients refuse to speak plain HTTP, follow at
+  most two redirects, and cap every response body at 1 MiB before parsing
+  it, whether or not the body arrived compressed. Neither provider
+  redirects, so nothing changes on a healthy network; what changes is that
+  a redirect from either host to an `http://` URL is now an error rather
+  than the user's coordinates re-sent in the clear (#72).
+- Virga builds against rustls 0.23.46 and webpki-roots 1.0.10. The first
+  clears four rustls advisories (RUSTSEC-2026-0285, RUSTSEC-2026-0346,
+  RUSTSEC-2026-0348, RUSTSEC-2026-0349); the second stops the bundled root
+  store from trusting emSign intermediates that have since been distrusted
+  (RUSTSEC-2026-0381).
 
 ## [0.6.1] - 2026-09-07
 

@@ -219,6 +219,60 @@ fn at_owned(values: &[Option<String>], i: usize) -> Option<String> {
     values.get(i)?.clone()
 }
 
+/// Seven parallel arrays would make a zip chain unreadable — the pattern
+/// becomes ((((((a, b), c), d), e), f), g) — so index instead. Costs a
+/// clone per date string, which is nothing against the legibility.
+///
+/// `?` on the core four drops a day that is missing them; the
+/// supplementary readings stay Option, so a null UV only blanks a cell.
+fn daily_from(day: &DailyDto) -> Vec<DailyForecast> {
+    (0..day.time.len().min(MAX_DAYS))
+        .filter_map(|i| {
+            Some(DailyForecast {
+                date: day.time.get(i)?.clone(),
+                high_c: at(&day.temperature_2m_max, i)?,
+                low_c: at(&day.temperature_2m_min, i)?,
+                code: at(&day.weather_code, i)?,
+                rain_chance: at(&day.precipitation_probability_max, i),
+                wind_kph: at(&day.wind_speed_10m_max, i),
+                uv_index: at(&day.uv_index_max, i),
+                aqi: None,
+                sunrise: at_owned(&day.sunrise, i),
+                sunset: at_owned(&day.sunset, i),
+                feels_max_c: at(&day.apparent_temperature_max, i),
+                feels_min_c: at(&day.apparent_temperature_min, i),
+                precip_mm: at(&day.precipitation_sum, i),
+                precip_hours: at(&day.precipitation_hours, i),
+                gust_kph: at(&day.wind_gusts_10m_max, i),
+                wind_dir_deg: at(&day.wind_direction_10m_dominant, i),
+                daylight_secs: at(&day.daylight_duration, i),
+            })
+        })
+        .collect()
+}
+
+/// Same index-by-position shape as `daily_from`, for the same reason: many
+/// parallel arrays make a zip chain unreadable.
+fn hourly_from(hour: &HourlyDto) -> Vec<HourlyForecast> {
+    (0..hour.time.len().min(MAX_HOURS))
+        .filter_map(|i| {
+            Some(HourlyForecast {
+                time: hour.time.get(i)?.clone(),
+                precip_mm: at(&hour.precipitation, i),
+                snow_cm: at(&hour.snowfall, i),
+                chance: at(&hour.precipitation_probability, i),
+                code: at(&hour.weather_code, i),
+                temp_c: at(&hour.temperature_2m, i),
+                feels_like_c: at(&hour.apparent_temperature, i),
+                humidity_pct: at(&hour.relative_humidity_2m, i),
+                wind_kph: at(&hour.wind_speed_10m, i),
+                gust_kph: at(&hour.wind_gusts_10m, i),
+                wind_dir_deg: at(&hour.wind_direction_10m, i),
+            })
+        })
+        .collect()
+}
+
 impl From<ForecastDto> for Weather {
     fn from(dto: ForecastDto) -> Self {
         // `current.time` is local to the forecast location, so it identifies
@@ -233,64 +287,11 @@ impl From<ForecastDto> for Weather {
             .clone()
             .unwrap_or_else(|| Local::now().format("%Y-%m-%dT%H:%M").to_string());
 
-        // Seven parallel arrays would make a zip chain unreadable — the pattern
-        // becomes ((((((a, b), c), d), e), f), g) — so index instead. Costs a
-        // clone per date string, which is nothing against the legibility.
-        //
-        // `?` on the core four drops a day that is missing them; the
-        // supplementary readings stay Option, so a null UV only blanks a cell.
-        let day = &dto.daily;
-        let daily: Vec<DailyForecast> = (0..day.time.len().min(MAX_DAYS))
-            .filter_map(|i| {
-                Some(DailyForecast {
-                    date: day.time.get(i)?.clone(),
-                    high_c: at(&day.temperature_2m_max, i)?,
-                    low_c: at(&day.temperature_2m_min, i)?,
-                    code: at(&day.weather_code, i)?,
-                    rain_chance: at(&day.precipitation_probability_max, i),
-                    wind_kph: at(&day.wind_speed_10m_max, i),
-                    uv_index: at(&day.uv_index_max, i),
-                    aqi: None,
-                    sunrise: at_owned(&day.sunrise, i),
-                    sunset: at_owned(&day.sunset, i),
-                    feels_max_c: at(&day.apparent_temperature_max, i),
-                    feels_min_c: at(&day.apparent_temperature_min, i),
-                    precip_mm: at(&day.precipitation_sum, i),
-                    precip_hours: at(&day.precipitation_hours, i),
-                    gust_kph: at(&day.wind_gusts_10m_max, i),
-                    wind_dir_deg: at(&day.wind_direction_10m_dominant, i),
-                    daylight_secs: at(&day.daylight_duration, i),
-                })
-            })
-            .collect();
-
-        // Same index-by-position shape as `daily`, for the same reason: many
-        // parallel arrays make a zip chain unreadable.
-        let hourly: Vec<HourlyForecast> = dto.hourly.map_or_else(Vec::new, |hour| {
-            (0..hour.time.len().min(MAX_HOURS))
-                .filter_map(|i| {
-                    Some(HourlyForecast {
-                        time: hour.time.get(i)?.clone(),
-                        precip_mm: at(&hour.precipitation, i),
-                        snow_cm: at(&hour.snowfall, i),
-                        chance: at(&hour.precipitation_probability, i),
-                        code: at(&hour.weather_code, i),
-                        temp_c: at(&hour.temperature_2m, i),
-                        feels_like_c: at(&hour.apparent_temperature, i),
-                        humidity_pct: at(&hour.relative_humidity_2m, i),
-                        wind_kph: at(&hour.wind_speed_10m, i),
-                        gust_kph: at(&hour.wind_gusts_10m, i),
-                        wind_dir_deg: at(&hour.wind_direction_10m, i),
-                    })
-                })
-                .collect()
-        });
-
         // Positioned after filtering, so a dropped row cannot shift either
         // index. `position_of` owns the matching, and the cache's relocation
         // reuses it.
         let mut weather = Self {
-            hourly,
+            hourly: dto.hourly.as_ref().map_or_else(Vec::new, hourly_from),
             now_hour: 0,
             current: Current {
                 temp_c: dto.current.temperature_2m,
@@ -298,7 +299,7 @@ impl From<ForecastDto> for Weather {
                 code: dto.current.weather_code,
                 wind_kph: dto.current.wind_speed_10m,
             },
-            daily,
+            daily: daily_from(&dto.daily),
             today_index: 0,
             utc_offset_secs: dto.utc_offset_seconds,
             air_quality: None,
@@ -359,6 +360,7 @@ pub struct AqiCurrentDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weather::client::{DAILY_FIELDS, HOURLY_FIELDS};
 
     /// Real icon_seamless response; its final day has a null temperature_2m_max.
     /// Before daily measurements were Option, this failed to deserialize at all
@@ -810,5 +812,96 @@ mod tests {
         let json = include_str!("../../tests/fixtures/geocode_empty.json");
         let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
         assert!(dto.results.is_empty());
+    }
+
+    /// A name the request asks for that no struct field reads would come back
+    /// as an empty series with no error, from either side of a rename. Serde
+    /// only complains about a field it looked for, so the check is by
+    /// contradiction: a wrong-typed value under the name must fail to parse.
+    fn each_field_is_read_by<T: serde::de::DeserializeOwned>(
+        fields: &str,
+        base: serde_json::Value,
+    ) {
+        for field in fields.split(',') {
+            let mut json = base.clone();
+            json[field] = serde_json::json!("not an array");
+            assert!(
+                serde_json::from_value::<T>(json).is_err(),
+                "{field} is requested but no struct field reads it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_requested_daily_field_is_read_by_the_dto() {
+        each_field_is_read_by::<DailyDto>(
+            DAILY_FIELDS,
+            serde_json::json!({
+                "time": ["2026-08-09"], "weather_code": [0],
+                "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]
+            }),
+        );
+    }
+
+    #[test]
+    fn every_requested_hourly_field_is_read_by_the_dto() {
+        each_field_is_read_by::<HourlyDto>(
+            HOURLY_FIELDS,
+            serde_json::json!({"time": ["2026-08-09T00:00"]}),
+        );
+    }
+
+    /// The other direction: a reading the model carries has to be fed by a
+    /// field the request names, or it is a column that can never fill. Every
+    /// requested field is given a value, and every reading must then be there.
+    #[test]
+    fn every_daily_reading_is_fed_by_a_requested_field() {
+        let mut daily = serde_json::json!({"time": ["2026-08-09"]});
+        for field in DAILY_FIELDS.split(',') {
+            daily[field] = match field {
+                "sunrise" | "sunset" => serde_json::json!(["2026-08-09T06:00"]),
+                _ => serde_json::json!([1]),
+            };
+        }
+        let json = serde_json::json!({"current": {}, "daily": daily});
+
+        let weather: Weather = serde_json::from_value::<ForecastDto>(json)
+            .expect("should parse")
+            .into();
+        let day = &weather.daily[0];
+
+        assert!(day.rain_chance.is_some());
+        assert!(day.wind_kph.is_some());
+        assert!(day.uv_index.is_some());
+        assert!(day.sunrise.is_some());
+        assert!(day.sunset.is_some());
+        assert!(day.feels_max_c.is_some());
+        assert!(day.feels_min_c.is_some());
+        assert!(day.precip_mm.is_some());
+        assert!(day.precip_hours.is_some());
+        assert!(day.gust_kph.is_some());
+        assert!(day.wind_dir_deg.is_some());
+        assert!(day.daylight_secs.is_some());
+    }
+
+    #[test]
+    fn every_hourly_reading_is_fed_by_a_requested_field() {
+        let mut hourly = serde_json::json!({"time": ["2026-08-09T00:00"]});
+        for field in HOURLY_FIELDS.split(',') {
+            hourly[field] = serde_json::json!([1]);
+        }
+        let weather = with_hourly(&hourly.to_string());
+        let hour = &weather.hourly[0];
+
+        assert!(hour.precip_mm.is_some());
+        assert!(hour.snow_cm.is_some());
+        assert!(hour.chance.is_some());
+        assert!(hour.code.is_some());
+        assert!(hour.temp_c.is_some());
+        assert!(hour.feels_like_c.is_some());
+        assert!(hour.humidity_pct.is_some());
+        assert!(hour.wind_kph.is_some());
+        assert!(hour.gust_kph.is_some());
+        assert!(hour.wind_dir_deg.is_some());
     }
 }
