@@ -28,15 +28,22 @@ eval "$extracted"
 # shellcheck disable=SC2034
 INSTALL_DIR="/opt/my bin"
 
+# `uname -s` is the one fact about the host that path_advice reads, so every
+# check names the kernel it assumes and gets a stub that says so. Trusting the
+# real one made the Linux expectation for bash fail on a Mac, where the same
+# arm rightly points at ~/.bash_profile.
 stub=$(mktemp -d)
 trap 'rm -rf "$stub"' EXIT
-printf '#!/bin/sh\necho Darwin\n' > "$stub/uname"
-chmod +x "$stub/uname"
+for kernel in Linux Darwin; do
+    mkdir "$stub/$kernel"
+    printf '#!/bin/sh\necho %s\n' "$kernel" > "$stub/$kernel/uname"
+    chmod +x "$stub/$kernel/uname"
+done
 
 check() {
-    got=$(SHELL="$1" path_advice)
-    if [ "$got" != "    $2" ]; then
-        printf 'SHELL=%s\n  want: %s\n  got:  %s\n' "$1" "$2" "$got" >&2
+    got=$(PATH="$stub/$1:$PATH" SHELL="$2" path_advice)
+    if [ "$got" != "    $3" ]; then
+        printf '%s, SHELL=%s\n  want: %s\n  got:  %s\n' "$1" "$2" "$3" "$got" >&2
         exit 1
     fi
 }
@@ -45,12 +52,12 @@ check() {
 # user's rc file unexpanded. One group, so one directive covers them all.
 # shellcheck disable=SC2016
 {
-    check /usr/bin/fish 'fish_add_path "/opt/my bin"'
-    check /bin/zsh      "echo 'export PATH=\"/opt/my bin:\$PATH\"' >> ~/.zshrc"
-    check /bin/bash     "echo 'export PATH=\"/opt/my bin:\$PATH\"' >> ~/.bashrc"
-    check /usr/bin/nu   'export PATH="/opt/my bin:$PATH"'
-    check ''            'export PATH="/opt/my bin:$PATH"'
-    PATH="$stub:$PATH" check /bin/bash "echo 'export PATH=\"/opt/my bin:\$PATH\"' >> ~/.bash_profile"
+    check Linux  /usr/bin/fish 'fish_add_path "/opt/my bin"'
+    check Linux  /bin/zsh      "echo 'export PATH=\"/opt/my bin:\$PATH\"' >> ~/.zshrc"
+    check Linux  /bin/bash     "echo 'export PATH=\"/opt/my bin:\$PATH\"' >> ~/.bashrc"
+    check Darwin /bin/bash     "echo 'export PATH=\"/opt/my bin:\$PATH\"' >> ~/.bash_profile"
+    check Linux  /usr/bin/nu   'export PATH="/opt/my bin:$PATH"'
+    check Linux  ''            'export PATH="/opt/my bin:$PATH"'
 }
 
 echo "path advice: ok"
