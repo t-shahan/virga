@@ -12,10 +12,178 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.6.2]
+## [0.7.0]
+
+Most of this release is `virga now` and the edges of the app. The one-shot
+report now suits a status bar polling by the minute. It answers from the
+app's last forecast while that is under an hour old, and after a failed
+location lookup it waits a quarter of an hour before asking again. The
+city search lists results by population and tells identical names apart.
+A launch with nothing cached opens on its panes instead of a spinner in an
+empty terminal. Underneath, a failed request names the host behind it, the
+clients refuse plain HTTP and cap what they read, a `kill` restores the
+terminal, and the install script no longer hangs on a stalled connection.
+`virga update` now exits 3 when a newer release exists, which a script
+that treated every non-zero status as a failure will notice.
+
+### Added
+
+- A cleared update notice stays cleared. The keypress that dismisses the
+  startup notice now also writes the release it named into the state file,
+  and later launches announce only a release newer than that one. Quitting
+  with the notice still standing does not count: it is printed on the way
+  out, as before, and comes back next time. The dismissal is written beside
+  a remembered city, theme, or key bar style and never on its own — a state
+  file holding nothing else is one older Virga builds refuse to read — so a
+  notice cleared before any of those exist comes back on each launch until
+  one does.
+  `VIRGA_UPDATE=off` still skips the check entirely, and `virga update`
+  always answers (#109).
+- **The city search tells identical rows apart, biggest first.** Results
+  now come in order of population, so the city most people mean sits under
+  the cursor and is the one `virga now CITY` answers for; the geocoder's
+  own order put a town of 3,700 above one of 11,000. Two rows that would
+  read the same — one name, one region, one country — get a second line
+  naming the timezone, or the coordinates where the zone is shared or
+  unknown, and rows that never needed one are left alone. A row the
+  geocoder sends without a country name shows its country code instead of
+  nothing. `virga now` for a city whose clocks disagree with the machine's
+  says what time it is there, on the first line: `Tokyo, Japan · Clear sky
+  · local time 21:30 (UTC+09:00)`. The timezone and population ride the
+  search response the app already fetches, so none of this costs a request
+  (#88).
+
+### Changed
+
+- `virga update` exits 3 when a newer release exists, so a shell prompt or
+  a cron job can act on the answer without reading it. It used to exit 0
+  whether or not there was anything to do, on the reasoning that the
+  command had answered. 0 now means there is no newer release, 1 still
+  means the check could not be made, and 2 is still a usage error; the
+  text on stdout is unchanged. A script that treated every non-zero
+  status as a failed check has to tell 1 from 3 now. The table is in
+  `--help` (#110).
+- `virga now` answers from the app's last forecast when it describes the
+  remembered city and is under an hour old, moved to the current hour the
+  way a launch moves it, instead of fetching on every call, so a status
+  bar polling by the minute in the hour after a launch is answered from
+  disk. The bound is an hour rather than the app's day because the report
+  has no "as of" mark to say how old its reading is. A named city still
+  fetches, and `VIRGA_CACHE=off` turns the read off along with the rest of
+  the cache (#111).
+- A launch with no forecast to show — the first run, a new city, a cache
+  older than a day, or `VIRGA_CACHE=off` — opens on the panes rather than
+  on a spinner in an empty terminal. The city in its corner, the `Forecast`
+  and `Daily Highs` headings and the key bar are drawn at once, with the
+  spinner inside the forecast pane, so the readings fill boxes that are
+  already on screen instead of the whole layout appearing when they land.
+  The corner names the city whose forecast is on its way, not the one just
+  left, and `p` waits for the forecast to land rather than opening the
+  hourly screen onto a spinner (#112).
+
+### Fixed
+
+- The install script no longer hangs on a stalled connection. Every
+  `curl` now carries a connect and overall timeout and is pinned to
+  https, including across redirects (#69).
+- The install script says which of three things went wrong when a
+  download fails. A tag that does not exist, a tag that predates prebuilt
+  binaries, and a release with no build for the current platform each get
+  their own message; all three used to read "No such archive". A tag is
+  only reported missing when GitHub answers 404 for it; a rate limit or
+  an unreachable github.com is reported as that (#69).
+- A `gh attestation verify` that could not reach GitHub, for a rate limit
+  or an unreachable API, is reported by the install script as not
+  verified, with gh's own error and the command to run by hand. It used to
+  be called a failed attestation and stop the install. Every other
+  failure still stops it, with gh's error now shown: no attestation, a
+  signature or policy check that failed, and any message the script does
+  not recognise (#69).
+- Ctrl-C or a kill during the install now exits through the cleanup trap
+  rather than returning into the step it interrupted, so an interrupted
+  copy cannot be followed by the rename that puts it on `PATH` (#69).
+- A `kill`, or a terminal that delivers Ctrl-C as a signal rather than a
+  key, no longer leaves the tty in raw mode on the alternate screen.
+  SIGTERM and SIGINT ended the process before anything could restore the
+  terminal; each is now caught and the app leaves through the same path `q`
+  takes, then dies of the same signal, so a shell or script waiting on it
+  sees what it always did. Ctrl-C in the app is unchanged, and on Windows,
+  where crossterm already reports Ctrl-C and Ctrl-Break as keys, nothing is
+  hooked (#85).
+- A forecast whose air quality could not be fetched says so on the way out,
+  the way a failed state save already does, instead of leaving a blank AQI
+  cell for the session with no way to tell a 503 from a place CAMS does not
+  cover. `virga now` prints the same reason to stderr and the report to
+  stdout as before (#71).
+- A network error names the host that produced it. The loading screen used
+  to show `http status: 503` or `json: expected value at line 1 column 1`
+  with nothing saying which of three Open-Meteo hosts, or the location
+  provider, had answered that way; every request now carries its endpoint
+  into the message, and the search and detection errors carry it too. The
+  error popup and the search box wrap that message to fit rather than
+  cutting it off at the border (#71).
+- `virga now` no longer asks the location provider again on every poll
+  once a detection has failed. Only a detection that succeeded was
+  remembered, so a status bar polling by the minute asked ipapi.co again
+  on every poll after a 429, sixty times an hour. A failed detection is
+  now written down beside the rest of the state, and the report names the
+  fallback city for a quarter of an hour before asking again; the marker
+  is dropped the moment a place is remembered (#65).
+- A city search no longer waits behind a stalled forecast. One thread served
+  every request in the order it arrived, so pressing `l`, typing a city and
+  hitting Enter while a fetch was hung showed the search spinner for up to
+  the fetch's fifteen-second timeout with nothing to say. Fetches,
+  detections and searches now each have a thread of their own, and the only
+  thing a search can wait behind is another search. Choosing a city while
+  the launch is still working out where you are abandons the detection, so
+  its late guess cannot fetch over the city you asked for (#75).
+- The update notice is dismissed only by a key pressed on a frame that
+  showed it. Any key outside the city search used to clear it, including on
+  a terminal too short to give it a row, so on a short terminal the news
+  was gone before it was ever drawn and never printed on the way out either
+  (#75).
+- The hourly weathergram marks the current hour by shape. Only the colour of
+  hour 0's column and of the axis label said which hour was now, and the
+  label is drawn on every page, so a monochrome terminal or a colour-blind
+  reading of the default palette could not tell the current hour from its
+  neighbours. A `┬` now hangs under it on the marker row, the same glyph the
+  classic chart uses, and the `▲` selection marker takes the cell while the
+  selection is on that hour. The week strip's selected-day marker is now the
+  same `>` the forecast table and the search screen use, rather than `▸`
+  (#79).
+- The hourly charts title a page by where it sits, not only by its size.
+  Both said `next 24 h` on every page, so four days ahead the weathergram
+  read `next 24 h` over an axis saying `Thu 12a`, and the classic chart's
+  dry caption promised no rain "in the next 24 h" about Thursday. A page
+  that has left now is titled `24 h from Thu 12a` and its caption says "in
+  these 24 h". At the narrowest widths the pane's name gives way before
+  the position does, on every page alike rather than only on the pages
+  whose anchor happens to be long (#78).
+- The weathergram's rain summary totals the hours on screen, like the
+  temperature and wind beside it, rather than the day ahead of the
+  selection. The inspector still prints that day's total, and its row is
+  now labelled "24 h ahead" instead of "24 h total", since at 80 columns
+  the two windows are different days once the selection leaves the page's
+  first hour (#78).
+- A flat freezing window on the weathergram reads `-5°C` instead of
+  `-5–-5°C` (#78).
+- "No rain in the next N days" rounds a partial last day up, so a forecast
+  a few hours short of eight days no longer says seven while the strip
+  below it draws eight rows, and a forecast under a day says "the next
+  day" rather than "0 days" (#78).
+- The daily-highs chart no longer titles itself `Daily Highs · inf–-inf°`
+  when the forecast carries no days. The range was folded from the
+  infinities, so an empty series printed them; with no days there is no
+  range, and the title now stops at the name (#84).
 
 ### Security
 
+- The weather and location clients refuse to speak plain HTTP, follow at
+  most two redirects, and cap every response body at 1 MiB before parsing
+  it, whether or not the body arrived compressed. Neither provider
+  redirects, so nothing changes on a healthy network; what changes is that
+  a redirect from either host to an `http://` URL is now an error rather
+  than the user's coordinates re-sent in the clear (#72).
 - Virga builds against rustls 0.23.46 and webpki-roots 1.0.10. The first
   clears four rustls advisories (RUSTSEC-2026-0285, RUSTSEC-2026-0346,
   RUSTSEC-2026-0348, RUSTSEC-2026-0349); the second stops the bundled root
@@ -412,8 +580,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.6.2...HEAD
-[0.6.2]: https://github.com/t-shahan/virga/compare/v0.6.1...v0.6.2
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/t-shahan/virga/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/t-shahan/virga/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/t-shahan/virga/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/t-shahan/virga/compare/v0.5.2...v0.5.3

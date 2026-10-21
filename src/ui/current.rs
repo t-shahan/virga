@@ -28,18 +28,43 @@ pub(super) fn current_area_render(
     let day = weather.daily.get(selected);
     let showing_today = selected == weather.today_index || day.is_none();
 
+    let block = pane_block(app, weather, day, showing_today, palette, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let (hero_area, detail_area) = column_areas(inner);
+    if let Some(hero_area) = hero_area {
+        let temp = hero_value(weather, day, showing_today, unit);
+        let hero = hero_lines(&temp, unit, palette);
+        frame.render_widget(Paragraph::new(hero).alignment(Alignment::Center), hero_area);
+    }
+
+    // Both branches produce the same number of lines so today is no thinner
+    // than any other day. Today swaps the period comparison for air quality,
+    // which only exists for now; other days swap the live reading for the
+    // day's feels-like range.
+    let details = day.map_or_else(Vec::new, |d| {
+        detail_lines(weather, d, palette, unit, showing_today)
+    });
+
+    frame.render_widget(Paragraph::new(details), detail_area);
+}
+
+/// The border and the four titles it carries: city and condition on top, the
+/// period comparison or a status mark and the day along the bottom.
+fn pane_block(
+    app: &App,
+    weather: &Weather,
+    day: Option<&DailyForecast>,
+    showing_today: bool,
+    palette: Palette,
+    area: Rect,
+) -> Block<'static> {
+    let unit = app.unit;
     let when = if showing_today {
         "Today".to_string()
     } else {
         day.map_or_else(|| "Today".to_string(), |d| long_date(&d.date))
-    };
-
-    let name = app.location.label.as_str();
-
-    let condition = if showing_today {
-        weather.current.code.map_or(UNKNOWN, description)
-    } else {
-        day.map_or(UNKNOWN, |d| description(d.code))
     };
 
     // The period comparison earns its place on the border rather than in the
@@ -48,23 +73,13 @@ pub(super) fn current_area_render(
     // each other, so each border gets an explicit budget.
     let summary = day.map_or_else(String::new, |d| comparison(weather, d, unit));
 
-    // Air quality rides the border beside the condition, where it costs no
-    // rows. Days past the endpoint's horizon simply have none, and the border
-    // omits it rather than showing a placeholder.
-    //
-    // The two readings are not the same measurement and must not share a
-    // label. Today's is the endpoint's reading for right now; any other day's
-    // is the worst of that day's hourly values. Rendering both as a bare `AQI`
-    // invited reading a day's peak as its prevailing air, which is a different
-    // and rosier claim than the number supports.
-    let (reading, qualifier) = if showing_today {
-        (weather.air_quality.as_ref().map(|aq| aq.us_aqi), "")
-    } else {
-        (day.and_then(|d| d.aqi), "max ")
-    };
-    let aqi = reading.map(|value| format!("AQI {qualifier}{value} {}", aqi_label(value)));
-
-    let (city, condition, aqi) = top_titles(name, condition, aqi.as_deref(), area.width);
+    let aqi = air_quality_title(weather, day, showing_today);
+    let (city, condition, aqi) = top_titles(
+        app.location.label.as_str(),
+        condition_of(weather, day, showing_today),
+        aqi.as_deref(),
+        area.width,
+    );
     // The mark takes the comparison's corner while there is one: what the
     // forecast is outranks how it compares. A failure that fits nowhere
     // else takes the day's corner too.
@@ -75,10 +90,8 @@ pub(super) fn current_area_render(
         None => bottom_titles(&summary, &when, area.width),
     };
 
-    let mut block = Block::bordered()
-        .border_style(Style::new().fg(palette.border))
-        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
-        .title_bottom(Line::from(when).fg(palette.text).right_aligned());
+    let mut block =
+        framed(city, palette).title_bottom(Line::from(when).fg(palette.text).right_aligned());
 
     if let Some(condition) = condition {
         // The rule between them takes the border's colour so the border
@@ -97,12 +110,49 @@ pub(super) fn current_area_render(
         let color = mark.map_or(palette.muted, |mark| mark.color);
         block = block.title_bottom(Line::from(summary).fg(color).left_aligned());
     }
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    block
+}
 
-    // The block digits are decoration; the readings are the content. Rather
-    // than squeeze both and clip the digits mid-glyph, drop the hero entirely
-    // once there is not room for the pair.
+fn condition_of(
+    weather: &Weather,
+    day: Option<&DailyForecast>,
+    showing_today: bool,
+) -> &'static str {
+    if showing_today {
+        weather.current.code.map_or(UNKNOWN, description)
+    } else {
+        day.map_or(UNKNOWN, |d| description(d.code))
+    }
+}
+
+/// Air quality rides the border beside the condition, where it costs no
+/// rows. Days past the endpoint's horizon simply have none, and the border
+/// omits it rather than showing a placeholder.
+///
+/// The two readings are not the same measurement and must not share a
+/// label. Today's is the endpoint's reading for right now; any other day's
+/// is the worst of that day's hourly values. Rendering both as a bare `AQI`
+/// invited reading a day's peak as its prevailing air, which is a different
+/// and rosier claim than the number supports.
+fn air_quality_title(
+    weather: &Weather,
+    day: Option<&DailyForecast>,
+    showing_today: bool,
+) -> Option<String> {
+    let (reading, qualifier) = if showing_today {
+        (weather.air_quality.as_ref().map(|aq| aq.us_aqi), "")
+    } else {
+        (day.and_then(|d| d.aqi), "max ")
+    };
+    reading.map(|value| format!("AQI {qualifier}{value} {}", aqi_label(value)))
+}
+
+/// The hero and detail columns, centred as a pair, or the details alone.
+///
+/// The block digits are decoration; the readings are the content. Rather
+/// than squeeze both and clip the digits mid-glyph, drop the hero entirely
+/// once there is not room for the pair.
+fn column_areas(inner: Rect) -> (Option<Rect>, Rect) {
     let full = HERO_WIDTH + COLUMN_GUTTER + DETAIL_WIDTH;
     let show_hero = inner.width >= full;
 
@@ -119,7 +169,7 @@ pub(super) fn current_area_render(
 
     // Without a gutter a three-digit temperature fills HERO_WIDTH exactly and
     // its unit symbol lands flush against the first label.
-    let (hero_area, detail_area) = if show_hero {
+    if show_hero {
         let [hero, _gutter, detail] = Layout::horizontal([
             Constraint::Length(HERO_WIDTH),
             Constraint::Length(COLUMN_GUTTER),
@@ -129,32 +179,40 @@ pub(super) fn current_area_render(
         (Some(hero), detail)
     } else {
         (None, content)
-    };
+    }
+}
 
-    // The block font already has a '-' glyph, so a missing reading renders as
-    // "--" at the same scale rather than collapsing the layout.
-    let temp = if showing_today {
-        weather.current.temp_c.map_or_else(
-            || "--".to_string(),
-            |c| format!("{:.0}", unit.temp_rounded(c)),
-        )
+/// The block font already has a '-' glyph, so a missing reading renders as
+/// "--" at the same scale rather than collapsing the layout.
+fn hero_value(
+    weather: &Weather,
+    day: Option<&DailyForecast>,
+    showing_today: bool,
+    unit: Unit,
+) -> String {
+    let reading = if showing_today {
+        weather.current.temp_c
     } else {
-        day.map_or_else(
-            || "--".to_string(),
-            |d| format!("{:.0}", unit.temp_rounded(d.high_c)),
-        )
+        day.map(|d| d.high_c)
     };
+    reading.map_or_else(
+        || "--".to_string(),
+        |c| format!("{:.0}", unit.temp_rounded(c)),
+    )
+}
 
-    // Alignment::Center centres each line on its own width, so the row carrying
-    // the unit symbol would sit offset from the rest. Pad the others to match.
+/// The block digits with the unit symbol hung off the middle row.
+///
+/// Alignment::Center centres each line on its own width, so the row carrying
+/// the unit symbol would sit offset from the rest. Pad the others to match.
+fn hero_lines(temp: &str, unit: Unit, palette: Palette) -> Vec<Line<'static>> {
     let symbol = unit.temp_symbol();
     let symbol_pad = " ".repeat(symbol.chars().count());
 
-    let hero: Vec<Line> = big_digits(&temp)
+    big_digits(temp)
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            // Hang the unit symbol off the middle row so it sits centred against the digits.
             if i == DIGIT_ROWS / 2 {
                 Line::from(vec![
                     Span::from(row.clone()).bold().fg(palette.accent),
@@ -166,20 +224,7 @@ pub(super) fn current_area_render(
                     .fg(palette.accent)
             }
         })
-        .collect();
-    if let Some(hero_area) = hero_area {
-        frame.render_widget(Paragraph::new(hero).alignment(Alignment::Center), hero_area);
-    }
-
-    // Both branches produce the same number of lines so today is no thinner
-    // than any other day. Today swaps the period comparison for air quality,
-    // which only exists for now; other days swap the live reading for the
-    // day's feels-like range.
-    let details = day.map_or_else(Vec::new, |d| {
-        detail_lines(weather, d, palette, unit, showing_today)
-    });
-
-    frame.render_widget(Paragraph::new(details), detail_area);
+        .collect()
 }
 
 /// Widths of the two columns in the current pane, centred as a pair. The hero
@@ -339,6 +384,27 @@ fn long_date(date: &str) -> String {
         Ok(parsed) => parsed.format("%a, %b %-d").to_string(),
         Err(_) => date.to_string(),
     }
+}
+
+/// The pane's border with the city in its corner: the part of it that does
+/// not wait for weather.
+fn framed(city: String, palette: Palette) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::new().fg(palette.border))
+        .title_top(Line::from(city).bold().fg(palette.accent).left_aligned())
+}
+
+/// The pane on a cache miss: its border and `title` in the city's corner,
+/// and nothing inside. The readings land in a box that is already there,
+/// at the width the loaded pane clips the name to.
+pub(super) fn current_skeleton_render(
+    frame: &mut Frame,
+    title: &str,
+    palette: Palette,
+    area: Rect,
+) {
+    let (title, _, _) = top_titles(title, "", None, area.width);
+    frame.render_widget(framed(title, palette), area);
 }
 
 /// City left; condition and air quality right. The city is the identity, so it
