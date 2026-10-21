@@ -667,7 +667,10 @@ mod tests {
     /// The bound has to be the one this module names, not whatever the ureq
     /// release in Cargo.lock happens to apply inside `read_json`. The body is
     /// a well-formed geocode answer padded past the limit, so the only thing
-    /// that can reject it is the limit.
+    /// that can reject it is the limit. Uncompressed, it trips ureq's wire
+    /// limit one read before `take` would, which makes this the test that
+    /// fails if a ureq release stops wrapping `BodyExceedsLimit` the way
+    /// `tripped_wire_limit` reads it.
     #[test]
     fn an_oversized_body_is_refused_before_it_is_parsed() {
         let padding = "x".repeat(MAX_RESPONSE_BYTES as usize);
