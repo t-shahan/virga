@@ -3,7 +3,7 @@ use crate::app::{
     Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
-use crate::events::{Message, Request};
+use crate::events::{Message, Request, Workers};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +14,7 @@ use ratatui::crossterm::event::Event;
 use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::TrySendError;
 use std::time::{Duration, Instant};
 
 mod app;
@@ -203,7 +203,7 @@ fn main() -> Result<()> {
         eprintln!("{warning}");
     }
 
-    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style) =
+    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style, dismissed) =
         match state::path() {
             Ok(path) => {
                 let (persisted, warning) = load_persisted(&path);
@@ -229,6 +229,7 @@ fn main() -> Result<()> {
                     cache_path,
                     persisted.theme,
                     persisted.key_hint_style,
+                    persisted.dismissed,
                 )
             }
             // Nowhere to remember a location is not a reason to stop working out
@@ -236,7 +237,7 @@ fn main() -> Result<()> {
             // state directory still deserves their own city.
             Err(error) => {
                 eprintln!("virga: could not determine where to remember location: {error:#}");
-                (startup_location(None, detect), None, None, None, None)
+                (startup_location(None, detect), None, None, None, None, None)
             }
         };
 
@@ -276,7 +277,10 @@ fn main() -> Result<()> {
         },
         state_path.as_deref(),
         cache_path,
-        check_updates,
+        UpdateCheck {
+            enabled: check_updates,
+            dismissed,
+        },
         &interrupt,
         &mut warning,
         &mut notice,
@@ -537,6 +541,17 @@ fn persist_key_hint_style(state_path: Option<&Path>, style: KeyHintStyle) -> Opt
     state::save_key_hint_style(path, style)
         .err()
         .map(|error| format!("virga: could not save the key hint style: {error:#}"))
+}
+
+/// Write a cleared notice down the moment it is cleared, so the release it
+/// named is not announced again. A write failure is a warning for the same
+/// reason as above: the notice is gone from the screen either way, and the
+/// worst a lost dismissal costs is one more line next launch.
+fn persist_dismissal(state_path: Option<&Path>, release: &update::Release) -> Option<String> {
+    let path = state_path?;
+    state::save_dismissed(path, release)
+        .err()
+        .map(|error| format!("virga: could not remember the dismissed update notice: {error:#}"))
 }
 
 fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
@@ -827,22 +842,24 @@ fn clear_screen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> 
     Ok(())
 }
 
-fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
-    match tx.try_send(request) {
+fn dispatch(workers: &Workers, app: &mut App, request: Request) -> Result<()> {
+    match workers.try_send(request) {
         Ok(()) => Ok(()),
-        // Unreachable while the guards in `App` hold — the queue is deeper
+        // Unreachable while the guards in `App` hold — every queue is deeper
         // than it can fill. It is handled anyway so that the day a guard is
         // dropped, the screen says something instead of waiting forever on a
         // request that was never sent.
         Err(TrySendError::Full(request)) => {
             // A dropped detection still has to reach its fallback, so the
             // replacement it asks for is dispatched rather than discarded.
+            // The replacement is a different kind, so it goes to a different
+            // queue: a full one cannot refuse it a second time.
             if let Some(replacement) = app.on_dispatch_dropped(request) {
-                return dispatch(tx, app, replacement);
+                return dispatch(workers, app, replacement);
             }
             Ok(())
         }
-        Err(TrySendError::Disconnected(_)) => Err(anyhow!("the worker thread has stopped")),
+        Err(TrySendError::Disconnected(_)) => Err(anyhow!("a worker thread has stopped")),
     }
 }
 
@@ -871,6 +888,13 @@ impl Opening {
     }
 }
 
+/// What the startup probe is told: whether to run at all, and which release
+/// the user last cleared a notice for, so it can stay quiet about that one.
+struct UpdateCheck {
+    enabled: bool,
+    dismissed: Option<update::Release>,
+}
+
 // One over Clippy's limit, and the one over is the signal flag. It travels
 // with `warning` and `notice` as exit-path plumbing; the shape that would
 // take all three off the list is an outcome the loop returns, which is a
@@ -881,33 +905,34 @@ fn run(
     opening: Opening,
     state_path: Option<&Path>,
     cache_path: Option<PathBuf>,
-    check_updates: bool,
+    update_check: UpdateCheck,
     interrupt: &interrupt::Interrupt,
     warning: &mut Option<String>,
     notice: &mut Option<String>,
 ) -> Result<()> {
-    // Bounded: see `events::REQUEST_QUEUE`. Messages back stay unbounded — the
-    // worker produces at most one per request it was handed, so bounding the
-    // requests bounds the replies too, and a blocking send on the worker side
-    // would be a deadlock waiting to happen.
-    let (request_tx, request_rx) = mpsc::sync_channel(events::REQUEST_QUEUE);
+    // Requests are bounded: see `events::REQUEST_QUEUE`. Messages back stay
+    // unbounded — a worker produces at most one per request it was handed,
+    // so bounding the requests bounds the replies too, and a blocking send
+    // on the worker side would be a deadlock waiting to happen.
     let (message_tx, message_rx) = mpsc::channel();
-    // The probe rides its own thread and the shared message channel; the
-    // worker's request queue is serial, and news must never stall a search.
-    if check_updates {
-        events::spawn_update_check(message_tx.clone(), || {
+    // The probe rides its own thread and the shared message channel; each
+    // worker's queue is serial, and news must never stall a search.
+    if update_check.enabled {
+        let dismissed = update_check.dismissed;
+        events::spawn_update_check(message_tx.clone(), move || {
             let current = update::Release::parse(env!("CARGO_PKG_VERSION")).ok()?;
             let latest =
                 update::Release::parse(&update::latest_tag(update::RELEASES_URL).ok()?).ok()?;
-            update::notice(&current, &latest)
+            let notice = update::notice(&current, &latest, dismissed.as_ref())?;
+            Some((notice, latest))
         });
     }
-    events::spawn_worker(request_rx, message_tx, cache_path);
+    let workers = events::spawn_workers(message_tx, cache_path);
     let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
-    dispatch(&request_tx, &mut app, initial)?;
+    dispatch(&workers, &mut app, initial)?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
@@ -940,7 +965,7 @@ fn run(
             retain_first_warning(warning, message_warning);
             // A detection answers with the fetch it asked for.
             if let Some(request) = chained {
-                dispatch(&request_tx, &mut app, request)?;
+                dispatch(&workers, &mut app, request)?;
             }
         }
 
@@ -990,7 +1015,9 @@ fn run(
 
         if dirty || animating {
             app.tick = app.tick.wrapping_add(1);
-            terminal.draw(|frame| ui::render(frame, &app))?;
+            let mut notice_drawn = false;
+            terminal.draw(|frame| notice_drawn = ui::render(frame, &app))?;
+            app.notice_drawn = notice_drawn;
             dirty = false;
         }
 
@@ -1018,13 +1045,16 @@ fn run(
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {
-                            dispatch(&request_tx, &mut app, request)?;
+                            dispatch(&workers, &mut app, request)?;
                         }
                         if let Some(style) = app.take_key_hint_style_save() {
                             retain_first_warning(
                                 warning,
                                 persist_key_hint_style(state_path, style),
                             );
+                        }
+                        if let Some(release) = app.take_update_dismissal() {
+                            retain_first_warning(warning, persist_dismissal(state_path, &release));
                         }
                         if app.should_quit {
                             // A message already in the queue — above all the
@@ -1061,6 +1091,7 @@ mod tests {
 
     use crate::app::ActiveLocation;
     use crate::events::Message;
+    use crate::input::Action;
     use crate::weather::client::tests::{
         detect_location_from, fetch_forecast_from, serving_counted,
     };
@@ -1154,7 +1185,11 @@ mod tests {
     fn a_clean_repaint_never_asks_where_the_cursor_is() {
         let app = ready_app();
         let mut terminal = Terminal::new(Counting::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
 
         clear_screen(&mut terminal).unwrap();
 
@@ -1181,7 +1216,11 @@ mod tests {
     fn a_clean_repaint_writes_every_cell_of_an_unchanged_frame() {
         let app = ready_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         let frame = terminal.backend().buffer().clone();
 
         clear_screen(&mut terminal).unwrap();
@@ -1191,7 +1230,11 @@ mod tests {
             "the screen was not wiped"
         );
 
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         assert_eq!(terminal.backend().buffer(), &frame);
     }
 
@@ -1714,6 +1757,49 @@ mod tests {
     #[test]
     fn without_a_state_path_the_toggle_is_a_silent_no_op() {
         assert_eq!(persist_key_hint_style(None, KeyHintStyle::Full), None);
+    }
+
+    /// The whole path from the key that clears the notice to the file: the
+    /// dismissal the app hands out is written where the next launch's probe
+    /// reads it, and a launch with nowhere to write clears the line for the
+    /// session and complains about nothing. The file holds a key hint style
+    /// first, because a dismissal alone is never written.
+    #[test]
+    fn a_cleared_notice_is_persisted_as_the_dismissed_release() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        state::save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        let latest = update::Release::parse("9.9.9").unwrap();
+        let mut app = App::new();
+        app.on_message(Message::UpdateAvailable {
+            notice: "update: virga 9.9.9 is available".to_string(),
+            latest: latest.clone(),
+        });
+
+        // The frame that drew the notice, which a key has to follow before
+        // it may dismiss it.
+        app.notice_drawn = true;
+        app.on_action(Action::ToggleUnits);
+        let release = app.take_update_dismissal().expect("the key dismissed");
+
+        assert_eq!(persist_dismissal(Some(&path), &release), None);
+        assert_eq!(state::load_from(&path).unwrap().dismissed, Some(latest));
+        assert_eq!(persist_dismissal(None, &release), None);
+    }
+
+    /// A state directory that cannot take the write is a warning, not a
+    /// reason to stop the loop: the notice is gone from the screen either way.
+    #[test]
+    fn a_dismissal_that_cannot_be_written_is_a_warning() {
+        let test = tempfile::tempdir().unwrap();
+        let parent = test.path().join("not-a-directory");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("state.json");
+
+        let warning = persist_dismissal(Some(&path), &update::Release::parse("9.9.9").unwrap())
+            .expect("the failed write warned");
+
+        assert!(warning.contains("dismissed update notice"));
     }
 
     #[test]

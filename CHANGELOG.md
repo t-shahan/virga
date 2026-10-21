@@ -12,6 +12,19 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- A cleared update notice stays cleared. The keypress that dismisses the
+  startup notice now also writes the release it named into the state file,
+  and later launches announce only a release newer than that one. Quitting
+  with the notice still standing does not count: it is printed on the way
+  out, as before, and comes back next time. The dismissal is written beside
+  a remembered city, theme, or key bar style and never on its own — a state
+  file holding nothing else is one older Virga builds refuse to read — so a
+  notice cleared before any of those exist is announced once more.
+  `VIRGA_UPDATE=off` still skips the check entirely, and `virga update`
+  always answers (#109).
+
 ### Changed
 
 - `virga update` exits 3 when a newer release exists, so a shell prompt or
@@ -79,6 +92,19 @@ refuse to publish a version this file does not describe.
   now written down beside the rest of the state, and the report names the
   fallback city for a quarter of an hour before asking again; the marker
   is dropped the moment a place is remembered (#65).
+- A city search no longer waits behind a stalled forecast. One thread served
+  every request in the order it arrived, so pressing `l`, typing a city and
+  hitting Enter while a fetch was hung showed the search spinner for up to
+  the fetch's fifteen-second timeout with nothing to say. Fetches,
+  detections and searches now each have a thread of their own, and the only
+  thing a search can wait behind is another search. Choosing a city while
+  the launch is still working out where you are abandons the detection, so
+  its late guess cannot fetch over the city you asked for (#75).
+- The update notice is dismissed only by a key pressed on a frame that
+  showed it. Any key outside the city search used to clear it, including on
+  a terminal too short to give it a row, so on a short terminal the news
+  was gone before it was ever drawn and never printed on the way out either
+  (#75).
 - The hourly weathergram marks the current hour by shape. Only the colour of
   hour 0's column and of the axis label said which hour was now, and the
   label is drawn on every page, so a monochrome terminal or a colour-blind
