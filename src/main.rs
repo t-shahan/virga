@@ -95,14 +95,14 @@ fn main() -> Result<()> {
             // with it — not the state file, not detection. Asking about
             // somewhere is a question, not a move: the remembered city
             // stays whatever it was.
-            let (location, detection) = match &city {
+            let (location, detection, state_path) = match &city {
                 Some(query) => match weather::client::search_locations(query) {
                     // The geocoder answered and knows no such place: the
                     // argument is wrong, which is `theme`'s unknown-name
                     // treatment. A lookup that failed to happen is the
                     // environment's fault instead, and exits like `update`'s.
                     Ok(found) => match found.first() {
-                        Some(first) => (ActiveLocation::from(first), Detection::Skipped),
+                        Some(first) => (ActiveLocation::from(first), Detection::Skipped, None),
                         None => {
                             eprintln!("virga: no city matched {query:?}.");
                             std::process::exit(2);
@@ -113,18 +113,42 @@ fn main() -> Result<()> {
                         std::process::exit(1);
                     }
                 },
-                None => asked_location(),
+                None => {
+                    // Read before the state directory is resolved, so a
+                    // double fault complains in the order it always has:
+                    // the variable first, the directory second.
+                    let (detect, warning) = env_switch(
+                        "VIRGA_GEOIP",
+                        std::env::var("VIRGA_GEOIP").ok().as_deref(),
+                        "location detection",
+                    );
+                    if let Some(warning) = warning {
+                        eprintln!("{warning}");
+                    }
+                    // Resolved once, here, so the same missing directory is
+                    // complained about once: the read below and the write
+                    // after the fetch both go through this answer.
+                    let state_path = match state::path() {
+                        Ok(path) => Some(path),
+                        // Nowhere to remember a location is not a reason to
+                        // stop working out where the user is — the app's
+                        // judgement, applied here too.
+                        Err(error) => {
+                            eprintln!(
+                                "virga: could not determine where location is remembered: {error:#}"
+                            );
+                            None
+                        }
+                    };
+                    let (location, detection) = asked_location(detect, state_path.as_deref());
+                    (location, detection, state_path)
+                }
             };
-            // On a bare report, a state directory that cannot be found was
-            // complained about by `asked_location` a moment ago, when it went
-            // looking for the remembered city; the same complaint twice on
-            // one report is noise, so the error is dropped here. A named city
-            // never reaches the path.
             let (cache_path, warning) = report_cache_path(
                 city.as_deref(),
                 detection == Detection::Found,
                 std::env::var("VIRGA_CACHE").ok().as_deref(),
-                state::path().ok().as_deref(),
+                state_path.as_deref(),
             );
             if let Some(warning) = warning {
                 eprintln!("{warning}");
@@ -150,7 +174,10 @@ fn main() -> Result<()> {
                     // too: with the network down both fail, and a marker
                     // written then would hold the fallback in place for the
                     // whole backoff after the network came back.
-                    if let Some(warning) = remember_detection(&location, detection, Utc::now()) {
+                    if let Some(path) = &state_path
+                        && let Some(warning) =
+                            remember_detection_at(path, &location, detection, Utc::now())
+                    {
                         eprintln!("{warning}");
                     }
                     println!(
@@ -198,15 +225,27 @@ fn main() -> Result<()> {
     // All read before the terminal is taken over: a complaint about a
     // variable or the state file has to go to the ordinary screen, or it is
     // written to the alternate screen and wiped the moment the app exits.
-    let (detect, warning) = detection_enabled(std::env::var("VIRGA_GEOIP").ok().as_deref());
+    let (detect, warning) = env_switch(
+        "VIRGA_GEOIP",
+        std::env::var("VIRGA_GEOIP").ok().as_deref(),
+        "location detection",
+    );
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
-    let (check_updates, warning) = checks_enabled(std::env::var("VIRGA_UPDATE").ok().as_deref());
+    let (check_updates, warning) = env_switch(
+        "VIRGA_UPDATE",
+        std::env::var("VIRGA_UPDATE").ok().as_deref(),
+        "the update check",
+    );
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
-    let (caching, warning) = caching_enabled(std::env::var("VIRGA_CACHE").ok().as_deref());
+    let (caching, warning) = env_switch(
+        "VIRGA_CACHE",
+        std::env::var("VIRGA_CACHE").ok().as_deref(),
+        "the forecast cache",
+    );
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
@@ -374,7 +413,7 @@ fn report_cache_path(
     if city.is_some() || freshly_detected {
         return (None, None);
     }
-    let (caching, warning) = caching_enabled(cache_switch);
+    let (caching, warning) = env_switch("VIRGA_CACHE", cache_switch, "the forecast cache");
     if !caching {
         return (None, warning);
     }
@@ -460,14 +499,15 @@ fn switch(value: &str) -> Option<bool> {
     }
 }
 
-/// Whether to ask the network where the user is, given whatever `VIRGA_GEOIP`
-/// was set to.
+/// Whether a feature guarded by an on/off environment variable stays on,
+/// given whatever `name` was set to. `what_stays_on` names the feature in
+/// the complaint: "location detection", "the update check".
 ///
 /// The `VIRGA_THEME` precedent: an unusable value is a warning and the default,
-/// not an exit. Leaving detection *on* is the right default for a typo, because
-/// off is the surprising state — a user who has gone to the trouble of setting
-/// the variable will see the warning and fix it.
-fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
+/// not an exit. Leaving the feature *on* is the right default for a typo,
+/// because off is the surprising state — a user who has gone to the trouble
+/// of setting the variable will see the warning and fix it.
+fn env_switch(name: &str, requested: Option<&str>, what_stays_on: &str) -> (bool, Option<String>) {
     let Some(value) = requested else {
         return (true, None);
     };
@@ -477,45 +517,7 @@ fn detection_enabled(requested: Option<&str>) -> (bool, Option<String>) {
         None => (
             true,
             Some(format!(
-                "virga: VIRGA_GEOIP={value:?} is not on or off; leaving location detection on."
-            )),
-        ),
-    }
-}
-
-/// Whether the last forecast is kept on disk and opened on, given whatever
-/// `VIRGA_CACHE` was set to. The same grammar and the same forgiveness as
-/// the other two switches.
-fn caching_enabled(requested: Option<&str>) -> (bool, Option<String>) {
-    let Some(value) = requested else {
-        return (true, None);
-    };
-
-    match switch(value) {
-        Some(enabled) => (enabled, None),
-        None => (
-            true,
-            Some(format!(
-                "virga: VIRGA_CACHE={value:?} is not on or off; leaving the forecast cache on."
-            )),
-        ),
-    }
-}
-
-/// Whether to probe for a newer release at startup, given whatever
-/// `VIRGA_UPDATE` was set to. `VIRGA_GEOIP`'s grammar and `VIRGA_GEOIP`'s
-/// forgiveness, for the same reasons.
-fn checks_enabled(requested: Option<&str>) -> (bool, Option<String>) {
-    let Some(value) = requested else {
-        return (true, None);
-    };
-
-    match switch(value) {
-        Some(enabled) => (enabled, None),
-        None => (
-            true,
-            Some(format!(
-                "virga: VIRGA_UPDATE={value:?} is not on or off; leaving the update check on."
+                "virga: {name}={value:?} is not on or off; leaving {what_stays_on} on."
             )),
         ),
     }
@@ -608,34 +610,22 @@ enum Detection {
 }
 
 /// Where a bare `virga now` asks about: the remembered city, a fresh
-/// detection when nothing is remembered and `VIRGA_GEOIP` allows one, and
-/// the compiled-in fallback when the network will not say — a worse guess is
-/// not a reason to withhold the forecast, and the stderr note says which
-/// guess it was.
-fn asked_location() -> (ActiveLocation, Detection) {
-    let (detect, warning) = detection_enabled(std::env::var("VIRGA_GEOIP").ok().as_deref());
-    if let Some(warning) = warning {
-        eprintln!("{warning}");
-    }
-    let state_path = match state::path() {
-        Ok(path) => Some(path),
-        // Nowhere to remember a location is not a reason to stop working
-        // out where the user is — the app's judgement, applied here too.
-        Err(error) => {
-            eprintln!("virga: could not determine where location is remembered: {error:#}");
-            None
-        }
-    };
+/// detection when nothing is remembered and `detect` (what `VIRGA_GEOIP`
+/// settled) allows one, and the compiled-in fallback when the network will
+/// not say — a worse guess is not a reason to withhold the forecast, and the
+/// stderr note says which guess it was. Beside the place, what the detection
+/// did, which is the caller's cue for what to remember.
+fn asked_location(detect: bool, state_path: Option<&Path>) -> (ActiveLocation, Detection) {
     asked_location_from(
-        state_path.as_deref(),
+        state_path,
         detect,
         weather::client::detect_location,
         Utc::now(),
     )
 }
 
-/// `asked_location` with the environment taken out, so a test can hand it a
-/// state file, a detection, and a clock of its own. The detection is a
+/// `asked_location` with the detection and the clock taken out, so a test
+/// can hand it a state file, a detection, and a clock of its own. The detection is a
 /// function rather than a host because the production agent refuses plain
 /// HTTP, which is all a test's loopback server speaks.
 fn asked_location_from(
@@ -677,20 +667,6 @@ fn asked_location_from(
 /// Write down what the detection found, or that it found nothing, in the
 /// user's state file. A write that fails is a warning to print, never a
 /// reason to withhold a report that has already loaded.
-fn remember_detection(
-    location: &ActiveLocation,
-    detection: Detection,
-    now: DateTime<Utc>,
-) -> Option<String> {
-    if detection == Detection::Skipped {
-        return None;
-    }
-    match state::path() {
-        Ok(path) => remember_detection_at(&path, location, detection, now),
-        Err(error) => Some(format!("virga: could not remember location: {error:#}")),
-    }
-}
-
 fn remember_detection_at(
     path: &Path,
     location: &ActiveLocation,
@@ -803,13 +779,6 @@ fn unknown_theme_complaint(name: &str) -> String {
     )
 }
 
-/// Hand a request to the worker without ever blocking the draw loop.
-///
-/// `send` on a bounded channel parks the caller until a slot frees — and the
-/// caller here is the thread that owns the terminal, so the app would stop
-/// drawing and stop reading keys until the network answered. `try_send` keeps
-/// the loop turning and hands the refusal back to `App`, which owns what the
-/// user is told.
 /// What the frame is fundamentally showing: the screen, the hourly screen's
 /// view, and which of the weather states composes it. When this changes, the
 /// next frame replaces the previous one wholesale rather than editing it,
@@ -850,6 +819,13 @@ fn clear_screen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> 
     Ok(())
 }
 
+/// Hand a request to the worker without ever blocking the draw loop.
+///
+/// `send` on a bounded channel parks the caller until a slot frees — and the
+/// caller here is the thread that owns the terminal, so the app would stop
+/// drawing and stop reading keys until the network answered. `try_send` keeps
+/// the loop turning and hands the refusal back to `App`, which owns what the
+/// user is told.
 fn dispatch(workers: &Workers, app: &mut App, request: Request) -> Result<()> {
     match workers.try_send(request) {
         Ok(()) => Ok(()),
@@ -871,10 +847,37 @@ fn dispatch(workers: &Workers, app: &mut App, request: Request) -> Result<()> {
     }
 }
 
-/// Terminal setup, the draw loop, and carrying messages between the worker and
-/// the app. Every state transition lives in `App` and every decision about what
-/// a key means lives in `input`, so what remains here is the part that
-/// genuinely needs a terminal and a channel.
+/// Apply every message the worker has already answered with, persisting what
+/// each asked to keep. A request a message chains — the fetch that answers a
+/// detection — goes to `chain_to`; with none, the request is dropped, which
+/// is the quit path's whole difference: a finished load is still remembered,
+/// but nothing is sent to a worker about to be abandoned. Reports whether
+/// anything was applied, so the caller knows the frame is stale.
+fn drain_messages(
+    app: &mut App,
+    messages: &mpsc::Receiver<Message>,
+    state_path: Option<&Path>,
+    warning: &mut Option<String>,
+    chain_to: Option<&Workers>,
+) -> Result<bool> {
+    let mut applied = false;
+    while let Ok(message) = messages.try_recv() {
+        applied = true;
+        let (chained, message_warning) = match state_path {
+            Some(path) => accept_message(app, message, path),
+            None => {
+                let outcome = app.on_message(message);
+                (outcome.request, outcome.warning)
+            }
+        };
+        retain_first_warning(warning, message_warning);
+        if let (Some(request), Some(workers)) = (chained, chain_to) {
+            dispatch(workers, app, request)?;
+        }
+    }
+    Ok(applied)
+}
+
 /// Everything the environment and the state file settled before the terminal
 /// was taken over: where to open, and in which palette and units.
 struct Opening {
@@ -903,6 +906,10 @@ struct UpdateCheck {
     dismissed: Option<update::Release>,
 }
 
+/// Terminal setup, the draw loop, and carrying messages between the worker and
+/// the app. Every state transition lives in `App` and every decision about what
+/// a key means lives in `input`, so what remains here is the part that
+/// genuinely needs a terminal and a channel.
 // One over Clippy's limit, and the one over is the signal flag. It travels
 // with `warning` and `notice` as exit-path plumbing; the shape that would
 // take all three off the list is an outcome the loop returns, which is a
@@ -961,20 +968,8 @@ fn run(
         // then noticed it, and the wait between passes ran in full before
         // the second pass painted it. At launch that second wait was the
         // whole of the delay the user saw beyond the network's.
-        while let Ok(message) = message_rx.try_recv() {
+        if drain_messages(&mut app, &message_rx, state_path, warning, Some(&workers))? {
             dirty = true;
-            let (chained, message_warning) = match state_path {
-                Some(path) => accept_message(&mut app, message, path),
-                None => {
-                    let outcome = app.on_message(message);
-                    (outcome.request, outcome.warning)
-                }
-            };
-            retain_first_warning(warning, message_warning);
-            // A detection answers with the fetch it asked for.
-            if let Some(request) = chained {
-                dispatch(&workers, &mut app, request)?;
-            }
         }
 
         // A wholesale change of what is on screen repaints from a clean
@@ -1072,13 +1067,7 @@ fn run(
                             // through the ordinary path, so a finished
                             // weather load is remembered too; only the
                             // chained request is pointless now.
-                            while let Ok(message) = message_rx.try_recv() {
-                                let message_warning = match state_path {
-                                    Some(path) => accept_message(&mut app, message, path).1,
-                                    None => app.on_message(message).warning,
-                                };
-                                retain_first_warning(warning, message_warning);
-                            }
+                            drain_messages(&mut app, &message_rx, state_path, warning, None)?;
                             // Quit left the notice standing exactly when no
                             // other key ever cleared it; hand it out for the
                             // ordinary screen.
@@ -1437,41 +1426,58 @@ mod tests {
         assert!(warning.unwrap().contains("solarized"));
     }
 
+    /// One grammar for every switch, and the `VIRGA_THEME` precedent for a
+    /// value outside it: a typo in a shell profile is a warning and the
+    /// feature left on, never a refusal to run. The complaint names the
+    /// variable and the feature, so the user knows which line to fix.
     #[test]
-    fn the_environment_variable_turns_detection_off() {
-        for value in ["off", "Off", " OFF ", "0", "false", "no"] {
-            assert!(!detection_enabled(Some(value)).0, "{value:?}");
-        }
-        for value in ["on", "1", "true", "yes"] {
-            assert!(detection_enabled(Some(value)).0, "{value:?}");
-        }
-        assert!(detection_enabled(None).0);
-        assert_eq!(detection_enabled(Some("off")).1, None);
-    }
+    fn every_switch_reads_the_same_grammar() {
+        // The sentence `detection_enabled` produced before the three
+        // switches shared one template, verbatim; `contains` below would
+        // let the clause between the name and the feature drift.
+        assert_eq!(
+            env_switch("VIRGA_GEOIP", Some("maybe"), "location detection").1,
+            Some(
+                "virga: VIRGA_GEOIP=\"maybe\" is not on or off; leaving location detection on."
+                    .to_string()
+            )
+        );
+        for (name, what_stays_on) in [
+            ("VIRGA_GEOIP", "location detection"),
+            ("VIRGA_UPDATE", "the update check"),
+            ("VIRGA_CACHE", "the forecast cache"),
+        ] {
+            assert_eq!(
+                env_switch(name, None, what_stays_on),
+                (true, None),
+                "{name}"
+            );
+            for value in ["off", "Off", " OFF ", "0", "false", "no"] {
+                assert_eq!(
+                    env_switch(name, Some(value), what_stays_on),
+                    (false, None),
+                    "{name}={value:?}"
+                );
+            }
+            for value in ["on", "ON", "1", "true", "yes"] {
+                assert_eq!(
+                    env_switch(name, Some(value), what_stays_on),
+                    (true, None),
+                    "{name}={value:?}"
+                );
+            }
+            for value in ["", "  ", "maybe", "disabled"] {
+                let (enabled, warning) = env_switch(name, Some(value), what_stays_on);
 
-    /// One grammar for every switch: the update check accepts exactly the
-    /// spellings detection does.
-    #[test]
-    fn the_environment_variable_turns_the_update_check_off() {
-        for value in ["off", "Off", " OFF ", "0", "false", "no"] {
-            assert!(!checks_enabled(Some(value)).0, "{value:?}");
+                assert!(enabled, "{name}={value:?}");
+                let warning = warning.unwrap();
+                assert!(warning.contains(name), "{name}={value:?}: {warning}");
+                assert!(
+                    warning.contains(what_stays_on),
+                    "{name}={value:?}: {warning}"
+                );
+            }
         }
-        for value in ["on", "1", "true", "yes"] {
-            assert!(checks_enabled(Some(value)).0, "{value:?}");
-        }
-        assert!(checks_enabled(None).0);
-        assert_eq!(checks_enabled(Some("off")).1, None);
-    }
-
-    #[test]
-    fn the_cache_switch_reads_like_the_others() {
-        assert_eq!(caching_enabled(None), (true, None));
-        assert_eq!(caching_enabled(Some("off")), (false, None));
-        assert_eq!(caching_enabled(Some("ON")), (true, None));
-
-        let (enabled, warning) = caching_enabled(Some("maybe"));
-        assert!(enabled);
-        assert!(warning.unwrap().contains("VIRGA_CACHE"));
     }
 
     /// The issue's gates (#111), one row each: only a bare report about the
@@ -1513,26 +1519,6 @@ mod tests {
             (None, None),
             "a report the cache could not serve does not complain about the switch"
         );
-    }
-
-    #[test]
-    fn an_unusable_update_value_warns_and_leaves_the_check_on() {
-        let (enabled, warning) = checks_enabled(Some("maybe"));
-
-        assert!(enabled);
-        assert!(warning.unwrap().contains("VIRGA_UPDATE"));
-    }
-
-    /// The `VIRGA_THEME` precedent: a typo in a shell profile is a warning and
-    /// the default, never a refusal to run.
-    #[test]
-    fn an_unusable_geoip_value_warns_and_leaves_detection_on() {
-        for value in ["", "  ", "maybe", "disabled"] {
-            let (enabled, warning) = detection_enabled(Some(value));
-
-            assert!(enabled, "{value:?}");
-            assert!(warning.unwrap().contains("VIRGA_GEOIP"), "{value:?}");
-        }
     }
 
     #[test]
@@ -1621,6 +1607,173 @@ mod tests {
 
         assert!(warning.contains("could not remember location"));
         assert!(warning.contains("create"));
+    }
+
+    /// Workers whose three queues are one channel of `bound` slots, with
+    /// nothing serving it: what was queued can be read back, and a bound of
+    /// zero refuses every request the way a full queue would.
+    fn queues(bound: usize) -> (Workers, mpsc::Receiver<Request>) {
+        let (tx, rx) = mpsc::sync_channel(bound);
+        (Workers::from_queues(tx.clone(), tx.clone(), tx), rx)
+    }
+
+    fn first_run() -> App {
+        App::with_startup(Startup {
+            location: ActiveLocation::default(),
+            source: LocationSource::Fallback,
+            detect: true,
+            cached: None,
+        })
+    }
+
+    #[test]
+    fn a_dispatched_request_reaches_the_worker_queue() {
+        let (workers, rx) = queues(1);
+        let mut app = App::with_location(berlin());
+        let request = app.startup_request();
+
+        dispatch(&workers, &mut app, request).unwrap();
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Request::Fetch { location, .. }) if location == berlin()
+        ));
+        assert!(matches!(app.weather, Fetch::Loading));
+    }
+
+    /// The guards in `App` keep the queue from filling; `dispatch` is the
+    /// backstop for the day one is dropped. A rendezvous channel with nobody
+    /// receiving refuses every `try_send`, which is the full queue without
+    /// the guards having to be broken first.
+    #[test]
+    fn a_refused_fetch_is_handed_back_to_the_app() {
+        let (workers, _rx) = queues(0);
+        let mut app = App::with_location(berlin());
+        let request = app.startup_request();
+
+        dispatch(&workers, &mut app, request).unwrap();
+
+        assert!(
+            matches!(&app.weather, Fetch::Failed(error) if error.contains("too many requests")),
+            "a request the worker never saw must not leave Loading on screen"
+        );
+    }
+
+    /// The glue the app-side test cannot reach: a refused detection asks for
+    /// a fetch of its fallback, and that fetch has to be dispatched rather
+    /// than discarded. Here the queue refuses it too, so the app lands on the
+    /// error screen; had the replacement been dropped it would sit in
+    /// Loading with nothing in flight.
+    #[test]
+    fn a_refused_detection_dispatches_its_replacement() {
+        let (workers, _rx) = queues(0);
+        let mut app = first_run();
+        let request = app.startup_request();
+        assert!(app.is_locating());
+
+        dispatch(&workers, &mut app, request).unwrap();
+
+        assert!(!app.is_locating());
+        assert!(
+            matches!(app.weather, Fetch::Failed(_)),
+            "the replacement fetch was never dispatched"
+        );
+    }
+
+    #[test]
+    fn a_stopped_worker_is_an_error_not_a_hang() {
+        let (workers, rx) = queues(1);
+        drop(rx);
+        let mut app = App::with_location(berlin());
+        let request = app.startup_request();
+
+        let error = dispatch(&workers, &mut app, request).unwrap_err();
+
+        assert!(error.to_string().contains("worker thread has stopped"));
+    }
+
+    /// The quit-time drain exists for exactly this: a load that landed after
+    /// the last frame was drawn and before `q` was read. Nothing on screen
+    /// says it arrived, and without the drain it would die with the receiver
+    /// instead of being remembered. The drain never touches the terminal, so
+    /// no frame is drawn here; the app still being in `Loading` is the
+    /// whole of "after the last frame".
+    #[test]
+    fn a_load_landing_after_the_last_frame_is_still_remembered_at_quit() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::with_location(berlin());
+        let request = app.startup_request();
+        assert!(matches!(app.weather, Fetch::Loading));
+
+        tx.send(loaded(request)).unwrap();
+        let mut warning = None;
+        let applied = drain_messages(&mut app, &rx, Some(&path), &mut warning, None).unwrap();
+
+        assert!(applied);
+        assert_eq!(warning, None);
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        assert_eq!(
+            state::load_from(&path).unwrap().remembered,
+            Some(chosen(berlin()))
+        );
+    }
+
+    /// The draw-loop drain sends what a message chains; the quit-time drain
+    /// must not, because the worker it would send to is about to be
+    /// abandoned. Same messages, same channel, the one difference.
+    #[test]
+    fn a_detection_chains_its_fetch_only_while_the_loop_runs() {
+        let (message_tx, message_rx) = mpsc::channel();
+        let (workers, request_rx) = queues(events::REQUEST_QUEUE);
+        let mut warning = None;
+
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("a first run must detect")
+        };
+        message_tx
+            .send(Message::Detected {
+                id,
+                location: reykjavik(),
+            })
+            .unwrap();
+        let applied =
+            drain_messages(&mut app, &message_rx, None, &mut warning, Some(&workers)).unwrap();
+        assert!(applied);
+        assert!(matches!(
+            request_rx.try_recv(),
+            Ok(Request::Fetch { location, .. }) if location == reykjavik()
+        ));
+
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("a first run must detect")
+        };
+        message_tx
+            .send(Message::Detected {
+                id,
+                location: reykjavik(),
+            })
+            .unwrap();
+        drain_messages(&mut app, &message_rx, None, &mut warning, None).unwrap();
+        assert!(
+            request_rx.try_recv().is_err(),
+            "the quit-time drain sent a request to a worker being abandoned"
+        );
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn an_empty_queue_leaves_the_frame_alone() {
+        let (_tx, rx) = mpsc::channel::<Message>();
+        let mut app = App::new();
+        let mut warning = None;
+
+        let applied = drain_messages(&mut app, &rx, None, &mut warning, None).unwrap();
+
+        assert!(!applied);
     }
 
     fn instant(seconds: i64) -> DateTime<Utc> {
