@@ -1,5 +1,6 @@
 use crate::app::ActiveLocation;
 use crate::cache;
+use crate::weather::client::Forecast;
 use crate::weather::client::detect_location;
 use crate::weather::client::fetch_forecast;
 use crate::weather::client::search_locations;
@@ -57,6 +58,10 @@ pub enum Message {
         id: RequestId,
         location: ActiveLocation,
         weather: Weather,
+        /// Why the forecast carries no air quality, when that is a failure
+        /// rather than a gap in coverage. The forecast is still a forecast,
+        /// so this is a line on the way out and never a screen.
+        air_quality_error: Option<String>,
     },
     LoadFailed {
         id: RequestId,
@@ -179,16 +184,23 @@ fn spawn_workers_with(
 }
 
 fn serve(request: Request) -> Message {
+    // `{:#}` for every error: `to_string` is only the outermost message,
+    // which for a network failure is `http status: 503` with nothing saying
+    // which host.
     match request {
         Request::Fetch { id, location } => match fetch_forecast(location.lat, location.lon) {
-            Ok(weather) => Message::Loaded {
+            Ok(Forecast {
+                weather,
+                air_quality_error,
+            }) => Message::Loaded {
                 id,
                 location,
                 weather,
+                air_quality_error,
             },
             Err(e) => Message::LoadFailed {
                 id,
-                error: e.to_string(),
+                error: format!("{e:#}"),
             },
         },
         Request::Detect { id } => match detect_location() {
@@ -198,14 +210,14 @@ fn serve(request: Request) -> Message {
             },
             Err(e) => Message::DetectFailed {
                 id,
-                error: e.to_string(),
+                error: format!("{e:#}"),
             },
         },
         Request::Search { id, query } => match search_locations(&query) {
             Ok(locations) => Message::Located { id, locations },
             Err(e) => Message::SearchFailed {
                 id,
-                error: e.to_string(),
+                error: format!("{e:#}"),
             },
         },
     }

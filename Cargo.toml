@@ -44,6 +44,12 @@ directories = "6.0.0"
 tempfile = "3.27.0"
 ureq = { version = "3.3.0", features = ["json"] }
 
+# Already in the graph through crossterm, which uses it for SIGWINCH, so this
+# adds no crate; without its defaults, because the channel and iterator
+# machinery is more than a flag needs.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3.18", default-features = false }
+
 [[bin]]
 name = "virga"
 path = "src/main.rs"
