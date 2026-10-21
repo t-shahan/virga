@@ -21,7 +21,11 @@ const TIMEOUT_GLOBAL: Duration = Duration::from_secs(15);
 /// Reaching an unreachable host should not burn the whole global budget before
 /// saying so.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
-const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m";
+/// The daily and hourly blocks the forecast request asks for, as constants so
+/// the DTO tests can check each name against a struct field. A rename on
+/// either side would otherwise deserialize to an empty series with no error.
+pub(super) const DAILY_FIELDS: &str = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_hours,wind_gusts_10m_max,wind_direction_10m_dominant,daylight_duration";
+pub(super) const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m";
 
 /// Detection sits in front of the first frame of weather, so its budget is
 /// tighter than the forecast's. A provider having a bad day should cost a
@@ -141,10 +145,7 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
             "current",
             "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
         )
-        .query(
-            "daily",
-            "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_hours,wind_gusts_10m_max,wind_direction_10m_dominant,daylight_duration",
-        )
+        .query("daily", DAILY_FIELDS)
         // Rides the existing request rather than taking its own. ~15 KB more on
         // an already-warm pooled connection beats a second round trip with its
         // own loading state and its own failure mode.
@@ -218,6 +219,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::time::Instant;
 
     #[test]
     fn hourly_request_names_every_weathergram_field() {
@@ -237,7 +239,6 @@ mod tests {
             ]
         );
     }
-    use std::time::Instant;
 
     /// A loopback server that answers every request with the same canned
     /// response, and `Endpoints` pointing all three URLs at it.
