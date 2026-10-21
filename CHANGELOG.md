@@ -12,7 +12,7 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
-## [0.7.0]
+## [0.7.0] - 2026-10-21
 
 Most of this release is `virga now` and the edges of the app. The one-shot
 report now suits a status bar polling by the minute. It answers from the
