@@ -25,6 +25,80 @@ refuse to publish a version this file does not describe.
   `VIRGA_UPDATE=off` still skips the check entirely, and `virga update`
   always answers (#109).
 
+### Changed
+
+- `virga update` exits 3 when a newer release exists, so a shell prompt or
+  a cron job can act on the answer without reading it. It used to exit 0
+  whether or not there was anything to do, on the reasoning that the
+  command had answered. 0 now means there is no newer release, 1 still
+  means the check could not be made, and 2 is still a usage error; the
+  text on stdout is unchanged. A script that treated every non-zero
+  status as a failed check has to tell 1 from 3 now. The table is in
+  `--help` (#110).
+
+### Fixed
+
+- The install script no longer hangs on a stalled connection. Every
+  `curl` now carries a connect and overall timeout and is pinned to
+  https, including across redirects (#69).
+- The install script says which of three things went wrong when a
+  download fails. A tag that does not exist, a tag that predates prebuilt
+  binaries, and a release with no build for the current platform each get
+  their own message; all three used to read "No such archive". A tag is
+  only reported missing when GitHub answers 404 for it; a rate limit or
+  an unreachable github.com is reported as that (#69).
+- A `gh attestation verify` that could not reach GitHub, for a rate limit
+  or an unreachable API, is reported by the install script as not
+  verified, with gh's own error and the command to run by hand. It used to
+  be called a failed attestation and stop the install. Every other
+  failure still stops it, with gh's error now shown: no attestation, a
+  signature or policy check that failed, and any message the script does
+  not recognise (#69).
+- Ctrl-C or a kill during the install now exits through the cleanup trap
+  rather than returning into the step it interrupted, so an interrupted
+  copy cannot be followed by the rename that puts it on `PATH` (#69).
+- A `kill`, or a terminal that delivers Ctrl-C as a signal rather than a
+  key, no longer leaves the tty in raw mode on the alternate screen.
+  SIGTERM and SIGINT ended the process before anything could restore the
+  terminal; each is now caught and the app leaves through the same path `q`
+  takes, then dies of the same signal, so a shell or script waiting on it
+  sees what it always did. Ctrl-C in the app is unchanged, and on Windows,
+  where crossterm already reports Ctrl-C and Ctrl-Break as keys, nothing is
+  hooked (#85).
+- A forecast whose air quality could not be fetched says so on the way out,
+  the way a failed state save already does, instead of leaving a blank AQI
+  cell for the session with no way to tell a 503 from a place CAMS does not
+  cover. `virga now` prints the same reason to stderr and the report to
+  stdout as before (#71).
+- A network error names the host that produced it. The loading screen used
+  to show `http status: 503` or `json: expected value at line 1 column 1`
+  with nothing saying which of three Open-Meteo hosts, or the location
+  provider, had answered that way; every request now carries its endpoint
+  into the message, and the search and detection errors carry it too. The
+  error popup and the search box wrap that message to fit rather than
+  cutting it off at the border (#71).
+- `virga now` no longer asks the location provider again on every poll
+  once a detection has failed. Only a detection that succeeded was
+  remembered, so a status bar polling by the minute asked ipapi.co again
+  on every poll after a 429, sixty times an hour. A failed detection is
+  now written down beside the rest of the state, and the report names the
+  fallback city for a quarter of an hour before asking again; the marker
+  is dropped the moment a place is remembered (#65).
+
+### Security
+
+- The weather and location clients refuse to speak plain HTTP, follow at
+  most two redirects, and cap every response body at 1 MiB before parsing
+  it, whether or not the body arrived compressed. Neither provider
+  redirects, so nothing changes on a healthy network; what changes is that
+  a redirect from either host to an `http://` URL is now an error rather
+  than the user's coordinates re-sent in the clear (#72).
+- Virga builds against rustls 0.23.46 and webpki-roots 1.0.10. The first
+  clears four rustls advisories (RUSTSEC-2026-0285, RUSTSEC-2026-0346,
+  RUSTSEC-2026-0348, RUSTSEC-2026-0349); the second stops the bundled root
+  store from trusting emSign intermediates that have since been distrusted
+  (RUSTSEC-2026-0381).
+
 ## [0.6.1] - 2026-09-07
 
 ### Fixed
