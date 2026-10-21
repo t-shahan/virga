@@ -13,6 +13,47 @@ pub struct GeocodeResultDto {
     pub country: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// These three decorate a row rather than define it, so a value of the
+    /// wrong shape — a population sent as a string, a timezone sent as a
+    /// number — costs that one value and not the whole list. The name and
+    /// coordinates above are held to the stricter rule because a row
+    /// without them is not a place, and the list is better off failing
+    /// loudly than showing one.
+    #[serde(default, deserialize_with = "lenient")]
+    pub timezone: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub country_code: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub population: Option<u64>,
+}
+
+/// A string with nothing in it once `plain` has had its say is the same
+/// as no string: a blank zone would be a blank second line in the search
+/// list, and a blank code names no country.
+fn present(text: String) -> Option<String> {
+    Some(plain(text)).filter(|text| !text.is_empty())
+}
+
+/// A value of the expected type, or `None` for anything else. An untagged
+/// enum buffers the value before trying each arm, which is what lets the
+/// second arm swallow whatever the first refused — a plain `Option<T>`
+/// would have consumed part of the input and failed the whole document.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Lenient<T> {
+    Value(T),
+    Other(serde::de::IgnoredAny),
+}
+
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Lenient::<T>::deserialize(deserializer)? {
+        Lenient::Value(value) => Some(value),
+        Lenient::Other(_) => None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +88,9 @@ impl GeocodeResultDto {
             country: self.country.map(plain),
             lat: self.latitude?,
             lon: self.longitude?,
+            timezone: self.timezone.and_then(present),
+            country_code: self.country_code.and_then(present),
+            population: self.population,
         })
     }
 }
@@ -106,6 +150,11 @@ impl GeoIpDto {
             country: country.map(plain),
             lat,
             lon,
+            // A detection never sits in the search list, which is the one
+            // place these are read.
+            timezone: None,
+            country_code: None,
+            population: None,
         })
     }
 }
@@ -219,6 +268,60 @@ fn at_owned(values: &[Option<String>], i: usize) -> Option<String> {
     values.get(i)?.clone()
 }
 
+/// Seven parallel arrays would make a zip chain unreadable — the pattern
+/// becomes ((((((a, b), c), d), e), f), g) — so index instead. Costs a
+/// clone per date string, which is nothing against the legibility.
+///
+/// `?` on the core four drops a day that is missing them; the
+/// supplementary readings stay Option, so a null UV only blanks a cell.
+fn daily_from(day: &DailyDto) -> Vec<DailyForecast> {
+    (0..day.time.len().min(MAX_DAYS))
+        .filter_map(|i| {
+            Some(DailyForecast {
+                date: day.time.get(i)?.clone(),
+                high_c: at(&day.temperature_2m_max, i)?,
+                low_c: at(&day.temperature_2m_min, i)?,
+                code: at(&day.weather_code, i)?,
+                rain_chance: at(&day.precipitation_probability_max, i),
+                wind_kph: at(&day.wind_speed_10m_max, i),
+                uv_index: at(&day.uv_index_max, i),
+                aqi: None,
+                sunrise: at_owned(&day.sunrise, i),
+                sunset: at_owned(&day.sunset, i),
+                feels_max_c: at(&day.apparent_temperature_max, i),
+                feels_min_c: at(&day.apparent_temperature_min, i),
+                precip_mm: at(&day.precipitation_sum, i),
+                precip_hours: at(&day.precipitation_hours, i),
+                gust_kph: at(&day.wind_gusts_10m_max, i),
+                wind_dir_deg: at(&day.wind_direction_10m_dominant, i),
+                daylight_secs: at(&day.daylight_duration, i),
+            })
+        })
+        .collect()
+}
+
+/// Same index-by-position shape as `daily_from`, for the same reason: many
+/// parallel arrays make a zip chain unreadable.
+fn hourly_from(hour: &HourlyDto) -> Vec<HourlyForecast> {
+    (0..hour.time.len().min(MAX_HOURS))
+        .filter_map(|i| {
+            Some(HourlyForecast {
+                time: hour.time.get(i)?.clone(),
+                precip_mm: at(&hour.precipitation, i),
+                snow_cm: at(&hour.snowfall, i),
+                chance: at(&hour.precipitation_probability, i),
+                code: at(&hour.weather_code, i),
+                temp_c: at(&hour.temperature_2m, i),
+                feels_like_c: at(&hour.apparent_temperature, i),
+                humidity_pct: at(&hour.relative_humidity_2m, i),
+                wind_kph: at(&hour.wind_speed_10m, i),
+                gust_kph: at(&hour.wind_gusts_10m, i),
+                wind_dir_deg: at(&hour.wind_direction_10m, i),
+            })
+        })
+        .collect()
+}
+
 impl From<ForecastDto> for Weather {
     fn from(dto: ForecastDto) -> Self {
         // `current.time` is local to the forecast location, so it identifies
@@ -233,64 +336,11 @@ impl From<ForecastDto> for Weather {
             .clone()
             .unwrap_or_else(|| Local::now().format("%Y-%m-%dT%H:%M").to_string());
 
-        // Seven parallel arrays would make a zip chain unreadable — the pattern
-        // becomes ((((((a, b), c), d), e), f), g) — so index instead. Costs a
-        // clone per date string, which is nothing against the legibility.
-        //
-        // `?` on the core four drops a day that is missing them; the
-        // supplementary readings stay Option, so a null UV only blanks a cell.
-        let day = &dto.daily;
-        let daily: Vec<DailyForecast> = (0..day.time.len().min(MAX_DAYS))
-            .filter_map(|i| {
-                Some(DailyForecast {
-                    date: day.time.get(i)?.clone(),
-                    high_c: at(&day.temperature_2m_max, i)?,
-                    low_c: at(&day.temperature_2m_min, i)?,
-                    code: at(&day.weather_code, i)?,
-                    rain_chance: at(&day.precipitation_probability_max, i),
-                    wind_kph: at(&day.wind_speed_10m_max, i),
-                    uv_index: at(&day.uv_index_max, i),
-                    aqi: None,
-                    sunrise: at_owned(&day.sunrise, i),
-                    sunset: at_owned(&day.sunset, i),
-                    feels_max_c: at(&day.apparent_temperature_max, i),
-                    feels_min_c: at(&day.apparent_temperature_min, i),
-                    precip_mm: at(&day.precipitation_sum, i),
-                    precip_hours: at(&day.precipitation_hours, i),
-                    gust_kph: at(&day.wind_gusts_10m_max, i),
-                    wind_dir_deg: at(&day.wind_direction_10m_dominant, i),
-                    daylight_secs: at(&day.daylight_duration, i),
-                })
-            })
-            .collect();
-
-        // Same index-by-position shape as `daily`, for the same reason: many
-        // parallel arrays make a zip chain unreadable.
-        let hourly: Vec<HourlyForecast> = dto.hourly.map_or_else(Vec::new, |hour| {
-            (0..hour.time.len().min(MAX_HOURS))
-                .filter_map(|i| {
-                    Some(HourlyForecast {
-                        time: hour.time.get(i)?.clone(),
-                        precip_mm: at(&hour.precipitation, i),
-                        snow_cm: at(&hour.snowfall, i),
-                        chance: at(&hour.precipitation_probability, i),
-                        code: at(&hour.weather_code, i),
-                        temp_c: at(&hour.temperature_2m, i),
-                        feels_like_c: at(&hour.apparent_temperature, i),
-                        humidity_pct: at(&hour.relative_humidity_2m, i),
-                        wind_kph: at(&hour.wind_speed_10m, i),
-                        gust_kph: at(&hour.wind_gusts_10m, i),
-                        wind_dir_deg: at(&hour.wind_direction_10m, i),
-                    })
-                })
-                .collect()
-        });
-
         // Positioned after filtering, so a dropped row cannot shift either
         // index. `position_of` owns the matching, and the cache's relocation
         // reuses it.
         let mut weather = Self {
-            hourly,
+            hourly: dto.hourly.as_ref().map_or_else(Vec::new, hourly_from),
             now_hour: 0,
             current: Current {
                 temp_c: dto.current.temperature_2m,
@@ -298,7 +348,7 @@ impl From<ForecastDto> for Weather {
                 code: dto.current.weather_code,
                 wind_kph: dto.current.wind_speed_10m,
             },
-            daily,
+            daily: daily_from(&dto.daily),
             today_index: 0,
             utc_offset_secs: dto.utc_offset_seconds,
             air_quality: None,
@@ -359,6 +409,7 @@ pub struct AqiCurrentDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weather::client::{DAILY_FIELDS, HOURLY_FIELDS};
 
     /// Real icon_seamless response; its final day has a null temperature_2m_max.
     /// Before daily measurements were Option, this failed to deserialize at all
@@ -735,9 +786,13 @@ mod tests {
             country: Some("Fra\u{200f}nce".to_string()),
             latitude: Some(48.85),
             longitude: Some(2.35),
+            timezone: Some("Europe/\u{202e}Paris".to_string()),
+            country_code: None,
+            population: None,
         };
         let location = geocode.into_location().expect("a location");
         assert_eq!(location.label(), "Paris, Île-de-France, France");
+        assert_eq!(location.timezone.as_deref(), Some("Europe/Paris"));
 
         // The overrides ride JSON's own \u escapes so the hostile
         // characters are visible in this source rather than reordering it.
@@ -761,6 +816,9 @@ mod tests {
             country: None,
             latitude: Some(27.18),
             longitude: Some(56.26),
+            timezone: None,
+            country_code: None,
+            population: None,
         };
         let location = geocode.into_location().expect("a location");
         assert_eq!(location.name, "بندر\u{200c}عباس");
@@ -803,6 +861,71 @@ mod tests {
         let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
         assert_eq!(dto.results[0].name, "Frederick");
         assert_eq!(dto.results[0].admin1.as_deref(), Some("Maryland"));
+        assert_eq!(dto.results[0].timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(dto.results[0].country_code.as_deref(), Some("US"));
+        assert_eq!(dto.results[0].population, Some(69479));
+    }
+
+    /// The timezone, country code and population decorate a row; the row
+    /// stands without them. Absent, null, and the wrong type all read as
+    /// unknown, and none of them costs the list the rows around it.
+    #[test]
+    fn a_geocode_row_survives_a_missing_or_malformed_timezone_and_population() {
+        let json = r#"{"results": [
+            {"name": "Absent", "latitude": 1.0, "longitude": 1.0},
+            {"name": "Null", "latitude": 1.0, "longitude": 1.0,
+             "timezone": null, "country_code": null, "population": null},
+            {"name": "Wrong", "latitude": 1.0, "longitude": 1.0,
+             "timezone": 42, "country_code": 840, "population": "many"},
+            {"name": "Negative", "latitude": 1.0, "longitude": 1.0,
+             "population": -5},
+            {"name": "Right", "latitude": 1.0, "longitude": 1.0,
+             "timezone": "Europe/Berlin", "country_code": "DE",
+             "population": 3644826}
+        ]}"#;
+
+        let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
+        let locations: Vec<_> = dto
+            .results
+            .into_iter()
+            .filter_map(GeocodeResultDto::into_location)
+            .collect();
+
+        assert_eq!(locations.len(), 5, "every row is still a place");
+        for location in &locations[..4] {
+            assert!(location.timezone.is_none(), "{}", location.name);
+            assert!(location.country_code.is_none(), "{}", location.name);
+            assert!(location.population.is_none(), "{}", location.name);
+        }
+        assert_eq!(locations[4].timezone.as_deref(), Some("Europe/Berlin"));
+        assert_eq!(locations[4].country_code.as_deref(), Some("DE"));
+        assert_eq!(locations[4].population, Some(3_644_826));
+    }
+
+    /// An empty zone is an unknown one, and so is one that was nothing but
+    /// the characters `plain` strips: either would have drawn a blank second
+    /// line, or a coordinate fallback with a leading separator.
+    #[test]
+    fn an_empty_timezone_or_country_code_reads_as_unknown() {
+        let json = r#"{"results": [
+            {"name": "Empty", "latitude": 1.0, "longitude": 1.0,
+             "timezone": "", "country_code": ""},
+            {"name": "Hollow", "latitude": 1.0, "longitude": 1.0,
+             "timezone": "\u202e", "country_code": "\u200f"}
+        ]}"#;
+
+        let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
+        let locations: Vec<_> = dto
+            .results
+            .into_iter()
+            .filter_map(GeocodeResultDto::into_location)
+            .collect();
+
+        assert_eq!(locations.len(), 2);
+        for location in &locations {
+            assert_eq!(location.timezone, None, "{}", location.name);
+            assert_eq!(location.country_code, None, "{}", location.name);
+        }
     }
 
     #[test]
@@ -810,5 +933,96 @@ mod tests {
         let json = include_str!("../../tests/fixtures/geocode_empty.json");
         let dto: GeocodeDto = serde_json::from_str(json).expect("should parse");
         assert!(dto.results.is_empty());
+    }
+
+    /// A name the request asks for that no struct field reads would come back
+    /// as an empty series with no error, from either side of a rename. Serde
+    /// only complains about a field it looked for, so the check is by
+    /// contradiction: a wrong-typed value under the name must fail to parse.
+    fn each_field_is_read_by<T: serde::de::DeserializeOwned>(
+        fields: &str,
+        base: serde_json::Value,
+    ) {
+        for field in fields.split(',') {
+            let mut json = base.clone();
+            json[field] = serde_json::json!("not an array");
+            assert!(
+                serde_json::from_value::<T>(json).is_err(),
+                "{field} is requested but no struct field reads it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_requested_daily_field_is_read_by_the_dto() {
+        each_field_is_read_by::<DailyDto>(
+            DAILY_FIELDS,
+            serde_json::json!({
+                "time": ["2026-08-09"], "weather_code": [0],
+                "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]
+            }),
+        );
+    }
+
+    #[test]
+    fn every_requested_hourly_field_is_read_by_the_dto() {
+        each_field_is_read_by::<HourlyDto>(
+            HOURLY_FIELDS,
+            serde_json::json!({"time": ["2026-08-09T00:00"]}),
+        );
+    }
+
+    /// The other direction: a reading the model carries has to be fed by a
+    /// field the request names, or it is a column that can never fill. Every
+    /// requested field is given a value, and every reading must then be there.
+    #[test]
+    fn every_daily_reading_is_fed_by_a_requested_field() {
+        let mut daily = serde_json::json!({"time": ["2026-08-09"]});
+        for field in DAILY_FIELDS.split(',') {
+            daily[field] = match field {
+                "sunrise" | "sunset" => serde_json::json!(["2026-08-09T06:00"]),
+                _ => serde_json::json!([1]),
+            };
+        }
+        let json = serde_json::json!({"current": {}, "daily": daily});
+
+        let weather: Weather = serde_json::from_value::<ForecastDto>(json)
+            .expect("should parse")
+            .into();
+        let day = &weather.daily[0];
+
+        assert!(day.rain_chance.is_some());
+        assert!(day.wind_kph.is_some());
+        assert!(day.uv_index.is_some());
+        assert!(day.sunrise.is_some());
+        assert!(day.sunset.is_some());
+        assert!(day.feels_max_c.is_some());
+        assert!(day.feels_min_c.is_some());
+        assert!(day.precip_mm.is_some());
+        assert!(day.precip_hours.is_some());
+        assert!(day.gust_kph.is_some());
+        assert!(day.wind_dir_deg.is_some());
+        assert!(day.daylight_secs.is_some());
+    }
+
+    #[test]
+    fn every_hourly_reading_is_fed_by_a_requested_field() {
+        let mut hourly = serde_json::json!({"time": ["2026-08-09T00:00"]});
+        for field in HOURLY_FIELDS.split(',') {
+            hourly[field] = serde_json::json!([1]);
+        }
+        let weather = with_hourly(&hourly.to_string());
+        let hour = &weather.hourly[0];
+
+        assert!(hour.precip_mm.is_some());
+        assert!(hour.snow_cm.is_some());
+        assert!(hour.chance.is_some());
+        assert!(hour.code.is_some());
+        assert!(hour.temp_c.is_some());
+        assert!(hour.feels_like_c.is_some());
+        assert!(hour.humidity_pct.is_some());
+        assert!(hour.wind_kph.is_some());
+        assert!(hour.gust_kph.is_some());
+        assert!(hour.wind_dir_deg.is_some());
     }
 }

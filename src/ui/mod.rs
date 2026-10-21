@@ -88,8 +88,15 @@ const _: () = assert!(MIN_WIDTH >= forecast::TABLE_MINIMAL + 2);
 /// the app, not a dashboard.
 const CANVAS_WIDTH: u16 = 120;
 
-pub(crate) fn render(frame: &mut Frame, app: &App) {
-    render_with(frame, app, app.theme.palette_for(app.color_depth));
+/// Draws the frame and reports whether the release notice was part of it.
+///
+/// Whether the notice got a row is decided here, by the screen and the
+/// size, and nowhere else — `App` cannot know without repeating this
+/// layout. The report is what lets a keypress dismiss the notice only when
+/// the user has been shown it, rather than on a terminal too short to have
+/// given it a row.
+pub(crate) fn render(frame: &mut Frame, app: &App) -> bool {
+    render_with(frame, app, app.theme.palette_for(app.color_depth))
 }
 
 /// The frame, drawn in a given palette.
@@ -98,12 +105,12 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
 /// value — no widget reaches for `app.theme` itself. That is what lets a test
 /// render the whole app in a palette of its own choosing and check that no
 /// colour survived being hard-coded.
-fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
+fn render_with(frame: &mut Frame, app: &App, palette: Palette) -> bool {
     let area = frame.area();
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         too_small_render(frame, area, area, (MIN_WIDTH, MIN_HEIGHT), palette);
-        return;
+        return false;
     }
 
     let page_area = if app.screen == Screen::Search {
@@ -229,6 +236,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     if app.help_visible {
         help_render(frame, app, palette, page_area);
     }
+    notice_visible
 }
 
 /// Forecast days the skeleton lays itself out for. The fetch asks Open-Meteo
@@ -369,8 +377,23 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     area
 }
 
+/// The popup's width, and the height it keeps for a short body so the
+/// loading spinner sits in the same box it always has.
+const POPUP_WIDTH: u16 = 40;
+const POPUP_MIN_HEIGHT: u16 = 5;
+
 fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, body: &str) {
-    let area = centered(area, 40, 5);
+    // Fitted to the body rather than fixed at five rows: an error names the
+    // host that produced it, and the shortest of those is already longer
+    // than the box is wide. A fixed box clipped the chain at its border,
+    // which showed less than the bare status it replaced (#71).
+    let width = area.width.min(POPUP_WIDTH);
+    let rows = wrapped(body, width.saturating_sub(2) as usize);
+    let height = (rows.len() as u16)
+        .saturating_add(2)
+        .max(POPUP_MIN_HEIGHT)
+        .min(area.height);
+    let area = centered(area, width, height);
 
     // An error is the one message the reader has to act on, so it takes the
     // error colour while the loading spinner stays ordinary text.
@@ -380,9 +403,10 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
         palette.text
     };
 
+    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(body)
+        Paragraph::new(lines)
             .style(Style::new().fg(colour))
             .alignment(Alignment::Center)
             .block(
@@ -395,6 +419,50 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
             ),
         area,
     )
+}
+
+/// `text` broken onto rows of at most `width` columns, between words where
+/// the next word fits and mid-word where it never could. The mid-word cut
+/// is for URLs: an error names its host, and a host is one word that can
+/// be longer than a 34-column terminal, so breaking only at spaces would
+/// leave it clipped at the border exactly as not wrapping did.
+///
+/// Rows are built here rather than by `Paragraph::wrap` because the popup
+/// is sized from the count, and the count ratatui would draw is behind an
+/// unstable feature. Drawing the same rows that were counted keeps the box
+/// and its body from drifting apart.
+pub(super) fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    if width == 0 {
+        return rows;
+    }
+    let mut row = String::new();
+    let mut filled = 0;
+    for word in text.split_whitespace() {
+        let pieces: Vec<String> = word
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(width)
+            .map(|piece| piece.iter().collect())
+            .collect();
+        for piece in pieces {
+            let length = piece.chars().count();
+            if filled > 0 && filled + 1 + length > width {
+                rows.push(std::mem::take(&mut row));
+                filled = 0;
+            }
+            if filled > 0 {
+                row.push(' ');
+                filled += 1;
+            }
+            row.push_str(&piece);
+            filled += length;
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 /// What the forecast on screen is besides fresh, for the left of a pane's
@@ -641,6 +709,9 @@ mod tests {
                 country: Some("United States".to_string()),
                 lat: 39.414_27,
                 lon: -77.410_54,
+                timezone: None,
+                country_code: None,
+                population: None,
             },
             Location {
                 name: "Fredericksburg".to_string(),
@@ -648,6 +719,21 @@ mod tests {
                 country: Some("United States".to_string()),
                 lat: 38.301_8,
                 lon: -77.460_5,
+                timezone: None,
+                country_code: None,
+                population: None,
+            },
+            // Reads the same as the first row, so the list draws its
+            // disambiguating second line and the colour sweep reaches it.
+            Location {
+                name: "Frederick".to_string(),
+                admin1: Some("Maryland".to_string()),
+                country: Some("United States".to_string()),
+                lat: 38.9,
+                lon: -76.9,
+                timezone: Some("America/Chicago".to_string()),
+                country_code: None,
+                population: None,
             },
         ]
     }
@@ -839,6 +925,99 @@ mod tests {
         assert_eq!(before, after, "help did not put the screen back");
     }
 
+    /// The chains that reach the screen name a host, and the shortest real
+    /// one is longer than the popup is wide. The fixed 40x5 box used to clip
+    /// them at its border, so `http status: 503` on `main` became `fetch the
+    /// forecast from https://api.op` on the branch that meant to add the
+    /// host (#71). The existing sweep uses short messages, which is how it
+    /// passed. Both the host and the status have to be readable at the
+    /// minimum size and at an ordinary one, and the box must still close.
+    #[test]
+    fn a_failure_naming_its_host_shows_the_host_and_the_status() {
+        let host = "https://api.open-meteo.com/v1/forecast";
+        let chain = format!("the forecast service at {host}: http status: 503");
+        for screen in [Screen::Weather, Screen::Hourly] {
+            for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (80, 24)] {
+                let mut app = ready(screen);
+                app.weather = Fetch::Failed(chain.clone());
+                let rows = symbols(&drawn(&app, probe(), width, height), width, height);
+                let shown = visible_ascii(&rows);
+                assert!(
+                    shown.contains(host),
+                    "{screen:?} at {width}x{height} lost the host:\n{}",
+                    rows.join("\n")
+                );
+                assert!(
+                    shown.contains("httpstatus:503"),
+                    "{screen:?} at {width}x{height} lost the status:\n{}",
+                    rows.join("\n")
+                );
+                assert!(
+                    rows.iter().any(|row| row.contains('└')),
+                    "{screen:?} at {width}x{height}: the popup does not close:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+    }
+
+    /// The search box has the same problem in its own list area: one row,
+    /// no wrap, and a geocoder chain longer than either width it is drawn at.
+    #[test]
+    fn a_failed_search_shows_the_host_and_the_status() {
+        let host = "https://geocoding-api.open-meteo.com/v1/search";
+        for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (80, 24)] {
+            let mut app = ready(Screen::Search);
+            app.query = "reykjavik".to_string();
+            app.results = Fetch::Failed(format!("the geocoder at {host}: http status: 503"));
+            let rows = symbols(&drawn(&app, probe(), width, height), width, height);
+            let shown = visible_ascii(&rows);
+            assert!(
+                shown.contains(host) && shown.contains("httpstatus:503"),
+                "search at {width}x{height}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    /// The popup only grows: a one-line body keeps the five rows the
+    /// spinner has always had, so loading looks as it did. On the hourly
+    /// screen, which still loads in a popup; the weather screen draws its
+    /// panes instead (#112).
+    #[test]
+    fn a_short_popup_keeps_its_height() {
+        let mut app = ready(Screen::Hourly);
+        app.weather = Fetch::Loading;
+        let rows = symbols(&drawn(&app, probe(), 80, 24), 80, 24);
+        let top = rows.iter().position(|row| row.contains('┌')).unwrap();
+        let bottom = rows.iter().position(|row| row.contains('└')).unwrap();
+        assert_eq!(bottom - top + 1, POPUP_MIN_HEIGHT as usize);
+    }
+
+    #[test]
+    fn wrapping_breaks_between_words_and_cuts_a_word_wider_than_the_row() {
+        assert_eq!(wrapped("a bb ccc", 5), vec!["a bb", "ccc"]);
+        assert_eq!(wrapped("abcdefgh ij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrapped("x abcdefg", 4), vec!["x", "abcd", "efg"]);
+        assert!(wrapped("", 4).is_empty());
+        assert!(wrapped("anything", 0).is_empty());
+        assert!(
+            wrapped("a bb ccc dddd", 5)
+                .iter()
+                .all(|row| row.chars().count() <= 5)
+        );
+    }
+
+    /// The frame as one run of visible ASCII, with the box and the spacing
+    /// removed: a host is one word that a 32-column box has to cut, and
+    /// where it is cut is not what these tests are about.
+    fn visible_ascii(rows: &[String]) -> String {
+        rows.concat()
+            .chars()
+            .filter(char::is_ascii_graphic)
+            .collect()
+    }
+
     /// The sizes the skeleton has to read as intentional at: the floor, a
     /// short terminal just above it, and two ordinary ones.
     const SKELETON_SIZES: [(u16, u16); 4] =
@@ -986,6 +1165,9 @@ mod tests {
             country: Some("Germany".to_string()),
             lat: 52.52,
             lon: 13.405,
+            timezone: None,
+            country_code: None,
+            population: None,
         }]);
         let _ = app.on_action(crate::input::Action::Submit);
         assert!(
@@ -1001,10 +1183,22 @@ mod tests {
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| render_with(f, app, palette))
+            .draw(|f| {
+                render_with(f, app, palette);
+            })
             .unwrap()
             .buffer
             .clone()
+    }
+
+    /// What `render` reports about the notice for a given size.
+    fn notice_reported(app: &App, width: u16, height: u16) -> bool {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut reported = false;
+        terminal
+            .draw(|f| reported = render_with(f, app, probe()))
+            .unwrap();
+        reported
     }
 
     fn symbols(buffer: &Buffer, width: u16, height: u16) -> Vec<String> {
@@ -1178,7 +1372,11 @@ mod tests {
         let expected_accent = Color::Indexed(208);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(frame, &app);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let colours: Vec<Color> = (0..40u16)
             .flat_map(|y| (0..120u16).map(move |x| buffer[(x, y)].fg))
@@ -1202,7 +1400,10 @@ mod tests {
 
         for (width, height) in [(1, 1), (10, 5), (33, 11), (34, 11), (33, 12)] {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
-            t.draw(|f| render(f, &app)).unwrap();
+            t.draw(|f| {
+                render(f, &app);
+            })
+            .unwrap();
 
             let buf = t.backend().buffer();
             let text: String = (0..height)
@@ -1222,7 +1423,10 @@ mod tests {
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
 
         let mut t = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).unwrap();
-        t.draw(|f| render(f, &app)).unwrap();
+        t.draw(|f| {
+            render(f, &app);
+        })
+        .unwrap();
 
         let buf = t.backend().buffer();
         let text: String = (0..MIN_HEIGHT)
@@ -1602,6 +1806,37 @@ mod tests {
         let text = symbols(&buffer, 100, 20).join("\n");
 
         assert!(!text.contains("update: virga"));
+    }
+
+    /// The report has to agree with the frame in every case above, because
+    /// it is what decides whether the next key may let the notice go. A
+    /// frame that withheld the row and reported it drawn would lose news
+    /// nobody saw; the reverse would leave a key that saw it changing
+    /// nothing.
+    #[test]
+    fn the_render_reports_the_notice_exactly_when_it_drew_it() {
+        assert!(notice_reported(&noticed(Screen::Weather), 100, 20));
+        assert!(
+            !notice_reported(&ready(Screen::Weather), 100, 20),
+            "no notice, nothing to report"
+        );
+        assert!(
+            !notice_reported(&noticed(Screen::Weather), MIN_WIDTH, MIN_HEIGHT),
+            "the minimum terminal has no row to give it"
+        );
+        assert!(
+            !notice_reported(&noticed(Screen::Weather), MIN_WIDTH, MIN_HEIGHT - 1),
+            "a terminal below the floor draws nothing but its size"
+        );
+        assert!(!notice_reported(&noticed(Screen::Search), 100, 20));
+
+        let hourly = noticed(Screen::Hourly);
+        let fits = hourly_fits_at(&hourly, 100);
+        assert!(
+            !notice_reported(&hourly, 100, fits),
+            "the notice yielded to the hourly floor but was reported drawn"
+        );
+        assert!(notice_reported(&hourly, 100, fits + 1));
     }
 
     /// The complaint this replaced a role for: the bars in both charts were a

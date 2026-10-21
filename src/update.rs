@@ -19,8 +19,8 @@ pub(crate) const RELEASES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/re
 
 /// A user asked and is waiting at a prompt, so the budget is the tight one:
 /// the detection budget, not the forecast's fifteen seconds.
-const TIMEOUT_GLOBAL: Duration = Duration::from_secs(5);
-const TIMEOUT_CONNECT: Duration = Duration::from_secs(3);
+const PROBE_TIMEOUT_GLOBAL: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT_CONNECT: Duration = Duration::from_secs(3);
 
 /// Redirects off is the whole request: the `Location` header of the redirect
 /// *is* the answer, and following it would download a release page nobody
@@ -28,8 +28,8 @@ const TIMEOUT_CONNECT: Duration = Duration::from_secs(3);
 fn probe_agent() -> Agent {
     Agent::new_with_config(
         Agent::config_builder()
-            .timeout_global(Some(TIMEOUT_GLOBAL))
-            .timeout_connect(Some(TIMEOUT_CONNECT))
+            .timeout_global(Some(PROBE_TIMEOUT_GLOBAL))
+            .timeout_connect(Some(PROBE_TIMEOUT_CONNECT))
             .max_redirects(0)
             .build(),
     )
@@ -237,13 +237,62 @@ pub(crate) fn report(current: &Release, latest: &Release, method: &InstallMethod
     )
 }
 
+/// What `virga update` found, which is what its exit status reports.
+///
+/// The text on stdout already says all of this; the status repeats it so a
+/// prompt or a cron job can act on the answer without scraping it, the way
+/// `brew outdated` is non-zero when there is something to do.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum Outcome {
+    /// A newer release exists.
+    Available,
+    /// Nothing to do: on the latest release, or ahead of it.
+    Current,
+    /// The probe did not answer, so nothing is known either way.
+    Failed,
+}
+
+/// Whether there is anything to do, judged the same way `report` judges it.
+pub(crate) fn outcome(current: &Release, latest: &Release) -> Outcome {
+    if latest.newer_than(current) {
+        Outcome::Available
+    } else {
+        Outcome::Current
+    }
+}
+
+/// The exit status `virga update` ends with.
+///
+/// Three, not one, for a newer release: 1 already means the check could
+/// not be made and 2 is a usage error everywhere in the binary, so a script
+/// that treats non-zero as failure keeps its meaning and one that wants to
+/// know can tell the codes apart.
+pub(crate) fn exit_code(outcome: Outcome) -> i32 {
+    match outcome {
+        Outcome::Current => 0,
+        Outcome::Failed => 1,
+        Outcome::Available => 3,
+    }
+}
+
 /// The one-line startup notice, or `None` when there is nothing newsworthy.
 ///
 /// It points at `virga update` rather than carrying the instruction itself:
 /// one muted line has room to say that news exists, and the subcommand is
 /// where the full answer already lives.
-pub(crate) fn notice(current: &Release, latest: &Release) -> Option<String> {
-    latest.newer_than(current).then(|| {
+///
+/// `dismissed` is the release whose notice the user last cleared. That
+/// release, and anything older, is not news twice; only a release newer than
+/// it is. A dismissal never touches `virga update`, which is asked on
+/// purpose and always answers.
+pub(crate) fn notice(
+    current: &Release,
+    latest: &Release,
+    dismissed: Option<&Release>,
+) -> Option<String> {
+    let news = latest.newer_than(current)
+        && dismissed.is_none_or(|dismissed| latest.newer_than(dismissed));
+    news.then(|| {
         format!("update: virga {latest} is available (you have {current}) — run `virga update`")
     })
 }
@@ -335,7 +384,13 @@ mod tests {
             "Location: https://github.com/t-shahan/virga/releases/tag/v0.3.0\r\n",
         );
 
-        assert_eq!(latest_tag_with(&test_agent(), &base).unwrap(), "v0.3.0");
+        let tag = latest_tag_with(&test_agent(), &base).unwrap();
+        assert_eq!(tag, "v0.3.0");
+
+        // The tag off the wire, carried through to the status a script sees.
+        let latest = Release::parse(&tag).unwrap();
+        let current = Release::parse("0.2.0").unwrap();
+        assert_eq!(exit_code(outcome(&current, &latest)), 3);
     }
 
     /// A page instead of a redirect — GitHub down in some novel way, or a
@@ -370,9 +425,9 @@ mod tests {
         let agent = probe_agent();
         let config = agent.config();
 
-        assert_eq!(config.timeouts().global, Some(TIMEOUT_GLOBAL));
-        assert_eq!(config.timeouts().connect, Some(TIMEOUT_CONNECT));
-        assert!(TIMEOUT_CONNECT < TIMEOUT_GLOBAL);
+        assert_eq!(config.timeouts().global, Some(PROBE_TIMEOUT_GLOBAL));
+        assert_eq!(config.timeouts().connect, Some(PROBE_TIMEOUT_CONNECT));
+        assert!(PROBE_TIMEOUT_CONNECT < PROBE_TIMEOUT_GLOBAL);
         assert_eq!(config.max_redirects(), 0, "the redirect is the answer");
     }
 
@@ -650,13 +705,116 @@ mod tests {
         }
     }
 
+    /// Every code the command can end with, beside what earns it. 1 and 2
+    /// are what the rest of the binary means by them; 3 is the only one
+    /// `update` adds.
+    #[test]
+    fn each_outcome_maps_to_its_own_exit_code() {
+        for (outcome, code) in [
+            (Outcome::Current, 0),
+            (Outcome::Failed, 1),
+            (Outcome::Available, 3),
+        ] {
+            assert_eq!(exit_code(outcome), code, "{outcome:?}");
+        }
+    }
+
+    /// The status agrees with the report: whenever stdout says an update
+    /// is available the outcome is `Available`, and only then. Being ahead
+    /// of the listing is not an update by either measure.
+    #[test]
+    fn the_outcome_tracks_the_report() {
+        let current = Release::parse("0.2.0").unwrap();
+        let newer = Release::parse("0.3.0").unwrap();
+        let older = Release::parse("0.1.0").unwrap();
+
+        for (latest, expected) in [
+            (&newer, Outcome::Available),
+            (&current, Outcome::Current),
+            (&older, Outcome::Current),
+        ] {
+            let outcome = outcome(&current, latest);
+            let report = report(&current, latest, &InstallMethod::Homebrew);
+
+            assert_eq!(outcome, expected, "{latest}");
+            assert_eq!(
+                report.contains("is available"),
+                outcome == Outcome::Available,
+                "{latest}: {report}"
+            );
+        }
+    }
+
     #[test]
     fn no_newer_release_means_no_notice() {
         let current = Release::parse("0.2.0").unwrap();
         let behind = Release::parse("0.1.0").unwrap();
 
-        assert_eq!(notice(&current, &current), None);
-        assert_eq!(notice(&current, &behind), None, "being ahead is not news");
+        assert_eq!(notice(&current, &current, None), None);
+        assert_eq!(
+            notice(&current, &behind, None),
+            None,
+            "being ahead is not news"
+        );
+    }
+
+    /// The notice a user cleared last time stays cleared: the same release
+    /// is not announced again, and neither is one older than it. A newer
+    /// one is news again, since it is not what they dismissed.
+    #[test]
+    fn a_dismissed_release_is_not_announced_again_but_a_newer_one_is() {
+        let current = Release::parse("0.2.0").unwrap();
+        let dismissed = Release::parse("0.3.0").unwrap();
+
+        assert_eq!(notice(&current, &dismissed, Some(&dismissed)), None);
+        let older = Release::parse("0.2.1").unwrap();
+        assert_eq!(
+            notice(&current, &older, Some(&dismissed)),
+            None,
+            "a release behind the dismissed one is not news either"
+        );
+
+        let newer = Release::parse("0.3.1").unwrap();
+        let notice = notice(&current, &newer, Some(&dismissed)).expect("a newer release is news");
+        assert!(notice.contains("0.3.1"));
+    }
+
+    /// Dismissing an old notice does not silence a later one: the release
+    /// on offer is newer than what was cleared, so it is announced.
+    #[test]
+    fn dismissing_an_older_release_does_not_hide_the_latest() {
+        let current = Release::parse("0.2.0").unwrap();
+        let latest = Release::parse("0.4.0").unwrap();
+        let dismissed = Release::parse("0.3.0").unwrap();
+
+        assert!(notice(&current, &latest, Some(&dismissed)).is_some());
+    }
+
+    /// The dismissal is compared with the same rule as the update itself,
+    /// so a pre-release sits behind its bare triple on both sides: clearing
+    /// 0.7.0 covers its rc, clearing an older release does not, and a
+    /// hand-edited rc dismissal does not cover the release it precedes.
+    /// `releases/latest` never points at a pre-release, so only the last
+    /// is reachable without an edit; all three pin `newer_than`'s rule.
+    #[test]
+    fn a_dismissal_covers_a_pre_release_of_the_same_triple_and_no_more() {
+        let current = Release::parse("0.6.0").unwrap();
+        let rc = Release::parse("0.7.0-rc1").unwrap();
+        let release = Release::parse("0.7.0").unwrap();
+
+        assert_eq!(
+            notice(&current, &rc, Some(&release)),
+            None,
+            "the rc of a dismissed release is not news"
+        );
+        assert!(
+            notice(&current, &rc, Some(&Release::parse("0.6.5").unwrap())).is_some(),
+            "an rc ahead of the dismissed release is news"
+        );
+        assert!(
+            notice(&current, &release, Some(&rc)).is_some(),
+            "the release is news after its rc was dismissed"
+        );
     }
 
     #[test]
@@ -664,7 +822,7 @@ mod tests {
         let current = Release::parse("0.2.0").unwrap();
         let latest = Release::parse("0.3.0").unwrap();
 
-        let notice = notice(&current, &latest).unwrap();
+        let notice = notice(&current, &latest, None).unwrap();
 
         assert!(notice.contains("0.3.0"));
         assert!(notice.contains("0.2.0"));
