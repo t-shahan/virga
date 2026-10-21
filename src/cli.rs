@@ -128,6 +128,12 @@ Options:
 No option changes how the application runs. Every control inside it is a key,
 and the bar along the bottom names them. `q` quits.
 
+Exit status:
+  0  Answered. For `update`: no newer release
+  1  Could not answer: the network or a file failed
+  2  Usage error, or an argument nothing matched
+  3  `update` found a newer release
+
 Environment:
   VIRGA_THEME   Startup palette, for one launch
   VIRGA_UNITS   `metric` or `imperial`, for `now` and the app's first frame
@@ -309,5 +315,27 @@ mod tests {
         let text = usage();
         assert!(text.contains("VIRGA_CACHE"));
         assert!(text.contains("under an hour"), "{text}");
+    }
+
+    /// The codes are the contract a script relies on, so the help has to
+    /// carry the whole table, including the one only `update` uses.
+    #[test]
+    fn usage_documents_every_exit_code() {
+        let text = usage();
+        let table = text
+            .split_once("Exit status:")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n\n"))
+            .map(|(table, _)| table)
+            .expect("the help has an exit status section");
+        for code in ["0", "1", "2", "3"] {
+            assert!(
+                table
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(code)),
+                "exit code {code} is not in the table:{table}"
+            );
+        }
+        assert!(table.contains("newer release"));
     }
 }

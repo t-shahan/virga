@@ -1,6 +1,6 @@
 use crate::app::{App, Fetch};
 use crate::theme::Palette;
-use crate::ui::{centered, spinner};
+use crate::ui::{centered, spinner, wrapped};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -79,7 +79,13 @@ pub(super) fn search_render(frame: &mut Frame, app: &App, palette: Palette, area
                 }
             })
             .collect(),
-        Fetch::Failed(e) => vec![Line::from(format!("error: {e}")).fg(palette.error)],
+        // Wrapped, unlike the results above it: a failure names the
+        // geocoder's host, which is wider than this box, and a single row
+        // cut it off before the status that says what went wrong (#71).
+        Fetch::Failed(e) => wrapped(&format!("error: {e}"), list_area.width as usize)
+            .into_iter()
+            .map(|row| Line::from(row).fg(palette.error))
+            .collect(),
     };
 
     frame.render_widget(Paragraph::new(body), list_area);

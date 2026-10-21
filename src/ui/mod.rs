@@ -326,8 +326,23 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     area
 }
 
+/// The popup's width, and the height it keeps for a short body so the
+/// loading spinner sits in the same box it always has.
+const POPUP_WIDTH: u16 = 40;
+const POPUP_MIN_HEIGHT: u16 = 5;
+
 fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, body: &str) {
-    let area = centered(area, 40, 5);
+    // Fitted to the body rather than fixed at five rows: an error names the
+    // host that produced it, and the shortest of those is already longer
+    // than the box is wide. A fixed box clipped the chain at its border,
+    // which showed less than the bare status it replaced (#71).
+    let width = area.width.min(POPUP_WIDTH);
+    let rows = wrapped(body, width.saturating_sub(2) as usize);
+    let height = (rows.len() as u16)
+        .saturating_add(2)
+        .max(POPUP_MIN_HEIGHT)
+        .min(area.height);
+    let area = centered(area, width, height);
 
     // An error is the one message the reader has to act on, so it takes the
     // error colour while the loading spinner stays ordinary text.
@@ -337,9 +352,10 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
         palette.text
     };
 
+    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(body)
+        Paragraph::new(lines)
             .style(Style::new().fg(colour))
             .alignment(Alignment::Center)
             .block(
@@ -352,6 +368,50 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
             ),
         area,
     )
+}
+
+/// `text` broken onto rows of at most `width` columns, between words where
+/// the next word fits and mid-word where it never could. The mid-word cut
+/// is for URLs: an error names its host, and a host is one word that can
+/// be longer than a 34-column terminal, so breaking only at spaces would
+/// leave it clipped at the border exactly as not wrapping did.
+///
+/// Rows are built here rather than by `Paragraph::wrap` because the popup
+/// is sized from the count, and the count ratatui would draw is behind an
+/// unstable feature. Drawing the same rows that were counted keeps the box
+/// and its body from drifting apart.
+pub(super) fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    if width == 0 {
+        return rows;
+    }
+    let mut row = String::new();
+    let mut filled = 0;
+    for word in text.split_whitespace() {
+        let pieces: Vec<String> = word
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(width)
+            .map(|piece| piece.iter().collect())
+            .collect();
+        for piece in pieces {
+            let length = piece.chars().count();
+            if filled > 0 && filled + 1 + length > width {
+                rows.push(std::mem::take(&mut row));
+                filled = 0;
+            }
+            if filled > 0 {
+                row.push(' ');
+                filled += 1;
+            }
+            row.push_str(&piece);
+            filled += length;
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 /// What the forecast on screen is besides fresh, for the left of a pane's
@@ -794,6 +854,97 @@ mod tests {
         app.on_action(crate::input::Action::NextDay);
         let after = drawn(&app, probe(), 120, 30);
         assert_eq!(before, after, "help did not put the screen back");
+    }
+
+    /// The chains that reach the screen name a host, and the shortest real
+    /// one is longer than the popup is wide. The fixed 40x5 box used to clip
+    /// them at its border, so `http status: 503` on `main` became `fetch the
+    /// forecast from https://api.op` on the branch that meant to add the
+    /// host (#71). The existing sweep uses short messages, which is how it
+    /// passed. Both the host and the status have to be readable at the
+    /// minimum size and at an ordinary one, and the box must still close.
+    #[test]
+    fn a_failure_naming_its_host_shows_the_host_and_the_status() {
+        let host = "https://api.open-meteo.com/v1/forecast";
+        let chain = format!("the forecast service at {host}: http status: 503");
+        for screen in [Screen::Weather, Screen::Hourly] {
+            for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (80, 24)] {
+                let mut app = ready(screen);
+                app.weather = Fetch::Failed(chain.clone());
+                let rows = symbols(&drawn(&app, probe(), width, height), width, height);
+                let shown = visible_ascii(&rows);
+                assert!(
+                    shown.contains(host),
+                    "{screen:?} at {width}x{height} lost the host:\n{}",
+                    rows.join("\n")
+                );
+                assert!(
+                    shown.contains("httpstatus:503"),
+                    "{screen:?} at {width}x{height} lost the status:\n{}",
+                    rows.join("\n")
+                );
+                assert!(
+                    rows.iter().any(|row| row.contains('└')),
+                    "{screen:?} at {width}x{height}: the popup does not close:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+    }
+
+    /// The search box has the same problem in its own list area: one row,
+    /// no wrap, and a geocoder chain longer than either width it is drawn at.
+    #[test]
+    fn a_failed_search_shows_the_host_and_the_status() {
+        let host = "https://geocoding-api.open-meteo.com/v1/search";
+        for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (80, 24)] {
+            let mut app = ready(Screen::Search);
+            app.query = "reykjavik".to_string();
+            app.results = Fetch::Failed(format!("the geocoder at {host}: http status: 503"));
+            let rows = symbols(&drawn(&app, probe(), width, height), width, height);
+            let shown = visible_ascii(&rows);
+            assert!(
+                shown.contains(host) && shown.contains("httpstatus:503"),
+                "search at {width}x{height}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    /// The popup only grows: a one-line body keeps the five rows the
+    /// spinner has always had, so loading looks as it did.
+    #[test]
+    fn a_short_popup_keeps_its_height() {
+        let mut app = ready(Screen::Weather);
+        app.weather = Fetch::Loading;
+        let rows = symbols(&drawn(&app, probe(), 80, 24), 80, 24);
+        let top = rows.iter().position(|row| row.contains('┌')).unwrap();
+        let bottom = rows.iter().position(|row| row.contains('└')).unwrap();
+        assert_eq!(bottom - top + 1, POPUP_MIN_HEIGHT as usize);
+    }
+
+    #[test]
+    fn wrapping_breaks_between_words_and_cuts_a_word_wider_than_the_row() {
+        assert_eq!(wrapped("a bb ccc", 5), vec!["a bb", "ccc"]);
+        assert_eq!(wrapped("abcdefgh ij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrapped("x abcdefg", 4), vec!["x", "abcd", "efg"]);
+        assert!(wrapped("", 4).is_empty());
+        assert!(wrapped("anything", 0).is_empty());
+        assert!(
+            wrapped("a bb ccc dddd", 5)
+                .iter()
+                .all(|row| row.chars().count() <= 5)
+        );
+    }
+
+    /// The frame as one run of visible ASCII, with the box and the spacing
+    /// removed: a host is one word that a 32-column box has to cut, and
+    /// where it is cut is not what these tests are about.
+    fn visible_ascii(rows: &[String]) -> String {
+        rows.concat()
+            .chars()
+            .filter(char::is_ascii_graphic)
+            .collect()
     }
 
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
