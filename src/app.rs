@@ -1317,6 +1317,9 @@ mod tests {
                 country: None,
                 lat: 10.0 + i as f64,
                 lon: 20.0 + i as f64,
+                timezone: None,
+                country_code: None,
+                population: None,
             })
             .collect()
     }
