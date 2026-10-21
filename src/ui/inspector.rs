@@ -308,7 +308,13 @@ fn next_precipitation(hours: &[HourlyForecast]) -> String {
         }
     }
 
-    format!("no rain in the next {} days", hours.len() / 24)
+    // Rounded up, as the week strip counts: `len / 24` called a 191-hour
+    // series seven days while the strip below it drew eight rows, and called
+    // anything under a day none at all.
+    match hours.len().div_ceil(24) {
+        1 => "no rain in the next day".to_string(),
+        days => format!("no rain in the next {days} days"),
+    }
 }
 
 fn falling_word(hour: &HourlyForecast) -> &'static str {
@@ -424,6 +430,26 @@ mod tests {
         assert_eq!(
             next_precipitation(&dry_hours(192)),
             "no rain in the next 8 days"
+        );
+    }
+
+    /// A forecast fetched mid-afternoon is a few hours short of eight days,
+    /// and the strip under it still draws eight rows; the sentence must not
+    /// count one fewer. Under a day is a day, not "0 days".
+    #[test]
+    fn a_partial_last_day_still_counts_and_a_short_series_is_not_zero_days() {
+        assert_eq!(
+            next_precipitation(&dry_hours(191)),
+            "no rain in the next 8 days"
+        );
+        assert_eq!(
+            next_precipitation(&dry_hours(24)),
+            "no rain in the next day"
+        );
+        assert_eq!(next_precipitation(&dry_hours(5)), "no rain in the next day");
+        assert_eq!(
+            next_precipitation(&dry_hours(25)),
+            "no rain in the next 2 days"
         );
     }
 
