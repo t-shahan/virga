@@ -7,6 +7,19 @@ pub struct Location {
     pub country: Option<String>,
     pub lat: f64,
     pub lon: f64,
+    /// The IANA zone the geocoder files the place under, e.g.
+    /// "America/Denver". Not persisted: what the state file and the cache
+    /// keep is `ActiveLocation`, and the offset the forecast response
+    /// carries is what tells the time there.
+    pub timezone: Option<String>,
+    /// ISO 3166-1 alpha-2, e.g. "US". Two rows that collide already share
+    /// the country the label names, so the code is read only where the
+    /// geocoder sent no country name and it is the one thing left that says
+    /// which country the place is in.
+    pub country_code: Option<String>,
+    /// From the geocoder, where it knows. Orders the search list so the city
+    /// people mean comes first among the places that share its name.
+    pub population: Option<u64>,
 }
 
 impl Location {
@@ -15,7 +28,7 @@ impl Location {
         if let Some(admin1) = &self.admin1 {
             parts.push(admin1.clone());
         }
-        if let Some(country) = &self.country {
+        if let Some(country) = self.country.as_ref().or(self.country_code.as_ref()) {
             parts.push(country.clone());
         }
         parts.join(", ")
@@ -139,25 +152,18 @@ impl Weather {
         let date = stamp.get(..10).unwrap_or(stamp);
         let hour = stamp.get(..13).unwrap_or(stamp);
 
-        let day = self.daily.iter().position(|d| d.date == date);
-        let today_index =
-            day.unwrap_or_else(|| self.daily.iter().filter(|d| d.date.as_str() < date).count());
-
-        let at = self
-            .hourly
-            .iter()
-            .position(|h| h.time.get(..13) == Some(hour));
-        let now_hour = at.unwrap_or_else(|| {
+        let (today_index, day_found) = index_of(self.daily.iter().map(|d| d.date.as_str()), date);
+        let (now_hour, hour_found) = index_of(
             self.hourly
                 .iter()
-                .filter(|h| h.time.as_str() < hour)
-                .count()
-        });
+                .map(|h| h.time.get(..13).unwrap_or(&h.time)),
+            hour,
+        );
 
         Position {
             today_index,
             now_hour,
-            exact: day.is_some() && at.is_some(),
+            exact: day_found && hour_found,
         }
     }
 
@@ -174,6 +180,17 @@ impl Weather {
         self.today_index = position.today_index;
         self.now_hour = position.now_hour;
         true
+    }
+}
+
+/// Where `key` sits in an ordered series, and whether it was actually there.
+/// A key the series lacks lands on the count of keys before it, which is the
+/// boundary between history and forecast; the flag lets `relocate` tell that
+/// fallback apart from a hit.
+fn index_of<'a>(keys: impl Iterator<Item = &'a str> + Clone, key: &str) -> (usize, bool) {
+    match keys.clone().position(|k| k == key) {
+        Some(index) => (index, true),
+        None => (keys.filter(|k| *k < key).count(), false),
     }
 }
 
@@ -308,5 +325,30 @@ mod tests {
     fn relocate_needs_both_the_day_and_the_hour() {
         let mut weather = Weather::fixture(2, 0);
         assert!(!weather.relocate("2026-08-05T00:00"));
+    }
+
+    fn place(country: Option<&str>, country_code: Option<&str>) -> Location {
+        Location {
+            name: "Frederick".to_string(),
+            admin1: Some("Maryland".to_string()),
+            country: country.map(str::to_string),
+            lat: 39.41,
+            lon: -77.41,
+            timezone: None,
+            country_code: country_code.map(str::to_string),
+            population: None,
+        }
+    }
+
+    /// The code stands in for the country only when there is no name for
+    /// it; beside a name it would repeat what the label already says.
+    #[test]
+    fn the_label_falls_back_to_the_country_code_when_the_name_is_missing() {
+        assert_eq!(
+            place(Some("United States"), Some("US")).label(),
+            "Frederick, Maryland, United States"
+        );
+        assert_eq!(place(None, Some("US")).label(), "Frederick, Maryland, US");
+        assert_eq!(place(None, None).label(), "Frederick, Maryland");
     }
 }
