@@ -256,7 +256,9 @@ status bar polling by the minute asks the location provider once, not once
 per poll. That is the one place the two disagree: the app re-detects a
 detected location on every launch, and `virga now` never does, so after
 travelling it keeps reporting the old city until the next launch overwrites
-it.
+it. A lookup the provider does not answer is remembered too, for a quarter
+of an hour: the report names the fallback city meanwhile, and asks again
+once that has passed.
 
 `virga update` answers in its exit status as well, so a shell prompt or a
 cron job can act on it without reading the text:
