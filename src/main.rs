@@ -153,7 +153,15 @@ fn main() -> Result<()> {
                     if let Some(warning) = remember_detection(&location, detection, Utc::now()) {
                         eprintln!("{warning}");
                     }
-                    println!("{}", now::report(&location.label, &weather, unit));
+                    println!(
+                        "{}",
+                        now::report(
+                            &location.label,
+                            &weather,
+                            unit,
+                            chrono::Local::now().fixed_offset()
+                        )
+                    );
                     return Ok(());
                 }
                 Err(error) => {
@@ -2063,12 +2071,18 @@ mod tests {
         let test = tempfile::tempdir().unwrap();
         let path = cached_forecast(test.path(), local(2026, 8, 2, 23, 50));
 
-        let (weather, _) = report_from(Some(&path), &berlin(), &endpoints, local(2026, 8, 3, 0, 5))
+        let read_at = local(2026, 8, 3, 0, 5);
+        let (weather, _) = report_from(Some(&path), &berlin(), &endpoints, read_at)
             .expect("a fifteen minute old forecast answers");
 
         assert_eq!(weather.today_index, 2, "midnight has passed");
         assert_eq!(weather.now_hour, 48);
-        let text = now::report(&berlin().label, &weather, Unit::Metric);
+        let text = now::report(
+            &berlin().label,
+            &weather,
+            Unit::Metric,
+            read_at.fixed_offset(),
+        );
         assert!(text.contains("Today: 22°C / 12°C"), "{text}");
     }
 
