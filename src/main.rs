@@ -23,6 +23,7 @@ mod cache;
 mod cli;
 mod events;
 mod input;
+mod interrupt;
 mod now;
 mod state;
 mod theme;
@@ -83,9 +84,9 @@ fn main() -> Result<()> {
             }
         }
         // The one command that fetches weather without the interface. It
-        // speaks the same sources' answers in the same order of preference
-        // the app opens with, so `virga now` and a launch agree about where
-        // "here" is.
+        // speaks the same sources' answers, and reads the same state file,
+        // but a remembered detection is reused rather than refreshed — see
+        // `now::where_to_ask` for why a one-shot must not re-detect.
         Invocation::Now(city) => {
             let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
             if let Some(warning) = warning {
@@ -116,7 +117,15 @@ fn main() -> Result<()> {
                 None => asked_location(),
             };
             match weather::client::fetch_forecast(location.lat, location.lon) {
-                Ok(weather) => {
+                Ok(weather::client::Forecast {
+                    weather,
+                    air_quality_error,
+                }) => {
+                    // Stderr, so a status bar parsing stdout still gets its
+                    // report and a human still learns why the AQI is missing.
+                    if let Some(error) = air_quality_error {
+                        eprintln!("{}", app::air_quality_warning(&error));
+                    }
                     // The app's rule, kept here too: a detection is written
                     // down only once weather has actually loaded for it. And
                     // written down it must be — remembering the answer is
@@ -227,6 +236,14 @@ fn main() -> Result<()> {
         std::env::var("TERM").ok().as_deref(),
     );
 
+    // Hooked before the terminal is taken over, so there is no moment at
+    // which a signal finds raw mode on and nobody listening.
+    let interrupt = interrupt::Interrupt::new();
+    #[cfg(unix)]
+    interrupt
+        .register()
+        .context("could not hook the signals that restore the terminal")?;
+
     let terminal = ratatui::init();
     let mut warning = None;
     let mut notice = None;
@@ -242,6 +259,7 @@ fn main() -> Result<()> {
         state_path.as_deref(),
         cache_path,
         check_updates,
+        &interrupt,
         &mut warning,
         &mut notice,
     );
@@ -253,6 +271,11 @@ fn main() -> Result<()> {
     // complaint, so it goes to stdout.
     if let Some(notice) = notice {
         println!("{notice}");
+    }
+    // After the restore and the notices: the whole point of catching the
+    // signal was to reach them. Now it can end the process as it meant to.
+    if let Some(signal) = interrupt.signal() {
+        interrupt::end(signal);
     }
     result
 }
@@ -749,12 +772,18 @@ impl Opening {
     }
 }
 
+// One over Clippy's limit, and the one over is the signal flag. It travels
+// with `warning` and `notice` as exit-path plumbing; the shape that would
+// take all three off the list is an outcome the loop returns, which is a
+// change to the loop's contract, not to this fix.
+#[allow(clippy::too_many_arguments)]
 fn run(
     mut terminal: DefaultTerminal,
     opening: Opening,
     state_path: Option<&Path>,
     cache_path: Option<PathBuf>,
     check_updates: bool,
+    interrupt: &interrupt::Interrupt,
     warning: &mut Option<String>,
     notice: &mut Option<String>,
 ) -> Result<()> {
@@ -786,6 +815,13 @@ fn run(
     let mut last_composition = composition(&app);
 
     loop {
+        // A signal has already decided the exit; returning is what gets the
+        // terminal restored. Nothing pending is worth a frame or a save on
+        // the way out: the session that would have seen either is closing.
+        if interrupt.signal().is_some() {
+            return Ok(());
+        }
+
         // The worker's answers are applied before anything is drawn, so a
         // forecast that landed during the last wait is on screen in this
         // pass. Drained after the draw, as this once was, it was on screen
@@ -1135,6 +1171,7 @@ mod tests {
             id,
             location,
             weather: Weather::fixture(5, 2),
+            air_quality_error: None,
         }
     }
 
