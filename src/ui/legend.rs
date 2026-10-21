@@ -76,6 +76,7 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("v", "view"),
             ("r", "refresh"),
             ("u", "units"),
+            ("l", "location"),
             ("t", &theme_label(app)),
         ])
         .into_iter()
@@ -318,6 +319,67 @@ mod tests {
             app.key_hint_style = style;
             let listed = bindings(&app).iter().any(|(key, _)| *key == ",");
             assert!(listed, "{style:?}");
+        }
+    }
+
+    /// The list is written by hand beside the binding table in `input`, and
+    /// nothing tied the two together: `l` opened the search from the hourly
+    /// screen for months while that screen's card never mentioned it (#148).
+    /// So every key a screen answers to has to be on its list, unless it is
+    /// named here as a twin of a key that is. The search screen is left out:
+    /// every printable key is text there.
+    #[test]
+    fn every_key_a_screen_answers_to_is_on_its_list() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let twins = [
+            (Screen::Weather, KeyCode::Esc, "quits, like q"),
+            (Screen::Weather, KeyCode::Home, "goes to now, like n"),
+            (Screen::Hourly, KeyCode::Char('p'), "goes back, like b"),
+            (Screen::Hourly, KeyCode::Enter, "goes back, like b"),
+            (Screen::Hourly, KeyCode::Esc, "goes back, like b"),
+            (Screen::Hourly, KeyCode::Home, "goes to now, like n"),
+        ];
+        let keys = (' '..='~').map(KeyCode::Char).chain([
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Delete,
+        ]);
+
+        for screen in [Screen::Weather, Screen::Hourly] {
+            let listed = bindings(&app_on(screen));
+            for code in keys.clone() {
+                let pressed = KeyEvent::new(code, KeyModifiers::NONE);
+                let bound = crate::input::action_for(pressed, screen, KeyHintStyle::Hint, false);
+                if bound.is_none() || twins.iter().any(|(s, c, _)| *s == screen && *c == code) {
+                    continue;
+                }
+                let glyph = match code {
+                    KeyCode::Char(c) => c.to_string(),
+                    KeyCode::Left => "←".to_string(),
+                    KeyCode::Right => "→".to_string(),
+                    KeyCode::Up => "↑".to_string(),
+                    KeyCode::Down => "↓".to_string(),
+                    other => format!("{other:?}"),
+                };
+                let arrow = ["←", "→", "↑", "↓"].contains(&glyph.as_str());
+                assert!(
+                    listed
+                        .iter()
+                        .any(|(key, _)| *key == glyph || (arrow && key.contains(&glyph))),
+                    "{screen:?} answers to {glyph} ({bound:?}) but its list never says so: {listed:?}"
+                );
+            }
         }
     }
 

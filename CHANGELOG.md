@@ -12,6 +12,15 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Fixed
+
+- The hourly screen's key reference lists `l`. The key has opened the city
+  search from that screen since 0.1.0, but the `?` card and the full key
+  bar there left it out, so the only screen that named it was the weather
+  screen. At the 34×12 floor, where the hourly screen is only a size
+  warning, the card now runs out of room after `l`, so `t` and `?` are the
+  lines that clip (#148).
+
 ## [0.7.0] - 2026-10-21
 
 Most of this release is `virga now` and the edges of the app. The one-shot
