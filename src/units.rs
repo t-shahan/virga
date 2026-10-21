@@ -80,7 +80,8 @@ impl Unit {
     }
 
     /// A tenth of an inch of snow is already visible on the ground, so snow
-    /// needs one fewer decimal than rain does.
+    /// needs one fewer decimal than rain does. The same in both systems;
+    /// `self` is taken for symmetry with `precip_decimals`.
     pub fn snow_decimals(self) -> usize {
         1
     }
