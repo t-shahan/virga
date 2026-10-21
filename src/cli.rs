@@ -128,13 +128,20 @@ Options:
 No option changes how the application runs. Every control inside it is a key,
 and the bar along the bottom names them. `q` quits.
 
+Exit status:
+  0  Answered. For `update`: no newer release
+  1  Could not answer: the network or a file failed
+  2  Usage error, or an argument nothing matched
+  3  `update` found a newer release
+
 Environment:
   VIRGA_THEME   Startup palette, for one launch
   VIRGA_UNITS   `metric` or `imperial`, for `now` and the app's first frame
   VIRGA_GEOIP   Set to `off` to skip the IP location lookup
   VIRGA_UPDATE  Set to `off` to skip the startup release check
   VIRGA_CACHE   Set to `off` to keep the last forecast off disk and open on
-                a spinner instead of it
+                a spinner instead of it. `now` answers from that forecast,
+                without a fetch, while it is under an hour old
 
 Weather, air quality and geocoding come from Open-Meteo. No account or API key
 is required. <{repository}>",
@@ -299,5 +306,36 @@ mod tests {
         assert!(text.contains("VIRGA_UNITS"));
         assert!(text.contains("VIRGA_GEOIP"));
         assert!(text.contains("VIRGA_UPDATE"));
+    }
+
+    /// The bound `now` holds the cache to is a promise about how stale a
+    /// reading can be, so the help has to state it.
+    #[test]
+    fn usage_says_how_old_a_forecast_now_will_answer_from() {
+        let text = usage();
+        assert!(text.contains("VIRGA_CACHE"));
+        assert!(text.contains("under an hour"), "{text}");
+    }
+
+    /// The codes are the contract a script relies on, so the help has to
+    /// carry the whole table, including the one only `update` uses.
+    #[test]
+    fn usage_documents_every_exit_code() {
+        let text = usage();
+        let table = text
+            .split_once("Exit status:")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n\n"))
+            .map(|(table, _)| table)
+            .expect("the help has an exit status section");
+        for code in ["0", "1", "2", "3"] {
+            assert!(
+                table
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(code)),
+                "exit code {code} is not in the table:{table}"
+            );
+        }
+        assert!(table.contains("newer release"));
     }
 }
