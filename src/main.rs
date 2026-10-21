@@ -6,7 +6,6 @@ use crate::cli::Invocation;
 use crate::events::{Message, Request};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
-use crate::weather::client::Endpoints;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use ratatui::backend::{Backend, ClearType};
@@ -513,17 +512,19 @@ fn asked_location() -> (ActiveLocation, Detection) {
     asked_location_from(
         state_path.as_deref(),
         detect,
-        &Endpoints::default(),
+        weather::client::detect_location,
         Utc::now(),
     )
 }
 
 /// `asked_location` with the environment taken out, so a test can hand it a
-/// state file, a host, and a clock of its own.
+/// state file, a detection, and a clock of its own. The detection is a
+/// function rather than a host because the production agent refuses plain
+/// HTTP, which is all a test's loopback server speaks.
 fn asked_location_from(
     state_path: Option<&Path>,
     detect: bool,
-    endpoints: &Endpoints,
+    locate: impl FnOnce() -> Result<weather::model::Location>,
     now: DateTime<Utc>,
 ) -> (ActiveLocation, Detection) {
     let persisted = match state_path {
@@ -543,7 +544,7 @@ fn asked_location_from(
         now,
     ) {
         now::Ask::Location(location) => (location, Detection::Skipped),
-        now::Ask::Detect { fallback } => match weather::client::detect_location_at(endpoints) {
+        now::Ask::Detect { fallback } => match locate() {
             Ok(found) => (ActiveLocation::from(&found), Detection::Found),
             Err(error) => {
                 eprintln!(
@@ -962,7 +963,7 @@ mod tests {
 
     use crate::app::ActiveLocation;
     use crate::events::Message;
-    use crate::weather::client::tests::serving_counted;
+    use crate::weather::client::tests::{detect_location_from, serving_counted};
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
@@ -1449,7 +1450,12 @@ mod tests {
         let path = test.path().join("state.json");
         let first_poll = instant(1_800_000_000);
 
-        let (location, detection) = asked_location_from(Some(&path), true, &endpoints, first_poll);
+        let (location, detection) = asked_location_from(
+            Some(&path),
+            true,
+            || detect_location_from(&endpoints),
+            first_poll,
+        );
         assert_eq!(detection, Detection::Failed);
         assert_eq!(location, ActiveLocation::default());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -1459,7 +1465,12 @@ mod tests {
         );
 
         let next_poll = first_poll + chrono::TimeDelta::minutes(1);
-        let (location, detection) = asked_location_from(Some(&path), true, &endpoints, next_poll);
+        let (location, detection) = asked_location_from(
+            Some(&path),
+            true,
+            || detect_location_from(&endpoints),
+            next_poll,
+        );
         assert_eq!(detection, Detection::Skipped);
         assert_eq!(location, ActiveLocation::default());
         assert_eq!(
@@ -1469,7 +1480,12 @@ mod tests {
         );
 
         let after_backoff = first_poll + now::DETECTION_BACKOFF;
-        let (_, detection) = asked_location_from(Some(&path), true, &endpoints, after_backoff);
+        let (_, detection) = asked_location_from(
+            Some(&path),
+            true,
+            || detect_location_from(&endpoints),
+            after_backoff,
+        );
         assert_eq!(detection, Detection::Failed);
         assert_eq!(hits.load(Ordering::SeqCst), 2, "the backoff never lifted");
     }
@@ -1488,7 +1504,8 @@ mod tests {
         let now = instant(1_800_000_000);
         state::save_detection_failure(&path, now - now::DETECTION_BACKOFF).unwrap();
 
-        let (location, detection) = asked_location_from(Some(&path), true, &endpoints, now);
+        let (location, detection) =
+            asked_location_from(Some(&path), true, || detect_location_from(&endpoints), now);
         assert_eq!(detection, Detection::Found);
         assert!(location.label.contains("Reykjavík"), "{}", location.label);
         assert_eq!(
@@ -1506,7 +1523,8 @@ mod tests {
         );
         assert_eq!(persisted.detection_failed_at, None);
 
-        let (again, detection) = asked_location_from(Some(&path), true, &endpoints, now);
+        let (again, detection) =
+            asked_location_from(Some(&path), true, || detect_location_from(&endpoints), now);
         assert_eq!(detection, Detection::Skipped);
         assert_eq!(again, location);
         assert_eq!(hits.load(Ordering::SeqCst), 1);

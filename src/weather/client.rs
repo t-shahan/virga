@@ -117,13 +117,7 @@ impl Default for Endpoints {
 
 /// Where the caller is, as far as their IP address gives them away.
 pub fn detect_location() -> Result<Location> {
-    detect_location_at(&Endpoints::default())
-}
-
-/// The same detection, at a host the caller names: the seam through which
-/// `virga now`'s own tests answer with a refusal.
-pub(crate) fn detect_location_at(endpoints: &Endpoints) -> Result<Location> {
-    detect_location_with(geoip_agent(), endpoints)
+    detect_location_with(geoip_agent(), &Endpoints::default())
 }
 
 /// The context every request carries, one for the call and one for reading
@@ -461,6 +455,14 @@ pub(crate) mod tests {
     /// bug in the test, and should say so in a moment rather than in 15s.
     fn test_agent() -> Agent {
         bounded_agent(Duration::from_secs(5), Duration::from_secs(2), false)
+    }
+
+    /// `detect_location` against a loopback host, through the test agent: the
+    /// production agent refuses plain HTTP, which is all a loopback server
+    /// speaks. The seam through which `virga now`'s tests answer a detection
+    /// with a refusal (#65).
+    pub(crate) fn detect_location_from(endpoints: &Endpoints) -> Result<Location> {
+        detect_location_with(&test_agent(), endpoints)
     }
 
     const CAPTIVE_PORTAL: &str =
