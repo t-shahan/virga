@@ -14,6 +14,12 @@ refuse to publish a version this file does not describe.
 
 ### Security
 
+- The weather and location clients refuse to speak plain HTTP, follow at
+  most two redirects, and cap every response body at 1 MiB before parsing
+  it, whether or not the body arrived compressed. Neither provider
+  redirects, so nothing changes on a healthy network; what changes is that
+  a redirect from either host to an `http://` URL is now an error rather
+  than the user's coordinates re-sent in the clear (#72).
 - Virga builds against rustls 0.23.46 and webpki-roots 1.0.10. The first
   clears four rustls advisories (RUSTSEC-2026-0285, RUSTSEC-2026-0346,
   RUSTSEC-2026-0348, RUSTSEC-2026-0349); the second stops the bundled root
