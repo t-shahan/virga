@@ -52,6 +52,18 @@ refuse to publish a version this file does not describe.
   sees what it always did. Ctrl-C in the app is unchanged, and on Windows,
   where crossterm already reports Ctrl-C and Ctrl-Break as keys, nothing is
   hooked (#85).
+- A forecast whose air quality could not be fetched says so on the way out,
+  the way a failed state save already does, instead of leaving a blank AQI
+  cell for the session with no way to tell a 503 from a place CAMS does not
+  cover. `virga now` prints the same reason to stderr and the report to
+  stdout as before (#71).
+- A network error names the host that produced it. The loading screen used
+  to show `http status: 503` or `json: expected value at line 1 column 1`
+  with nothing saying which of three Open-Meteo hosts, or the location
+  provider, had answered that way; every request now carries its endpoint
+  into the message, and the search and detection errors carry it too. The
+  error popup and the search box wrap that message to fit rather than
+  cutting it off at the border (#71).
 
 ### Security
 
