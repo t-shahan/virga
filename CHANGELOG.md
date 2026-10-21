@@ -12,6 +12,8 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.6.2]
+
 ### Security
 
 - Virga builds against rustls 0.23.46 and webpki-roots 1.0.10. The first
@@ -410,7 +412,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/t-shahan/virga/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/t-shahan/virga/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/t-shahan/virga/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/t-shahan/virga/compare/v0.5.2...v0.5.3
