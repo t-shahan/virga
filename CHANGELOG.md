@@ -23,11 +23,13 @@ refuse to publish a version this file does not describe.
   their own message; all three used to read "No such archive". A tag is
   only reported missing when GitHub answers 404 for it; a rate limit or
   an unreachable github.com is reported as that (#69).
-- A `gh attestation verify` that could not finish, for a rate limit or an
-  unreachable API, is reported by the install script as not verified,
-  with gh's own error and the command to run by hand. It used to be
-  called a failed attestation and stop the install; only gh's "no
-  attestations found" still does that (#69).
+- A `gh attestation verify` that could not reach GitHub, for a rate limit
+  or an unreachable API, is reported by the install script as not
+  verified, with gh's own error and the command to run by hand. It used to
+  be called a failed attestation and stop the install. Every other
+  failure still stops it, with gh's error now shown: no attestation, a
+  signature or policy check that failed, and any message the script does
+  not recognise (#69).
 - Ctrl-C or a kill during the install now exits through the cleanup trap
   rather than returning into the step it interrupted, so an interrupted
   copy cannot be followed by the rename that puts it on `PATH` (#69).

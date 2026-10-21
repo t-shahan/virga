@@ -178,23 +178,28 @@ binary=$(find "$work" -type f -name virga | head -n 1)
 #
 # gh exits non-zero for a rate limit or an unreachable API as readily as for
 # a binary nothing signed, and only the latter is a statement about the
-# binary. Its verdict is told apart by the message, which is the only place
-# gh makes the distinction; the alternative was calling every outage a
-# forgery and turning away the users who had bothered to log in. The match
-# is loose on purpose: gh has worded it "no attestations found" and "no
-# attestations were verified" across releases, and both mean the same here.
+# binary. Its message is the only place gh tells them apart, so the message
+# decides, and it decides in the direction that fails closed: the two that
+# mean gh never got as far as judging the binary let the install go on, and
+# anything else stops it. That includes "no attestations found", a signature
+# or policy check that failed, and wording a later gh release introduces. A
+# false stop costs a retry; a false pass installs a binary nothing vouched
+# for. The two are gh's own, from cli/cli's attestation verify: the fetch
+# from the API failing, and the Sigstore trust root failing to load.
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     if verdict=$(gh attestation verify "$binary" --repo "$REPO" 2>&1); then
         say "build provenance verified"
-    elif printf '%s\n' "$verdict" | grep -qi 'no attestations'; then
-        die "Provenance verification failed: this binary does not carry an
-attestation from $REPO's release workflow. Nothing was installed."
-    else
-        say "provenance not verified: gh attestation verify did not finish, so
-this says nothing about the binary either way. It reported:
+    elif printf '%s\n' "$verdict" \
+        | grep -qiE 'loading attestations from github api failed|error creating sigstore verifier'; then
+        say "provenance not verified: gh attestation verify could not reach
+GitHub, so this says nothing about the binary either way. It reported:
 $verdict
 To check by hand once gh can reach GitHub:
        gh attestation verify $INSTALL_DIR/virga --repo $REPO"
+    else
+        die "Provenance verification failed: gh did not vouch for this binary
+as a build of $REPO's release workflow. Nothing was installed. It reported:
+$verdict"
     fi
 else
     say "provenance not verified (needs an authenticated gh). To check by hand:

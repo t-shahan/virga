@@ -123,10 +123,10 @@ case "$url" in
 esac
 EOF
 
-# The wording is gh's own, from cli/cli: `no attestations found` when nothing
-# signed the binary, `no attestations were verified` when something did but
-# the policy rejected it, and the HTTP error verbatim when the API could not
-# be reached. install.sh tells them apart by text, so the text is the test.
+# The status lines are gh's own, from cli/cli's attestation verify, each
+# followed by the error it returns. install.sh tells them apart by text, so
+# the text is the test. `unheard-of` stands for wording a later gh might use,
+# which has to stop the install rather than wave it through.
 cat > "$root/gh/gh" <<'EOF'
 #!/bin/sh
 printf 'gh %s\n' "$*" >> "$SHIM_LOG"
@@ -139,13 +139,26 @@ case "$1 $2" in
                 echo 'Verification succeeded!'
                 exit 0 ;;
             not-found)
-                echo 'Error: no attestations found' >&2
+                echo '✗ No attestations found for subject sha256:0000' >&2
+                printf '\nError: no attestations found\n' >&2
                 exit 1 ;;
-            not-verified)
-                echo 'Error: no attestations were verified' >&2
+            sigstore-failed)
+                echo '✗ Sigstore verification failed' >&2
+                printf '\nError: verifying with issuer "sigstore.dev": failed to verify signature\n' >&2
+                exit 1 ;;
+            policy-failed)
+                echo '✗ Policy verification failed' >&2
+                printf '\nError: expected SourceRepositoryURI to be https://github.com/t-shahan/virga\n' >&2
+                exit 1 ;;
+            unheard-of)
+                printf '\nError: this binary is wrong in a way gh has not said before\n' >&2
                 exit 1 ;;
             outage)
-                echo 'Error: failed to fetch attestations from t-shahan/virga: HTTP 503: Service Unavailable' >&2
+                echo '✗ Loading attestations from GitHub API failed' >&2
+                printf '\nError: HTTP 503: Service Unavailable (https://api.github.com/repos/t-shahan/virga/attestations/sha256:0000)\n' >&2
+                exit 1 ;;
+            no-trust-root)
+                echo 'error creating Sigstore verifier: failed to get trusted root: dial tcp: lookup tuf-repo-cdn.sigstore.dev: no such host' >&2
                 exit 1 ;;
         esac ;;
 esac
@@ -277,19 +290,22 @@ expect_nothing_left
 expect_err 'Could not download https://github.com/t-shahan/virga/releases/download/v0.6.1/SHA256SUMS'
 ! grep -q 'no release tagged' "$err" || fail "a timeout was reported as a missing tag"
 
-for verdict in not-found not-verified; do
+for verdict in not-found sigstore-failed policy-failed unheard-of; do
     run "gh-$verdict" SHIM_GH="$verdict"
     expect_exit 1
     expect_nothing_left
     expect_err 'Provenance verification failed'
+    expect_err 'Error:'
 done
 
-run gh-outage SHIM_GH=outage
-expect_exit 0
-expect_installed
-expect_out 'provenance not verified: gh attestation verify did not finish'
-expect_out 'HTTP 503'
-expect_out 'gh attestation verify'
+for verdict in outage:'HTTP 503' no-trust-root:'no such host'; do
+    run "gh-${verdict%%:*}" SHIM_GH="${verdict%%:*}"
+    expect_exit 0
+    expect_installed
+    expect_out 'provenance not verified: gh attestation verify could not reach'
+    expect_out "${verdict#*:}"
+    expect_out 'gh attestation verify'
+done
 
 run gh-missing NOGH
 expect_exit 0
