@@ -17,11 +17,47 @@ refuse to publish a version this file does not describe.
 - `virga update` exits 3 when a newer release exists, so a shell prompt or
   a cron job can act on the answer without reading it. It used to exit 0
   whether or not there was anything to do, on the reasoning that the
-  command had answered. 0 now means this is the latest release, 1 still
+  command had answered. 0 now means there is no newer release, 1 still
   means the check could not be made, and 2 is still a usage error; the
   text on stdout is unchanged. A script that treated every non-zero
   status as a failed check has to tell 1 from 3 now. The table is in
   `--help` (#110).
+
+### Fixed
+
+- The install script no longer hangs on a stalled connection. Every
+  `curl` now carries a connect and overall timeout and is pinned to
+  https, including across redirects (#69).
+- The install script says which of three things went wrong when a
+  download fails. A tag that does not exist, a tag that predates prebuilt
+  binaries, and a release with no build for the current platform each get
+  their own message; all three used to read "No such archive". A tag is
+  only reported missing when GitHub answers 404 for it; a rate limit or
+  an unreachable github.com is reported as that (#69).
+- A `gh attestation verify` that could not reach GitHub, for a rate limit
+  or an unreachable API, is reported by the install script as not
+  verified, with gh's own error and the command to run by hand. It used to
+  be called a failed attestation and stop the install. Every other
+  failure still stops it, with gh's error now shown: no attestation, a
+  signature or policy check that failed, and any message the script does
+  not recognise (#69).
+- Ctrl-C or a kill during the install now exits through the cleanup trap
+  rather than returning into the step it interrupted, so an interrupted
+  copy cannot be followed by the rename that puts it on `PATH` (#69).
+
+### Security
+
+- The weather and location clients refuse to speak plain HTTP, follow at
+  most two redirects, and cap every response body at 1 MiB before parsing
+  it, whether or not the body arrived compressed. Neither provider
+  redirects, so nothing changes on a healthy network; what changes is that
+  a redirect from either host to an `http://` URL is now an error rather
+  than the user's coordinates re-sent in the clear (#72).
+- Virga builds against rustls 0.23.46 and webpki-roots 1.0.10. The first
+  clears four rustls advisories (RUSTSEC-2026-0285, RUSTSEC-2026-0346,
+  RUSTSEC-2026-0348, RUSTSEC-2026-0349); the second stops the bundled root
+  store from trusting emSign intermediates that have since been distrusted
+  (RUSTSEC-2026-0381).
 
 ## [0.6.1] - 2026-09-07
 
