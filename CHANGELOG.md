@@ -35,6 +35,14 @@ refuse to publish a version this file does not describe.
   text on stdout is unchanged. A script that treated every non-zero
   status as a failed check has to tell 1 from 3 now. The table is in
   `--help` (#110).
+- `virga now` answers from the app's last forecast when it describes the
+  remembered city and is under an hour old, moved to the current hour the
+  way a launch moves it, instead of fetching on every call, so a status
+  bar polling by the minute in the hour after a launch is answered from
+  disk. The bound is an hour rather than the app's day because the report
+  has no "as of" mark to say how old its reading is. A named city still
+  fetches, and `VIRGA_CACHE=off` turns the read off along with the rest of
+  the cache (#111).
 
 ### Fixed
 
@@ -84,6 +92,19 @@ refuse to publish a version this file does not describe.
   now written down beside the rest of the state, and the report names the
   fallback city for a quarter of an hour before asking again; the marker
   is dropped the moment a place is remembered (#65).
+- A city search no longer waits behind a stalled forecast. One thread served
+  every request in the order it arrived, so pressing `l`, typing a city and
+  hitting Enter while a fetch was hung showed the search spinner for up to
+  the fetch's fifteen-second timeout with nothing to say. Fetches,
+  detections and searches now each have a thread of their own, and the only
+  thing a search can wait behind is another search. Choosing a city while
+  the launch is still working out where you are abandons the detection, so
+  its late guess cannot fetch over the city you asked for (#75).
+- The update notice is dismissed only by a key pressed on a frame that
+  showed it. Any key outside the city search used to clear it, including on
+  a terminal too short to give it a row, so on a short terminal the news
+  was gone before it was ever drawn and never printed on the way out either
+  (#75).
 
 ### Security
 

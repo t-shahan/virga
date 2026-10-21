@@ -3,7 +3,7 @@ use crate::app::{
     Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
-use crate::events::{Message, Request};
+use crate::events::{Message, Request, Workers};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +14,7 @@ use ratatui::crossterm::event::Event;
 use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::TrySendError;
 use std::time::{Duration, Instant};
 
 mod app;
@@ -115,15 +115,31 @@ fn main() -> Result<()> {
                 },
                 None => asked_location(),
             };
-            match weather::client::fetch_forecast(location.lat, location.lon) {
-                Ok(weather::client::Forecast {
-                    weather,
-                    air_quality_error,
-                }) => {
+            // On a bare report, a state directory that cannot be found was
+            // complained about by `asked_location` a moment ago, when it went
+            // looking for the remembered city; the same complaint twice on
+            // one report is noise, so the error is dropped here. A named city
+            // never reaches the path.
+            let (cache_path, warning) = report_cache_path(
+                city.as_deref(),
+                detection == Detection::Found,
+                std::env::var("VIRGA_CACHE").ok().as_deref(),
+                state::path().ok().as_deref(),
+            );
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            match report_weather(
+                cache_path.as_deref(),
+                &location,
+                chrono::Local::now(),
+                || weather::client::fetch_forecast(location.lat, location.lon),
+            ) {
+                Ok((weather, air_quality_warning)) => {
                     // Stderr, so a status bar parsing stdout still gets its
                     // report and a human still learns why the AQI is missing.
-                    if let Some(error) = air_quality_error {
-                        eprintln!("{}", app::air_quality_warning(&error));
+                    if let Some(warning) = air_quality_warning {
+                        eprintln!("{warning}");
                     }
                     // The app's rule, kept here too: a detection is written
                     // down only once weather has actually loaded for it. And
@@ -306,7 +322,18 @@ fn load_persisted(path: &Path) -> (state::Persisted, Option<String>) {
 /// way `load_persisted` does: a cache that cannot be read costs a spinner,
 /// never a launch.
 fn load_cached(path: &Path, location: &ActiveLocation) -> (Option<CachedWeather>, Option<String>) {
-    match cache::load(path, location, chrono::Local::now()) {
+    load_cached_within(path, location, chrono::Local::now(), cache::MAX_AGE)
+}
+
+/// `load_cached` with the clock and the age bound taken out, for `virga
+/// now`'s tighter bound and for a test that must not read the clock.
+fn load_cached_within(
+    path: &Path,
+    location: &ActiveLocation,
+    now: chrono::DateTime<chrono::Local>,
+    max_age: chrono::TimeDelta,
+) -> (Option<CachedWeather>, Option<String>) {
+    match cache::load(path, location, now, max_age) {
         Ok(cached) => (cached, None),
         Err(error) => (
             None,
@@ -315,6 +342,70 @@ fn load_cached(path: &Path, location: &ActiveLocation) -> (Option<CachedWeather>
             )),
         ),
     }
+}
+
+/// Where `virga now` may look for the app's last forecast, given what was
+/// asked, how the place was found, the `VIRGA_CACHE` value, and the state
+/// file the cache sits beside; and any complaint about that value, for the
+/// caller to print.
+///
+/// Only a bare report may answer from the cache, and only for the place the
+/// state file gave it or the fallback standing in for one: a named city is
+/// a question about somewhere else, and a place detected just now has
+/// nothing on disk to match. Neither consults the switch, so a typo in it
+/// is not complained about on a report the cache could not have served.
+/// Nowhere with `VIRGA_CACHE` off, the switch that also keeps the app from
+/// writing one. Whether what is there is that place, and fresh, is the
+/// cache's own judgement.
+fn report_cache_path(
+    city: Option<&str>,
+    freshly_detected: bool,
+    cache_switch: Option<&str>,
+    state: Option<&Path>,
+) -> (Option<PathBuf>, Option<String>) {
+    if city.is_some() || freshly_detected {
+        return (None, None);
+    }
+    let (caching, warning) = caching_enabled(cache_switch);
+    if !caching {
+        return (None, warning);
+    }
+    (state.map(cache::path_beside), warning)
+}
+
+/// The forecast `virga now` prints: the app's last one when it describes
+/// `location` and is under `cache::REPORT_MAX_AGE`, relocated to the current
+/// hour the way a launch relocates it, and `fetch`'s answer otherwise. A
+/// cache that cannot be read costs the fetch it would have saved and a line
+/// on stderr, never the report. Nothing is written back: the app keeps the
+/// file fresh, and the report stays the read it is documented as.
+///
+/// Beside the forecast, the line for stderr when a fetch brought it without
+/// its air quality. A cached answer carries none: its air quality is
+/// whatever the app's own fetch got, and the app said so at the time.
+/// `fetch` is a function rather than a host because the production agent
+/// refuses plain HTTP, which is all a test's loopback server speaks.
+fn report_weather(
+    cache_path: Option<&Path>,
+    location: &ActiveLocation,
+    now: chrono::DateTime<chrono::Local>,
+    fetch: impl FnOnce() -> Result<weather::client::Forecast>,
+) -> Result<(weather::model::Weather, Option<String>)> {
+    if let Some(path) = cache_path {
+        let (cached, warning) = load_cached_within(path, location, now, cache::REPORT_MAX_AGE);
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
+        }
+        if let Some(cached) = cached {
+            return Ok((cached.weather, None));
+        }
+    }
+    let forecast = fetch()?;
+    let warning = forecast
+        .air_quality_error
+        .as_deref()
+        .map(app::air_quality_warning);
+    Ok((forecast.weather, warning))
 }
 
 /// How the app should open, given what was remembered and whether detection
@@ -751,22 +842,24 @@ fn clear_screen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> 
     Ok(())
 }
 
-fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
-    match tx.try_send(request) {
+fn dispatch(workers: &Workers, app: &mut App, request: Request) -> Result<()> {
+    match workers.try_send(request) {
         Ok(()) => Ok(()),
-        // Unreachable while the guards in `App` hold — the queue is deeper
+        // Unreachable while the guards in `App` hold — every queue is deeper
         // than it can fill. It is handled anyway so that the day a guard is
         // dropped, the screen says something instead of waiting forever on a
         // request that was never sent.
         Err(TrySendError::Full(request)) => {
             // A dropped detection still has to reach its fallback, so the
             // replacement it asks for is dispatched rather than discarded.
+            // The replacement is a different kind, so it goes to a different
+            // queue: a full one cannot refuse it a second time.
             if let Some(replacement) = app.on_dispatch_dropped(request) {
-                return dispatch(tx, app, replacement);
+                return dispatch(workers, app, replacement);
             }
             Ok(())
         }
-        Err(TrySendError::Disconnected(_)) => Err(anyhow!("the worker thread has stopped")),
+        Err(TrySendError::Disconnected(_)) => Err(anyhow!("a worker thread has stopped")),
     }
 }
 
@@ -817,14 +910,13 @@ fn run(
     warning: &mut Option<String>,
     notice: &mut Option<String>,
 ) -> Result<()> {
-    // Bounded: see `events::REQUEST_QUEUE`. Messages back stay unbounded — the
-    // worker produces at most one per request it was handed, so bounding the
-    // requests bounds the replies too, and a blocking send on the worker side
-    // would be a deadlock waiting to happen.
-    let (request_tx, request_rx) = mpsc::sync_channel(events::REQUEST_QUEUE);
+    // Requests are bounded: see `events::REQUEST_QUEUE`. Messages back stay
+    // unbounded — a worker produces at most one per request it was handed,
+    // so bounding the requests bounds the replies too, and a blocking send
+    // on the worker side would be a deadlock waiting to happen.
     let (message_tx, message_rx) = mpsc::channel();
-    // The probe rides its own thread and the shared message channel; the
-    // worker's request queue is serial, and news must never stall a search.
+    // The probe rides its own thread and the shared message channel; each
+    // worker's queue is serial, and news must never stall a search.
     if update_check.enabled {
         let dismissed = update_check.dismissed;
         events::spawn_update_check(message_tx.clone(), move || {
@@ -835,12 +927,12 @@ fn run(
             Some((notice, latest))
         });
     }
-    events::spawn_worker(request_rx, message_tx, cache_path);
+    let workers = events::spawn_workers(message_tx, cache_path);
     let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
-    dispatch(&request_tx, &mut app, initial)?;
+    dispatch(&workers, &mut app, initial)?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
@@ -873,7 +965,7 @@ fn run(
             retain_first_warning(warning, message_warning);
             // A detection answers with the fetch it asked for.
             if let Some(request) = chained {
-                dispatch(&request_tx, &mut app, request)?;
+                dispatch(&workers, &mut app, request)?;
             }
         }
 
@@ -923,7 +1015,9 @@ fn run(
 
         if dirty || animating {
             app.tick = app.tick.wrapping_add(1);
-            terminal.draw(|frame| ui::render(frame, &app))?;
+            let mut notice_drawn = false;
+            terminal.draw(|frame| notice_drawn = ui::render(frame, &app))?;
+            app.notice_drawn = notice_drawn;
             dirty = false;
         }
 
@@ -951,7 +1045,7 @@ fn run(
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {
-                            dispatch(&request_tx, &mut app, request)?;
+                            dispatch(&workers, &mut app, request)?;
                         }
                         if let Some(style) = app.take_key_hint_style_save() {
                             retain_first_warning(
@@ -998,7 +1092,9 @@ mod tests {
     use crate::app::ActiveLocation;
     use crate::events::Message;
     use crate::input::Action;
-    use crate::weather::client::tests::{detect_location_from, serving_counted};
+    use crate::weather::client::tests::{
+        detect_location_from, fetch_forecast_from, serving_counted,
+    };
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
@@ -1089,7 +1185,11 @@ mod tests {
     fn a_clean_repaint_never_asks_where_the_cursor_is() {
         let app = ready_app();
         let mut terminal = Terminal::new(Counting::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
 
         clear_screen(&mut terminal).unwrap();
 
@@ -1116,7 +1216,11 @@ mod tests {
     fn a_clean_repaint_writes_every_cell_of_an_unchanged_frame() {
         let app = ready_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         let frame = terminal.backend().buffer().clone();
 
         clear_screen(&mut terminal).unwrap();
@@ -1126,7 +1230,11 @@ mod tests {
             "the screen was not wiped"
         );
 
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         assert_eq!(terminal.backend().buffer(), &frame);
     }
 
@@ -1356,6 +1464,47 @@ mod tests {
         let (enabled, warning) = caching_enabled(Some("maybe"));
         assert!(enabled);
         assert!(warning.unwrap().contains("VIRGA_CACHE"));
+    }
+
+    /// The issue's gates (#111), one row each: only a bare report about the
+    /// remembered city reads the cache, and only while the switch that
+    /// governs writing it is on.
+    #[test]
+    fn only_a_bare_report_about_a_remembered_city_reads_the_cache() {
+        let state = Path::new("/state/virga/state.json");
+        let beside = Some(PathBuf::from("/state/virga/forecast.json"));
+        for (city, fresh, switch, expected, why) in [
+            (None, false, None, beside.clone(), "a bare remembered read"),
+            (Some("berlin"), false, None, None, "a named city fetches"),
+            (None, true, None, None, "a fresh detection fetches"),
+            (
+                None,
+                false,
+                Some("off"),
+                None,
+                "VIRGA_CACHE=off disables the read",
+            ),
+        ] {
+            assert_eq!(
+                report_cache_path(city, fresh, switch, Some(state)),
+                (expected, None),
+                "{why}"
+            );
+        }
+
+        assert_eq!(
+            report_cache_path(None, false, None, None),
+            (None, None),
+            "no state directory means nowhere to look beside"
+        );
+        let (path, warning) = report_cache_path(None, false, Some("maybe"), Some(state));
+        assert_eq!(path, beside, "an unusable value leaves the read on");
+        assert!(warning.unwrap().contains("VIRGA_CACHE"));
+        assert_eq!(
+            report_cache_path(Some("berlin"), false, Some("maybe"), Some(state)),
+            (None, None),
+            "a report the cache could not serve does not complain about the switch"
+        );
     }
 
     #[test]
@@ -1627,6 +1776,9 @@ mod tests {
             latest: latest.clone(),
         });
 
+        // The frame that drew the notice, which a key has to follow before
+        // it may dismiss it.
+        app.notice_drawn = true;
         app.on_action(Action::ToggleUnits);
         let release = app.take_update_dismissal().expect("the key dismissed");
 
@@ -1808,5 +1960,179 @@ mod tests {
                 theme.name()
             );
         }
+    }
+
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+    }
+
+    /// A cache for Berlin fetched at `fetched`, as the app would have
+    /// written it. The fixture's hours run 2026-08-01T00:00 through
+    /// 2026-08-09T23:00, and the city is placed in the test machine's own
+    /// zone so the stamps below read as plain local times wherever the
+    /// tests run — the cache module's own arrangement.
+    fn cached_forecast(dir: &Path, fetched: chrono::DateTime<chrono::Local>) -> PathBuf {
+        let path = dir.join("forecast.json");
+        let mut weather = Weather::fixture(9, 1);
+        weather.utc_offset_secs = Some(fetched.offset().local_minus_utc());
+        let bytes =
+            cache::encode(&berlin(), &weather, fetched.with_timezone(&chrono::Utc)).unwrap();
+        cache::write(&path, &bytes).unwrap();
+        path
+    }
+
+    /// `report_weather` with its fetch aimed at a loopback host, through the
+    /// test agent.
+    fn report_from(
+        cache: Option<&Path>,
+        location: &ActiveLocation,
+        endpoints: &crate::weather::client::Endpoints,
+        now: chrono::DateTime<chrono::Local>,
+    ) -> Result<(Weather, Option<String>)> {
+        report_weather(cache, location, now, || {
+            fetch_forecast_from(endpoints, location.lat, location.lon)
+        })
+    }
+
+    /// A fetch whose air quality did not arrive hands back the line for
+    /// stderr, naming why, beside a forecast that did (#71).
+    #[test]
+    fn a_fetch_without_its_air_quality_brings_the_warning() {
+        let forecast = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        )
+        .0;
+        let refused = serving_counted("503 Service Unavailable", "text/plain", "down").0;
+        let endpoints = crate::weather::client::Endpoints {
+            air_quality: refused.air_quality,
+            ..forecast
+        };
+
+        let (weather, warning) = report_from(None, &berlin(), &endpoints, local(2026, 8, 2, 12, 0))
+            .expect("the forecast still arrives");
+
+        assert!(!weather.daily.is_empty());
+        let warning = warning.expect("the missing air quality is a reason");
+        assert!(
+            warning.contains("air quality") && warning.contains("503"),
+            "{warning}"
+        );
+    }
+
+    /// The point of the feature (#111): a status bar polling by the minute
+    /// is answered from disk, so the server must not hear from it. It
+    /// answers 500 here so a fetch that slipped through would fail loudly
+    /// as well as being counted.
+    #[test]
+    fn a_fresh_cache_answers_a_bare_now_without_asking_the_network() {
+        use std::sync::atomic::Ordering;
+
+        let (endpoints, hits) =
+            serving_counted("500 Internal Server Error", "application/json", "{}");
+        let test = tempfile::tempdir().unwrap();
+        let path = cached_forecast(test.path(), local(2026, 8, 2, 17, 52));
+
+        let (weather, warning) =
+            report_from(Some(&path), &berlin(), &endpoints, local(2026, 8, 2, 18, 5))
+                .expect("a thirteen minute old forecast answers");
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the report asked the network"
+        );
+        assert_eq!(weather.today_index, 1);
+        assert_eq!(
+            warning, None,
+            "the app reported its own fetch's air quality"
+        );
+    }
+
+    /// "Now" is the current hour, not the hour of the fetch: a cache written
+    /// before midnight and read after it reports the new day's outlook, the
+    /// way a launch would open on it.
+    #[test]
+    fn a_cached_report_is_relocated_to_the_current_hour() {
+        let (endpoints, _) = serving_counted("500 Internal Server Error", "application/json", "{}");
+        let test = tempfile::tempdir().unwrap();
+        let path = cached_forecast(test.path(), local(2026, 8, 2, 23, 50));
+
+        let (weather, _) = report_from(Some(&path), &berlin(), &endpoints, local(2026, 8, 3, 0, 5))
+            .expect("a fifteen minute old forecast answers");
+
+        assert_eq!(weather.today_index, 2, "midnight has passed");
+        assert_eq!(weather.now_hour, 48);
+        let text = now::report(&berlin().label, &weather, Unit::Metric);
+        assert!(text.contains("Today: 22°C / 12°C"), "{text}");
+    }
+
+    /// Everything the cache is not good for goes to the network: another
+    /// place, a forecast past the report's bound, and a cache switched off,
+    /// which reaches here as no path at all.
+    #[test]
+    fn a_stale_foreign_or_disabled_cache_fetches() {
+        use std::sync::atomic::Ordering;
+
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        );
+        let test = tempfile::tempdir().unwrap();
+        let fetched = local(2026, 8, 2, 12, 0);
+        let path = cached_forecast(test.path(), fetched);
+        let soon_after = fetched + chrono::TimeDelta::minutes(5);
+
+        let elsewhere = ActiveLocation {
+            label: "Berlin, Germany".to_string(),
+            lat: 52.0,
+            lon: 13.41053,
+        };
+        report_from(Some(&path), &elsewhere, &endpoints, soon_after)
+            .expect("the loopback forecast parses");
+        let after_elsewhere = hits.load(Ordering::SeqCst);
+        assert!(after_elsewhere > 0, "somewhere else was answered from disk");
+
+        let past_the_bound = fetched + cache::REPORT_MAX_AGE + chrono::TimeDelta::minutes(1);
+        report_from(Some(&path), &berlin(), &endpoints, past_the_bound)
+            .expect("the loopback forecast parses");
+        let after_stale = hits.load(Ordering::SeqCst);
+        assert!(
+            after_stale > after_elsewhere,
+            "an hour-old forecast was answered from disk"
+        );
+
+        report_from(None, &berlin(), &endpoints, soon_after).expect("the loopback forecast parses");
+        assert!(
+            hits.load(Ordering::SeqCst) > after_stale,
+            "VIRGA_CACHE=off was answered from disk"
+        );
+    }
+
+    /// A cache that cannot be read is a warning and a fetch, the launch's
+    /// rule: the report is never withheld over a file it did not need.
+    #[test]
+    fn an_unreadable_cache_costs_the_fetch_not_the_report() {
+        use std::sync::atomic::Ordering;
+
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        );
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("forecast.json");
+        std::fs::write(&path, "{").unwrap();
+
+        report_from(Some(&path), &berlin(), &endpoints, local(2026, 8, 2, 12, 0))
+            .expect("the loopback forecast parses");
+
+        assert!(hits.load(Ordering::SeqCst) > 0);
     }
 }

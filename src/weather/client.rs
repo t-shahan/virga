@@ -465,6 +465,17 @@ pub(crate) mod tests {
         detect_location_with(&test_agent(), endpoints)
     }
 
+    /// `fetch_forecast` against a loopback host, through the test agent, for
+    /// the same reason: `virga now`'s tests prove a fresh cache is answered
+    /// without a request, and a stale one with exactly one (#111).
+    pub(crate) fn fetch_forecast_from(
+        endpoints: &Endpoints,
+        lat: f64,
+        lon: f64,
+    ) -> Result<Forecast> {
+        fetch_forecast_with(&test_agent(), endpoints, lat, lon)
+    }
+
     const CAPTIVE_PORTAL: &str =
         "<!doctype html><html><body><h1>Sign in to WiFi</h1></body></html>";
 
