@@ -354,10 +354,12 @@ impl fmt::Display for ResponseTooLarge {
 impl std::error::Error for ResponseTooLarge {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     #[test]
@@ -387,6 +389,17 @@ mod tests {
     /// and wrongly: an error status, a body that is not JSON, or the hotel
     /// wifi's login page delivered with a cheerful 200.
     fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
+        serving_counted(status, content_type, body).0
+    }
+
+    /// `serving`, with a count of how many requests it answered. The count
+    /// is what `virga now`'s tests assert on (#65): the server is the one
+    /// party that knows whether a report asked the network.
+    pub(crate) fn serving_counted(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (Endpoints, Arc<AtomicUsize>) {
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -404,17 +417,21 @@ mod tests {
         )
         .into_bytes();
         response.extend_from_slice(body);
-        serving_response(response)
+        serving_response(response).0
     }
 
-    /// The raw bytes every connection gets, whatever it asked for.
-    fn serving_response(response: Vec<u8>) -> Endpoints {
+    /// The raw bytes every connection gets, whatever it asked for, and a
+    /// count of the connections it answered.
+    fn serving_response(response: Vec<u8>) -> (Endpoints, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
 
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                counted.fetch_add(1, Ordering::SeqCst);
                 // Drain enough of the request that the client is not blocked
                 // writing while we are blocked replying.
                 let mut scratch = [0u8; 4096];
@@ -425,18 +442,38 @@ mod tests {
         });
 
         let base = format!("http://{addr}/");
-        Endpoints {
+        let endpoints = Endpoints {
             forecast: base.clone(),
             geocode: base.clone(),
             air_quality: base.clone(),
             geoip: base,
-        }
+        };
+        (endpoints, hits)
     }
 
     /// Short bounds: these servers answer at once, so a test that hangs is a
     /// bug in the test, and should say so in a moment rather than in 15s.
     fn test_agent() -> Agent {
         bounded_agent(Duration::from_secs(5), Duration::from_secs(2), false)
+    }
+
+    /// `detect_location` against a loopback host, through the test agent: the
+    /// production agent refuses plain HTTP, which is all a loopback server
+    /// speaks. The seam through which `virga now`'s tests answer a detection
+    /// with a refusal (#65).
+    pub(crate) fn detect_location_from(endpoints: &Endpoints) -> Result<Location> {
+        detect_location_with(&test_agent(), endpoints)
+    }
+
+    /// `fetch_forecast` against a loopback host, through the test agent, for
+    /// the same reason: `virga now`'s tests prove a fresh cache is answered
+    /// without a request, and a stale one with exactly one (#111).
+    pub(crate) fn fetch_forecast_from(
+        endpoints: &Endpoints,
+        lat: f64,
+        lon: f64,
+    ) -> Result<Forecast> {
+        fetch_forecast_with(&test_agent(), endpoints, lat, lon)
     }
 
     const CAPTIVE_PORTAL: &str =

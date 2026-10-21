@@ -256,23 +256,12 @@ status bar polling by the minute asks the location provider once, not once
 per poll. That is the one place the two disagree: the app re-detects a
 detected location on every launch, and `virga now` never does, so after
 travelling it keeps reporting the old city until the next launch overwrites
-it.
-
-`virga update` answers in its exit status as well, so a shell prompt or a
-cron job can act on it without reading the text:
-
-| Exit status | Meaning |
-|---|---|
-| 0 | Nothing to do: on the latest release, or ahead of it |
-| 1 | The check could not be made |
-| 2 | Usage error |
-| 3 | A newer release exists |
-
-1 and 2 are what every command means by them; 0 is `update`'s answer, and 3
-is the one `update` adds, non-zero because there is something to do, the way
-`brew outdated` is.
-A script that treated any non-zero status as a failed check now has to
-tell 1 from 3.
+it. A lookup the provider does not answer is remembered too, for a quarter
+of an hour: the report names the fallback city meanwhile, and asks again
+once that has passed. When the app fetched a forecast for the remembered
+city within the last hour, `virga now` answers from it, moved to the current
+hour, without asking the network; a named city always fetches, and
+`VIRGA_CACHE=off` turns this off along with the rest of the cache.
 
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went
@@ -535,7 +524,8 @@ Weather, air quality, and geocoding all come from
 Each weather load makes two requests, and each submitted search makes a third.
 `virga now` asks the same questions the same way — two requests per report,
 one more for a named city, and the location lookup only on a first run where
-nothing is remembered.
+nothing is remembered — or none, when the app's last forecast for the city
+is under an hour old.
 
 Location detection is the one thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to

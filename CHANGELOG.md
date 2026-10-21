@@ -22,6 +22,14 @@ refuse to publish a version this file does not describe.
   text on stdout is unchanged. A script that treated every non-zero
   status as a failed check has to tell 1 from 3 now. The table is in
   `--help` (#110).
+- `virga now` answers from the app's last forecast when it describes the
+  remembered city and is under an hour old, moved to the current hour the
+  way a launch moves it, instead of fetching on every call, so a status
+  bar polling by the minute in the hour after a launch is answered from
+  disk. The bound is an hour rather than the app's day because the report
+  has no "as of" mark to say how old its reading is. A named city still
+  fetches, and `VIRGA_CACHE=off` turns the read off along with the rest of
+  the cache (#111).
 
 ### Fixed
 
@@ -64,6 +72,13 @@ refuse to publish a version this file does not describe.
   into the message, and the search and detection errors carry it too. The
   error popup and the search box wrap that message to fit rather than
   cutting it off at the border (#71).
+- `virga now` no longer asks the location provider again on every poll
+  once a detection has failed. Only a detection that succeeded was
+  remembered, so a status bar polling by the minute asked ipapi.co again
+  on every poll after a 429, sixty times an hour. A failed detection is
+  now written down beside the rest of the state, and the report names the
+  fallback city for a quarter of an hour before asking again; the marker
+  is dropped the moment a place is remembered (#65).
 - A city search no longer waits behind a stalled forecast. One thread served
   every request in the order it arrived, so pressing `l`, typing a city and
   hitting Enter while a fetch was hung showed the search spinner for up to
