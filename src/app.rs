@@ -1847,6 +1847,9 @@ mod tests {
             country: Some("Germany".to_string()),
             lat: 52.52437,
             lon: 13.41053,
+            timezone: None,
+            country_code: None,
+            population: None,
         }]);
         let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
         assert!(!app.is_locating(), "a choice abandons the detection");
