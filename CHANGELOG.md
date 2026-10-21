@@ -12,6 +12,20 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.7.0]
+
+Most of this release is `virga now` and the edges of the app. The one-shot
+report now suits a status bar polling by the minute. It answers from the
+app's last forecast while that is under an hour old, and after a failed
+location lookup it waits a quarter of an hour before asking again. The
+city search lists results by population and tells identical names apart.
+A launch with nothing cached opens on its panes instead of a spinner in an
+empty terminal. Underneath, a failed request names the host behind it, the
+clients refuse plain HTTP and cap what they read, a `kill` restores the
+terminal, and the install script no longer hangs on a stalled connection.
+`virga update` now exits 3 when a newer release exists, which a script
+that treated every non-zero status as a failure will notice.
+
 ### Added
 
 - A cleared update notice stays cleared. The keypress that dismisses the
@@ -21,7 +35,8 @@ refuse to publish a version this file does not describe.
   out, as before, and comes back next time. The dismissal is written beside
   a remembered city, theme, or key bar style and never on its own — a state
   file holding nothing else is one older Virga builds refuse to read — so a
-  notice cleared before any of those exist is announced once more.
+  notice cleared before any of those exist comes back on each launch until
+  one does.
   `VIRGA_UPDATE=off` still skips the check entirely, and `virga update`
   always answers (#109).
 - **The city search tells identical rows apart, biggest first.** Results
@@ -565,7 +580,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/t-shahan/virga/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/t-shahan/virga/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/t-shahan/virga/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/t-shahan/virga/compare/v0.5.2...v0.5.3
