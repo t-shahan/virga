@@ -174,21 +174,7 @@ fn fetch_forecast_with(
         let aqi = scope.spawn(|| fetch_air_quality_with(agent, endpoints, lat, lon));
         let forecast = fetch_daily_with(agent, endpoints, lat, lon);
 
-        let (report, air_quality_error) = match aqi.join() {
-            Ok(Ok(report)) => (report, None),
-            Ok(Err(error)) => (AirQualityReport::default(), Some(format!("{error:#}"))),
-            // A panic in the child is a bug rather than a network condition.
-            // Re-raising it would not take the terminal down: ratatui's panic
-            // hook has already restored it and printed the payload by the
-            // time `join` returns `Err`. It would kill the worker thread,
-            // after which no request is ever answered and the app sits on
-            // "fetching" with no way back. Degrade, and say why; the payload
-            // is not repeated because the hook has already printed it.
-            Err(_) => (
-                AirQualityReport::default(),
-                Some("the air-quality request panicked".to_string()),
-            ),
-        };
+        let (report, air_quality_error) = air_quality_outcome(aqi.join());
 
         let mut weather = forecast?;
         weather.air_quality = report.current;
@@ -201,6 +187,28 @@ fn fetch_forecast_with(
             air_quality_error,
         })
     })
+}
+
+/// The air-quality thread's result as a report, and the reason it is empty
+/// when that is a failure rather than a gap in coverage.
+///
+/// A panic in the thread is a bug rather than a network condition, and it
+/// degrades like one. Re-raising it would not take the terminal down:
+/// ratatui's panic hook has already restored it and printed the payload by
+/// the time `join` returns `Err`. It would kill the worker thread, after
+/// which no request is ever answered and the app sits on "fetching" with no
+/// way back. The payload is not repeated because the hook has printed it.
+fn air_quality_outcome(
+    joined: thread::Result<Result<AirQualityReport>>,
+) -> (AirQualityReport, Option<String>) {
+    match joined {
+        Ok(Ok(report)) => (report, None),
+        Ok(Err(error)) => (AirQualityReport::default(), Some(format!("{error:#}"))),
+        Err(_) => (
+            AirQualityReport::default(),
+            Some("the air-quality request panicked".to_string()),
+        ),
+    }
 }
 
 fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) -> Result<Weather> {
@@ -524,6 +532,16 @@ mod tests {
             .expect("a forecast");
 
         assert!(fetched.air_quality_error.is_none());
+    }
+
+    /// A panic in the air-quality thread costs the reading and says so, the
+    /// way a failed request does, rather than taking the worker down with it.
+    #[test]
+    fn a_panicked_air_quality_request_is_a_reason_not_a_crash() {
+        let (report, reason) = air_quality_outcome(Err(Box::new("boom")));
+
+        assert!(report.current.is_none() && report.daily_max.is_empty());
+        assert_eq!(reason.as_deref(), Some("the air-quality request panicked"));
     }
 
     /// `http status: 503` on its own does not say which of three Open-Meteo
