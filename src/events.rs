@@ -156,8 +156,6 @@ impl Workers {
     }
 }
 
-/// `cache` is where a fetched forecast is kept for the next launch, or
-/// `None` to keep nothing.
 /// Workers built from queues a test holds the other ends of, with nothing
 /// serving them: `main`'s dispatch tests read back what was queued, or hand
 /// in a queue with no room to see a refusal.
@@ -176,6 +174,8 @@ impl Workers {
     }
 }
 
+/// `cache` is where a fetched forecast is kept for the next launch, or
+/// `None` to keep nothing.
 pub fn spawn_workers(messages: Sender<Message>, cache: Option<PathBuf>) -> Workers {
     spawn_workers_with(messages, cache, serve)
 }
