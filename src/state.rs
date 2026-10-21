@@ -1,18 +1,19 @@
 use crate::app::{ActiveLocation, KeyHintStyle, LocationSource, Remembered};
 use crate::theme::Theme;
+use crate::update::Release;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Version 2 requires a location; the optional `theme`, `key_hints`, and
-/// `detection_failed_at` fields ride along unnoticed by binaries that
-/// predate them, which is what lets such a document stay readable
-/// everywhere. Version 3 exists for the shapes version 2 cannot hold — a
-/// theme, a key hint style, or a failed detection, in any mix, recorded
-/// before any location was — and older binaries refuse it loudly rather
-/// than misread it. A document is always written at the lowest version that
-/// can carry it.
+/// Version 2 requires a location; the optional `theme`, `key_hints`,
+/// `detection_failed_at`, and `dismissed` fields ride along unnoticed by
+/// binaries that predate them, which is what lets such a document stay
+/// readable everywhere. Version 3 exists for the shapes version 2 cannot
+/// hold — a theme, a key hint style, a failed detection, or a dismissed
+/// release beside one of those, recorded before any location was — and
+/// older binaries refuse it loudly rather than misread it. A document is
+/// always written at the lowest version that can carry it.
 const VERSION: u8 = 2;
 const LOCATIONLESS_VERSION: u8 = 3;
 const STATE_FILE: &str = "state.json";
@@ -47,6 +48,16 @@ struct StateDocument {
         skip_serializing_if = "Option::is_none"
     )]
     detection_failed_at: Option<i64>,
+    /// The release whose startup notice was last cleared, as `x.y.z`.
+    /// Optional in every version and ignored by binaries that predate it:
+    /// all it ever says is "do not announce this one again", so a reader
+    /// that does not understand it merely announces (#109).
+    ///
+    /// Held as a JSON value rather than a string so a wrong type is
+    /// `dismissed_of`'s warning and not the whole document's failure: the
+    /// field is the one that must never take the location down with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dismissed: Option<serde_json::Value>,
 }
 
 /// Any value but an integer reads as no marker. The other fields fail the
@@ -69,9 +80,11 @@ pub(crate) struct Persisted {
     /// The last detection `virga now` made that went unanswered, if it is
     /// still on record. Cleared by the next location that is remembered.
     pub detection_failed_at: Option<DateTime<Utc>>,
+    /// The release whose startup notice was last cleared, if any was.
+    pub dismissed: Option<Release>,
     /// A complaint about part of the document that did not stop the rest
-    /// being used. Only an unknown theme or key hint style name produces one
-    /// today.
+    /// being used. Only an unknown theme or key hint style name, or a
+    /// dismissed release that is not a version string, produces one today.
     pub warning: Option<String>,
 }
 
@@ -91,14 +104,16 @@ fn remembered_of(document: &StateDocument) -> Result<Option<Remembered>> {
     );
     let Some(location) = &document.location else {
         // Only version 3 may omit the location, and only to carry a theme,
-        // a key hint style, or a failed detection instead; a document
-        // recording nothing at all records a bug.
+        // a key hint style, a failed detection, or a dismissed release
+        // instead; a document recording nothing at all records a bug. A
+        // dismissal alone is read but never written, see `save_dismissed`.
         anyhow::ensure!(document.version == LOCATIONLESS_VERSION, "no location");
         anyhow::ensure!(
             document.theme.is_some()
                 || document.key_hints.is_some()
-                || document.detection_failed_at.is_some(),
-            "neither a location, a theme, a key hint style, nor a failed detection"
+                || document.detection_failed_at.is_some()
+                || document.dismissed.is_some(),
+            "neither a location, a theme, a key hint style, a failed detection, nor a dismissed release"
         );
         return Ok(None);
     };
@@ -150,6 +165,31 @@ fn key_hint_style_of(document: &StateDocument) -> (Option<KeyHintStyle>, Option<
     }
 }
 
+/// The dismissed release, if the document names one that parses. One that
+/// does not — a hand-edit, a future tag grammar, or a value that is not
+/// even a string — is a warning and nothing else, and reads as nothing
+/// dismissed: the cost is one notice the user has to clear again, which
+/// beats losing the location beside it.
+fn dismissed_of(document: &StateDocument) -> (Option<Release>, Option<String>) {
+    let value = match &document.dismissed {
+        None | Some(serde_json::Value::Null) => return (None, None),
+        Some(value) => value,
+    };
+    let release = match value {
+        serde_json::Value::String(version) => Release::parse(version).ok(),
+        _ => None,
+    };
+    match release {
+        Some(release) => (Some(release), None),
+        None => (
+            None,
+            Some(format!(
+                "virga: the state file names a dismissed release {value} that is not a version; ignoring it."
+            )),
+        ),
+    }
+}
+
 fn validate(location: &ActiveLocation) -> Result<()> {
     anyhow::ensure!(!location.label.trim().is_empty(), "location label is empty");
     anyhow::ensure!(location.lat.is_finite(), "latitude is not finite");
@@ -178,6 +218,7 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     let remembered = remembered_of(&document)?;
     let (theme, theme_warning) = theme_of(&document);
     let (key_hint_style, key_hint_warning) = key_hint_style_of(&document);
+    let (dismissed, dismissed_warning) = dismissed_of(&document);
     // An integer `chrono` cannot place on a calendar did not come from this
     // program either, and reads as no marker for the reason
     // `integer_or_nothing` gives. Not worth a warning: nothing the user set
@@ -190,7 +231,8 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
         theme,
         key_hint_style,
         detection_failed_at,
-        warning: theme_warning.or(key_hint_warning),
+        dismissed,
+        warning: theme_warning.or(key_hint_warning).or(dismissed_warning),
     })
 }
 
@@ -301,7 +343,7 @@ fn tolerate_unsupported(locked: std::io::Result<()>) -> std::io::Result<()> {
 
 /// What a save starts from: the fields of the document already on disk,
 /// one of which each `save_*` replaces before the rest are written back.
-/// Read in one place so the four saves cannot disagree about what survives;
+/// Read in one place so the saves cannot disagree about what survives;
 /// the next optional field is one line here, not one per save.
 #[derive(Default)]
 struct Merged {
@@ -312,6 +354,23 @@ struct Merged {
     theme: Option<String>,
     key_hints: Option<String>,
     detection_failed_at: Option<i64>,
+    /// Raw for the same reason, and because a wrong-typed value must ride
+    /// through a save rather than fail it; `dismissed_of` is what judges it.
+    dismissed: Option<serde_json::Value>,
+}
+
+impl Merged {
+    /// The one shape a binary from before the field refuses rather than
+    /// ignores: version 3 exists to carry something besides a location, and
+    /// a document holding only a dismissal fails an older binary's "nothing
+    /// at all" check. A failed-detection marker counts as something, the
+    /// way #65 decided for that field on its own.
+    fn holds_only_a_dismissal(&self) -> bool {
+        self.remembered.is_none()
+            && self.theme.is_none()
+            && self.key_hints.is_none()
+            && self.detection_failed_at.is_none()
+    }
 }
 
 /// The surviving document's fields, ready for one to be replaced. Read under
@@ -328,6 +387,7 @@ fn surviving(path: &Path) -> Result<Merged> {
         theme: document.theme,
         key_hints: document.key_hints,
         detection_failed_at: document.detection_failed_at,
+        dismissed: document.dismissed,
     })
 }
 
@@ -360,6 +420,25 @@ pub(crate) fn save_detection_failure(path: &Path, at: DateTime<Utc>) -> Result<(
     save_document(path, merged)
 }
 
+/// Note that the startup notice for `release` was cleared, so later launches
+/// announce only something newer. Everything else in the document is kept,
+/// the way the other saves keep this.
+///
+/// A document that would hold nothing but the dismissal is not written.
+/// Older binaries reject that shape on every launch rather than ignoring the
+/// field, which #109 promised they would; the cost of not writing it is the
+/// notice on every launch until a city, theme, or key hint style gives the
+/// document another reason to exist.
+pub(crate) fn save_dismissed(path: &Path, release: &Release) -> Result<()> {
+    let _held = exclusive(path)?;
+    let mut merged = surviving(path)?;
+    merged.dismissed = Some(serde_json::Value::String(release.to_string()));
+    if merged.holds_only_a_dismissal() {
+        return Ok(());
+    }
+    save_document(path, merged)
+}
+
 pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
     let _held = exclusive(path)?;
     let mut merged = surviving(path)?;
@@ -380,6 +459,7 @@ fn save_document(path: &Path, merged: Merged) -> Result<()> {
         theme,
         key_hints,
         detection_failed_at,
+        dismissed,
     } = merged;
     let version = match remembered {
         Some(_) => VERSION,
@@ -401,6 +481,7 @@ fn save_document(path: &Path, merged: Merged) -> Result<()> {
             theme,
             key_hints,
             detection_failed_at,
+            dismissed,
         },
     )?;
     use std::io::Write as _;
@@ -661,6 +742,246 @@ mod tests {
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.theme, Some(Theme::Nord));
         assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// The dismissal rides in version 3 beside a theme — a notice can be
+    /// cleared before any weather has loaded — and in version 2 beside a
+    /// location, like the other optional fields.
+    #[test]
+    fn a_dismissed_release_round_trips_with_and_without_a_location() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let release = Release::parse("0.7.0").unwrap();
+
+        save_theme(&path, Theme::Nord).unwrap();
+        save_dismissed(&path, &release).unwrap();
+
+        assert_eq!(raw_version(&path), 3);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, None);
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.dismissed, Some(release.clone()));
+        assert_eq!(persisted.warning, None);
+
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+        save_location(&path, &berlin).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.dismissed, Some(release));
+    }
+
+    /// The field is written the way `virga update` prints a version, so a
+    /// hand can read it and an older binary — which ignores it — leaves it
+    /// where it is.
+    #[test]
+    fn a_dismissed_release_is_written_as_a_bare_version() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_dismissed(&path, &Release::parse("v0.7.0").unwrap()).unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["dismissed"], "0.7.0");
+    }
+
+    /// Documents written before the field existed read as nothing dismissed,
+    /// and a dismissal later saved over them keeps what they held.
+    #[test]
+    fn a_document_without_the_field_reads_as_nothing_dismissed() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        write_raw(
+            &path,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","theme":"nord"}"#,
+        );
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.dismissed, None);
+        assert_eq!(persisted.warning, None);
+
+        save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
+
+        let persisted = load_from(&path).unwrap();
+        assert!(persisted.remembered.is_some());
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.dismissed, Some(Release::parse("0.7.0").unwrap()));
+    }
+
+    /// A dismissed value that is not a version is a warning and nothing
+    /// else, the same as an unknown theme: it reads as nothing dismissed
+    /// and must not take the location down with it.
+    #[test]
+    fn a_dismissed_value_that_is_not_a_version_warns_but_keeps_the_rest() {
+        for body in [
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","dismissed":"latest"}"#,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","dismissed":""}"#,
+            r#"{"version":3,"dismissed":"0.7"}"#,
+        ] {
+            let test = tempfile::tempdir().unwrap();
+            let path = test.path().join("state.json");
+            write_raw(&path, body);
+
+            let persisted = load_from(&path).unwrap();
+
+            assert_eq!(persisted.dismissed, None, "{body}");
+            assert!(persisted.warning.unwrap().contains("dismissed"), "{body}");
+        }
+    }
+
+    /// A dismissed field of the wrong type is the same warning as one of
+    /// the wrong shape, not a document this binary cannot read: failing the
+    /// parse would run the launch with no location and let the next save
+    /// drop it, which is what tolerating a junk string is there to prevent.
+    /// The junk is carried through by that save like an unknown theme name.
+    #[test]
+    fn a_dismissed_field_of_the_wrong_type_warns_but_keeps_the_rest() {
+        let berlin = chosen("Berlin", 52.0, 13.0);
+        for body in [
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","dismissed":7}"#,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","dismissed":{"v":"0.7.0"}}"#,
+            r#"{"version":3,"dismissed":7}"#,
+        ] {
+            let test = tempfile::tempdir().unwrap();
+            let path = test.path().join("state.json");
+            write_raw(&path, body);
+
+            let persisted = load_from(&path).unwrap();
+            assert_eq!(persisted.dismissed, None, "{body}");
+            assert!(persisted.warning.unwrap().contains("dismissed"), "{body}");
+
+            save_theme(&path, Theme::Nord).unwrap();
+            let persisted = load_from(&path).unwrap();
+            assert_eq!(persisted.theme, Some(Theme::Nord), "{body}");
+            assert_eq!(
+                persisted.remembered.is_some(),
+                body.contains("location"),
+                "{body}: the save dropped the location"
+            );
+            assert_eq!(persisted.dismissed, None, "{body}");
+            assert!(
+                persisted.warning.is_some(),
+                "{body}: the junk was not carried through"
+            );
+        }
+        // The one non-string that means "nothing": null is how an absent
+        // field looks to a hand or a tool, and warns about nothing.
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        write_raw(
+            &path,
+            r#"{"version":2,"location":{"label":"Berlin","lat":52.0,"lon":13.0},"source":"chosen","dismissed":null}"#,
+        );
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.dismissed, None);
+        assert_eq!(persisted.warning, None);
+    }
+
+    /// A dismissal is never the only thing in the file: that document is
+    /// one older binaries refuse on every launch rather than ignore, and
+    /// nothing else this binary writes produces it. A notice cleared before
+    /// any city, theme, or key hint style exists is simply shown once more.
+    #[test]
+    fn a_dismissal_with_nothing_else_to_keep_is_not_written() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+
+        save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
+
+        assert!(!path.exists(), "a dismissal-only document was written");
+        assert_eq!(load_from(&path).unwrap().dismissed, None);
+
+        // And a document whose location no longer parses counts as holding
+        // nothing: dropping it is what every save does, and what remains
+        // would again be the shape older binaries refuse.
+        write_raw(
+            &path,
+            r#"{"version":2,"location":{"label":"","lat":52.0,"lon":13.0},"source":"chosen"}"#,
+        );
+        save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
+        assert!(
+            load_from(&path).is_err(),
+            "the unusable document was replaced"
+        );
+
+        // Once anything else is there, the dismissal has a document to ride.
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
+        assert_eq!(raw_version(&path), 3);
+        assert_eq!(
+            load_from(&path).unwrap().dismissed,
+            Some(Release::parse("0.7.0").unwrap())
+        );
+    }
+
+    /// The other three saves are not about the notice and must not touch
+    /// the dismissal, the same way they must not touch each other. Each of
+    /// the three runs after the dismissal exists, so each is caught if it
+    /// drops it.
+    #[test]
+    fn a_dismissed_release_survives_the_other_saves() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let release = Release::parse("0.7.0").unwrap();
+
+        save_key_hint_style(&path, KeyHintStyle::Hint).unwrap();
+        save_dismissed(&path, &release).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_location(&path, &chosen("Berlin, Germany", 52.52437, 13.41053)).unwrap();
+
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.dismissed, Some(release));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert!(persisted.remembered.is_some());
+    }
+
+    /// And a later dismissal replaces the earlier one while keeping the rest.
+    #[test]
+    fn a_later_dismissal_replaces_the_earlier_and_keeps_the_rest() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
+
+        save_location(&path, &berlin).unwrap();
+        save_theme(&path, Theme::Nord).unwrap();
+        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
+        save_dismissed(&path, &Release::parse("0.8.0").unwrap()).unwrap();
+
+        assert_eq!(raw_version(&path), 2);
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.dismissed, Some(Release::parse("0.8.0").unwrap()));
+        assert_eq!(persisted.remembered, Some(berlin));
+        assert_eq!(persisted.theme, Some(Theme::Nord));
+        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+    }
+
+    /// The failed-detection marker (#65) is a reason for a document to
+    /// exist, so a dismissal beside one is written. Remembering a place then
+    /// clears the marker, the question it was asking being answered, and
+    /// leaves the dismissal alone.
+    #[test]
+    fn a_dismissal_rides_beside_a_failed_detection_and_outlives_it() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let failed = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+
+        save_detection_failure(&path, failed).unwrap();
+        save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.dismissed, Some(Release::parse("0.7.0").unwrap()));
+        assert_eq!(persisted.detection_failed_at, Some(failed));
+
+        save_location(&path, &chosen("Berlin, Germany", 52.52437, 13.41053)).unwrap();
+        let persisted = load_from(&path).unwrap();
+        assert_eq!(persisted.dismissed, Some(Release::parse("0.7.0").unwrap()));
+        assert_eq!(persisted.detection_failed_at, None);
     }
 
     /// An unknown key hint style name is a warning and nothing else, the same
