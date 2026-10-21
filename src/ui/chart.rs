@@ -1,7 +1,7 @@
 use crate::theme::Palette;
 use crate::ui::bars::{Columns, GAP};
 use crate::units::Unit;
-use crate::weather::model::Weather;
+use crate::weather::model::{DailyForecast, Weather};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -18,30 +18,11 @@ pub(super) fn chart_area_render(
     unit: Unit,
     selected: usize,
 ) {
-    let coolest_all = weather
-        .daily
-        .iter()
-        .map(|d| d.high_c)
-        .fold(f64::INFINITY, f64::min);
-    let warmest_all = weather
-        .daily
-        .iter()
-        .map(|d| d.high_c)
-        .fold(f64::NEG_INFINITY, f64::max);
-
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
         // Styled rather than left to the block: a title takes the block's own
         // style, not the border's, so unstyled it ignores the theme entirely.
-        .title(
-            Line::from(format!(
-                "Daily Highs · {:.0}–{:.0}{}",
-                unit.temp_rounded(coolest_all),
-                unit.temp_rounded(warmest_all),
-                unit.temp_symbol(),
-            ))
-            .fg(palette.muted),
-        );
+        .title(Line::from(title(&weather.daily, unit)).fg(palette.muted));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -56,14 +37,7 @@ pub(super) fn chart_area_render(
     let start = weather.daily.len().saturating_sub(columns.capacity);
     let visible = &weather.daily[start..];
 
-    let coolest = visible
-        .iter()
-        .map(|d| d.high_c)
-        .fold(f64::INFINITY, f64::min);
-    let warmest = visible
-        .iter()
-        .map(|d| d.high_c)
-        .fold(f64::NEG_INFINITY, f64::max);
+    let (coolest, warmest) = high_range(visible).unwrap_or_default();
 
     // Map the observed range onto BAR_FLOOR..=BAR_CEILING rather than 0..=max.
     // Scaling from zero flattens a week of similar highs into identical bars,
@@ -138,6 +112,30 @@ pub(super) fn chart_area_render(
     );
 }
 
+/// The coolest and warmest daily high, or `None` for no days at all. Folding
+/// from the infinities instead read an empty series as `inf–-inf`, and the
+/// title printed exactly that.
+fn high_range(days: &[DailyForecast]) -> Option<(f64, f64)> {
+    let mut highs = days.iter().map(|d| d.high_c);
+    let first = highs.next()?;
+    Some(highs.fold((first, first), |(coolest, warmest), high| {
+        (coolest.min(high), warmest.max(high))
+    }))
+}
+
+/// The box title, with the range of the whole series where there is one.
+fn title(days: &[DailyForecast], unit: Unit) -> String {
+    match high_range(days) {
+        Some((coolest, warmest)) => format!(
+            "Daily Highs · {:.0}–{:.0}{}",
+            unit.temp_rounded(coolest),
+            unit.temp_rounded(warmest),
+            unit.temp_symbol(),
+        ),
+        None => "Daily Highs".to_string(),
+    }
+}
+
 /// How far into the chart the selection marker goes, if it goes anywhere.
 ///
 /// The selection can sit outside the drawn window — the chart drops the oldest
@@ -208,6 +206,36 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
             t.draw(|f| chart_area_render(f, &w, palette(), f.area(), Unit::Imperial, 14))
                 .unwrap();
+        }
+    }
+
+    fn top_border(width: u16, height: u16, weather: &Weather) -> String {
+        let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
+        t.draw(|f| chart_area_render(f, weather, palette(), f.area(), Unit::Imperial, 0))
+            .unwrap();
+        let buf = t.backend().buffer();
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    /// The fixture climbs from 20 °C to 41 °C, which is 68–106 °F.
+    #[test]
+    fn the_title_names_the_range_of_the_whole_series() {
+        let top = top_border(80, 14, &Weather::fixture(22, 14));
+        assert!(top.contains("Daily Highs · 68–106°F"), "{top:?}");
+    }
+
+    /// The issue: with no days the range folded to `inf–-inf°C`, and the
+    /// title said so. No days means no range, so the title stops at the name.
+    #[test]
+    fn an_empty_series_titles_the_chart_without_a_range() {
+        let empty = Weather::fixture(0, 0);
+        for (width, height) in [(80, 14), (30, 6), (200, 50), (3, 3)] {
+            let top = top_border(width, height, &empty);
+            assert!(!top.contains("inf"), "{width}x{height}: {top:?}");
+            assert!(!top.contains('°'), "{width}x{height}: {top:?}");
+            if width >= 14 {
+                assert!(top.contains("Daily Highs"), "{width}x{height}: {top:?}");
+            }
         }
     }
 
