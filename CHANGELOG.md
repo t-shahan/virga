@@ -14,6 +14,16 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- A cleared update notice stays cleared. The keypress that dismisses the
+  startup notice now also writes the release it named into the state file,
+  and later launches announce only a release newer than that one. Quitting
+  with the notice still standing does not count: it is printed on the way
+  out, as before, and comes back next time. The dismissal is written beside
+  a remembered city, theme, or key bar style and never on its own — a state
+  file holding nothing else is one older Virga builds refuse to read — so a
+  notice cleared before any of those exist is announced once more.
+  `VIRGA_UPDATE=off` still skips the check entirely, and `virga update`
+  always answers (#109).
 - **The city search tells identical rows apart, biggest first.** Results
   now come in order of population, so the city most people mean sits under
   the cursor and is the one `virga now CITY` answers for; the geocoder's
