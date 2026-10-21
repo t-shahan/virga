@@ -189,7 +189,7 @@ mod tests {
         );
         assert!(rows[0].contains("Today"), "{:?}", rows[0]);
         assert!(
-            rows[3].contains('▸'),
+            rows[3].contains('>'),
             "the selection is on the fourth date but no row is marked:\n{text}"
         );
     }
@@ -224,6 +224,18 @@ mod tests {
         let mut hours = dry_hours(24);
         hours[7].precip_mm = None;
         assert_eq!(wet_hours_line(&hours), UNKNOWN);
+    }
+
+    /// Only the window has to be whole. A hole beyond it must not blank the
+    /// count for a selection whose day ahead was fully reported.
+    #[test]
+    fn a_wet_hour_count_is_withheld_only_when_the_hole_falls_inside_its_window() {
+        let mut hours = dry_hours(48);
+        hours[2].precip_mm = Some(3.0);
+        hours[30].precip_mm = None;
+
+        assert_eq!(wet_hours_line(window_from(&hours, 0)), "1 of 24");
+        assert_eq!(wet_hours_line(window_from(&hours, 10)), UNKNOWN);
     }
 
     #[test]

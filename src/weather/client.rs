@@ -7,10 +7,15 @@ use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
+use std::cmp::Reverse;
+use std::fmt;
+use std::io::{self, Read};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
-use ureq::Agent;
+use ureq::http::Response;
+use ureq::{Agent, Body};
 
 /// End-to-end bound on a request: DNS, connect, TLS, response and body read.
 /// `ureq` defaults every one of these to `None`, so before this a hung server
@@ -21,13 +26,31 @@ const TIMEOUT_GLOBAL: Duration = Duration::from_secs(15);
 /// Reaching an unreachable host should not burn the whole global budget before
 /// saying so.
 const TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
-const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m";
+/// The daily and hourly blocks the forecast request asks for, as constants so
+/// the DTO tests can check each name against a struct field. A rename on
+/// either side would otherwise deserialize to an empty series with no error.
+pub(super) const DAILY_FIELDS: &str = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_hours,wind_gusts_10m_max,wind_direction_10m_dominant,daylight_duration";
+pub(super) const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m";
 
 /// Detection sits in front of the first frame of weather, so its budget is
 /// tighter than the forecast's. A provider having a bad day should cost a
 /// moment and a fallback, not fifteen seconds of "locating...".
 const TIMEOUT_GEOIP_GLOBAL: Duration = Duration::from_secs(5);
 const TIMEOUT_GEOIP_CONNECT: Duration = Duration::from_secs(3);
+
+/// Ceiling on any response body, counted on the wire and again after decoding,
+/// before it is parsed. A full forecast with its hourly block is tens of
+/// kilobytes and a geocode page is under five, so this is headroom, not a
+/// budget. Stated here because ureq's own 10 MB cap lives inside
+/// `Body::read_json()` alone, `with_config()` defaults to unlimited, and
+/// neither counts decoded bytes; `read_bounded_json` is where all of that is
+/// made to hold.
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+/// Open-Meteo and ipapi.co do not redirect, so ureq's default of ten is nine
+/// hops of somebody else's itinerary. A couple is enough to survive a host
+/// growing a trailing-slash rule without turning a loop into ten round trips.
+const MAX_REDIRECTS: u32 = 2;
 
 /// One shared agent for the whole process. `ureq::get()` builds a fresh Agent
 /// per call, and a fresh Agent means a fresh connection pool — so every request
@@ -36,7 +59,7 @@ const TIMEOUT_GEOIP_CONNECT: Duration = Duration::from_secs(3);
 /// the same host reuse the connection.
 fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
-    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GLOBAL, TIMEOUT_CONNECT))
+    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GLOBAL, TIMEOUT_CONNECT, true))
 }
 
 /// Its own agent rather than the shared one: this is a different host with a
@@ -44,14 +67,22 @@ fn agent() -> &'static Agent {
 /// app talks to it once, at launch, and never again.
 fn geoip_agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
-    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GEOIP_GLOBAL, TIMEOUT_GEOIP_CONNECT))
+    AGENT.get_or_init(|| bounded_agent(TIMEOUT_GEOIP_GLOBAL, TIMEOUT_GEOIP_CONNECT, true))
 }
 
-fn bounded_agent(global: Duration, connect: Duration) -> Agent {
+/// `https_only` is a parameter rather than a constant because the loopback
+/// tests serve plain HTTP and cannot cheaply do otherwise. Production passes
+/// `true`: every request carries the user's coordinates, and with the default
+/// `false` a redirect from any provider to an `http://` URL would be followed
+/// and those coordinates re-sent in the clear. ureq checks the scheme on every
+/// hop, so the setting covers the redirect target as well as the first URL.
+fn bounded_agent(global: Duration, connect: Duration, https_only: bool) -> Agent {
     Agent::new_with_config(
         Agent::config_builder()
             .timeout_global(Some(global))
             .timeout_connect(Some(connect))
+            .https_only(https_only)
+            .max_redirects(MAX_REDIRECTS)
             .build(),
     )
 }
@@ -90,15 +121,42 @@ pub fn detect_location() -> Result<Location> {
     detect_location_with(geoip_agent(), &Endpoints::default())
 }
 
+/// The context every request carries, one for the call and one for reading
+/// its body. Noun phrases naming the service and its host, never verbs: each
+/// place they are printed already opens with one (`could not fetch the
+/// weather:`, `could not work out where you are:`), and `fetch the forecast
+/// from ...` under `could not fetch` read the same thing twice.
+fn service_at(service: &str, url: &str) -> String {
+    format!("the {service} at {url}")
+}
+
+fn reply_from(service: &str, url: &str) -> String {
+    format!("the reply from the {service} at {url}")
+}
+
 fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location> {
-    let mut response = agent.get(&endpoints.geoip).call()?;
-    let dto: GeoIpDto = response.body_mut().read_json()?;
+    let mut response = agent
+        .get(&endpoints.geoip)
+        .call()
+        .with_context(|| service_at("location service", &endpoints.geoip))?;
+    let dto: GeoIpDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("location service", &endpoints.geoip))?;
 
     dto.into_location()
         .context("the location service did not name a place")
 }
 
-pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Weather> {
+/// A forecast that arrived, and the reason its air quality did not when that
+/// is what happened. Air quality is supplementary, so losing it costs the
+/// reading and never the forecast — but a blank cell for a whole session
+/// looks the same whether CAMS has no coverage here or the endpoint is down,
+/// and only the reason tells those apart.
+pub struct Forecast {
+    pub weather: Weather,
+    pub air_quality_error: Option<String>,
+}
+
+pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Forecast> {
     fetch_forecast_with(agent(), &Endpoints::default(), lat, lon)
 }
 
@@ -107,7 +165,7 @@ fn fetch_forecast_with(
     endpoints: &Endpoints,
     lat: f64,
     lon: f64,
-) -> Result<Weather> {
+) -> Result<Forecast> {
     // A scoped thread rather than a detached one. The rule this encodes was
     // already here in prose: `?` on the forecast while air quality was still
     // running used to detach it, so a run of early failures left a pile of
@@ -117,10 +175,7 @@ fn fetch_forecast_with(
         let aqi = scope.spawn(|| fetch_air_quality_with(agent, endpoints, lat, lon));
         let forecast = fetch_daily_with(agent, endpoints, lat, lon);
 
-        let report = match aqi.join() {
-            Ok(Ok(report)) => report,
-            _ => AirQualityReport::default(),
-        };
+        let (report, air_quality_error) = air_quality_outcome(aqi.join());
 
         let mut weather = forecast?;
         weather.air_quality = report.current;
@@ -128,8 +183,33 @@ fn fetch_forecast_with(
             day.aqi = report.daily_max.get(&day.date).copied();
         }
 
-        Ok(weather)
+        Ok(Forecast {
+            weather,
+            air_quality_error,
+        })
     })
+}
+
+/// The air-quality thread's result as a report, and the reason it is empty
+/// when that is a failure rather than a gap in coverage.
+///
+/// A panic in the thread is a bug rather than a network condition, and it
+/// degrades like one. Re-raising it would not take the terminal down:
+/// ratatui's panic hook has already restored it and printed the payload by
+/// the time `join` returns `Err`. It would kill the worker thread, after
+/// which no request is ever answered and the app sits on "fetching" with no
+/// way back. The payload is not repeated because the hook has printed it.
+fn air_quality_outcome(
+    joined: thread::Result<Result<AirQualityReport>>,
+) -> (AirQualityReport, Option<String>) {
+    match joined {
+        Ok(Ok(report)) => (report, None),
+        Ok(Err(error)) => (AirQualityReport::default(), Some(format!("{error:#}"))),
+        Err(_) => (
+            AirQualityReport::default(),
+            Some("the air-quality request panicked".to_string()),
+        ),
+    }
 }
 
 fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) -> Result<Weather> {
@@ -141,10 +221,7 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
             "current",
             "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
         )
-        .query(
-            "daily",
-            "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_hours,wind_gusts_10m_max,wind_direction_10m_dominant,daylight_duration",
-        )
+        .query("daily", DAILY_FIELDS)
         // Rides the existing request rather than taking its own. ~15 KB more on
         // an already-warm pooled connection beats a second round trip with its
         // own loading state and its own failure mode.
@@ -152,9 +229,11 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
         .query("timezone", "auto")
         .query("forecast_days", "8")
         .query("past_days", "14")
-        .call()?;
+        .call()
+        .with_context(|| service_at("forecast service", &endpoints.forecast))?;
 
-    let dto: ForecastDto = response.body_mut().read_json()?;
+    let dto: ForecastDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("forecast service", &endpoints.forecast))?;
     Ok(dto.into())
 }
 
@@ -173,15 +252,26 @@ fn search_locations_with(
         .query("count", "5")
         .query("language", "en")
         .query("format", "json")
-        .call()?;
+        .call()
+        .with_context(|| service_at("geocoder", &endpoints.geocode))?;
 
-    let dto: GeocodeDto = response.body_mut().read_json()?;
+    let dto: GeocodeDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("geocoder", &endpoints.geocode))?;
 
-    Ok(dto
+    let mut locations: Vec<Location> = dto
         .results
         .into_iter()
         .filter_map(GeocodeResultDto::into_location)
-        .collect())
+        .collect();
+    // The geocoder ranks by how well the name matched, which among five
+    // places all called Frederick is no ranking at all: behind the county
+    // seat of 70,000 it put a town of 3,700 above one of 11,000. Biggest first
+    // puts the one most people mean under the cursor, and makes it the one
+    // `virga now frederick` answers for. The sort is stable, so places the
+    // geocoder gave no population keep its order among themselves, at the
+    // bottom.
+    locations.sort_by_key(|location| Reverse(location.population.unwrap_or(0)));
+    Ok(locations)
 }
 
 /// Air quality is only ever fetched as part of a forecast — it shares that
@@ -206,18 +296,80 @@ fn fetch_air_quality_with(
         .query("past_days", "14")
         .query("forecast_days", "7")
         .query("domains", "cams_global")
-        .call()?;
+        .call()
+        .with_context(|| service_at("air-quality service", &endpoints.air_quality))?;
 
-    let dto: AqiDto = response.body_mut().read_json()?;
+    let dto: AqiDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("air-quality service", &endpoints.air_quality))?;
 
     Ok(dto.into())
 }
 
+/// Every body is read through here, so the bound is a property of the module
+/// rather than something each call site remembers to repeat. Two layers,
+/// because ureq's limit reader sits *under* its gzip decoder: `limit()` counts
+/// bytes off the wire, ureq inflates whatever the response's `Content-Encoding`
+/// says regardless of what was requested, and a few kilobytes of gzip inflate
+/// to gigabytes. `take` counts the decoded bytes, with one of slack so a
+/// decoded body of exactly the limit is told apart from one that ran past it.
+/// Buffered and
+/// then parsed, rather than streamed into `from_reader`, so that the check
+/// happens before a padded `String` field is allocated; serde_json documents
+/// the buffered path as the faster one anyway.
+fn read_bounded_json<T: DeserializeOwned>(response: &mut Response<Body>) -> Result<T> {
+    let reader = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
+        .reader();
+
+    let mut bytes = Vec::new();
+    let outcome = reader.take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut bytes);
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES || tripped_wire_limit(&outcome) {
+        return Err(ResponseTooLarge {
+            limit: MAX_RESPONSE_BYTES,
+        }
+        .into());
+    }
+    outcome?;
+
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// ureq reports its wire limit as an `io::Error` wrapping its own error, and
+/// exposes it through neither `source()` nor a variant of its own. Read it
+/// back out so that both layers refuse a body with the same error, and a
+/// caller never has to know which one fired.
+fn tripped_wire_limit(outcome: &io::Result<usize>) -> bool {
+    let Err(err) = outcome else { return false };
+    matches!(
+        err.get_ref()
+            .and_then(|inner| inner.downcast_ref::<ureq::Error>()),
+        Some(ureq::Error::BodyExceedsLimit(_))
+    )
+}
+
+/// A body that ran past `MAX_RESPONSE_BYTES`, on the wire or once decoded.
+#[derive(Debug)]
+struct ResponseTooLarge {
+    limit: u64,
+}
+
+impl fmt::Display for ResponseTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the response body ran past {} bytes", self.limit)
+    }
+}
+
+impl std::error::Error for ResponseTooLarge {}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn hourly_request_names_every_weathergram_field() {
@@ -237,7 +389,90 @@ mod tests {
             ]
         );
     }
-    use std::time::Instant;
+
+    /// The forecast's window and zone are what the rest of the app is built
+    /// on: two weeks of history for the daily chart, eight days ahead, and
+    /// local time so the series lines up with the clock on the wall. None of
+    /// it was asserted before; the request was read and thrown away.
+    #[test]
+    fn the_forecast_request_asks_for_the_window_the_app_is_built_on() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54).expect("a forecast");
+
+        let forecast = request_with(&log, "forecast_days", "8");
+        assert_eq!(value_of(&forecast, "past_days"), Some("14"));
+        assert_eq!(value_of(&forecast, "timezone"), Some("auto"));
+        assert_eq!(value_of(&forecast, "latitude"), Some("39.41427"));
+        assert_eq!(value_of(&forecast, "longitude"), Some("-77.41054"));
+        assert_eq!(
+            value_of(&forecast, "hourly"),
+            Some(HOURLY_FIELDS),
+            "the hourly fields the screens read must be the ones asked for"
+        );
+        for field in [
+            "weather_code",
+            "temperature_2m_max",
+            "sunrise",
+            "daylight_duration",
+        ] {
+            assert!(
+                value_of(&forecast, "daily")
+                    .is_some_and(|daily| daily.split(',').any(|f| f == field)),
+                "the daily request lost {field}: {forecast:?}"
+            );
+        }
+    }
+
+    /// The air-quality request shares the forecast's coordinates and window,
+    /// and names its model domain outright rather than taking the provider's
+    /// default. The per-day figures line up with the daily chart only while
+    /// the two windows agree, which nothing checked before this.
+    #[test]
+    fn the_air_quality_request_matches_the_forecast_window_on_the_global_domain() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54).expect("a forecast");
+
+        let aqi = request_with(&log, "domains", "cams_global");
+        assert_eq!(value_of(&aqi, "current"), Some("us_aqi"));
+        assert_eq!(value_of(&aqi, "hourly"), Some("us_aqi"));
+        assert_eq!(value_of(&aqi, "timezone"), Some("auto"));
+        assert_eq!(value_of(&aqi, "past_days"), Some("14"));
+        assert_eq!(value_of(&aqi, "forecast_days"), Some("7"));
+        assert_eq!(value_of(&aqi, "latitude"), Some("39.41427"));
+        assert_eq!(value_of(&aqi, "longitude"), Some("-77.41054"));
+    }
+
+    /// Five results is what the search screen has rows for, and the query
+    /// goes across as typed: a space must not split it into two parameters.
+    #[test]
+    fn the_search_request_carries_the_query_and_asks_for_five_results() {
+        let (endpoints, log) = serving_recorded("200 OK", "application/json", r#"{"results":[]}"#);
+        search_locations_with(&test_agent(), &endpoints, "new york").expect("a result list");
+
+        let search = request_with(&log, "count", "5");
+        assert_eq!(value_of(&search, "name"), Some("new york"));
+        assert_eq!(value_of(&search, "language"), Some("en"));
+        assert_eq!(value_of(&search, "format"), Some("json"));
+    }
+
+    /// Detection sends nothing about the caller beyond the connection itself.
+    #[test]
+    fn the_detection_request_carries_no_query_at_all() {
+        let (endpoints, log) = serving_recorded("200 OK", "application/json", DETECTED);
+        detect_location_with(&test_agent(), &endpoints).expect("a detection");
+
+        let lines = log.lock().expect("request log").clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("GET / HTTP/1.1"), "{:?}", lines[0]);
+    }
 
     /// A loopback server that answers every request with the same canned
     /// response, and `Endpoints` pointing all three URLs at it.
@@ -247,38 +482,202 @@ mod tests {
     /// and wrongly: an error status, a body that is not JSON, or the hotel
     /// wifi's login page delivered with a cheerful 200.
     fn serving(status: &str, content_type: &str, body: &str) -> Endpoints {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("local addr");
+        serving_counted(status, content_type, body).0
+    }
+
+    /// `serving`, with a count of how many requests it answered. The count
+    /// is what `virga now`'s tests assert on (#65): the server is the one
+    /// party that knows whether a report asked the network.
+    pub(crate) fn serving_counted(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (Endpoints, Arc<AtomicUsize>) {
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
+        let (endpoints, hits, _) = serving_response(response.into_bytes());
+        (endpoints, hits)
+    }
 
+    /// A 200 whose body arrives gzip-compressed. ureq decodes on the
+    /// response's `Content-Encoding` whether or not it asked for it, so this is
+    /// what a provider, or whoever is answering for it, can hand the parser.
+    fn serving_gzip(body: &[u8]) -> Endpoints {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        serving_response(response).0
+    }
+
+    /// The request lines the loopback server has answered, in arrival order.
+    /// The forecast and its air-quality request run on two threads, so a
+    /// test picks its line out by content rather than by position.
+    type RequestLog = Arc<Mutex<Vec<String>>>;
+
+    /// `serving`, plus a log of every request line it answered. What the
+    /// client *sends* was unverified until this: the server read the request
+    /// to unblock the client and threw it away, so a dropped `past_days` or a
+    /// renamed field would have failed nothing here.
+    fn serving_recorded(status: &str, content_type: &str, body: &str) -> (Endpoints, RequestLog) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (endpoints, _, log) = serving_response(response.into_bytes());
+        (endpoints, log)
+    }
+
+    /// The raw bytes every connection gets, whatever it asked for, with a
+    /// count of the connections it answered and the request line of each.
+    fn serving_response(response: Vec<u8>) -> (Endpoints, Arc<AtomicUsize>, RequestLog) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        let log: RequestLog = Arc::default();
+        let recorder = Arc::clone(&log);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                // Drain enough of the request that the client is not blocked
-                // writing while we are blocked replying.
-                let mut scratch = [0u8; 4096];
-                let _ = stream.read(&mut scratch);
-                let _ = stream.write_all(response.as_bytes());
+                counted.fetch_add(1, Ordering::SeqCst);
+                // Read the whole header block, not just the first chunk: it
+                // both unblocks the client, which may be waiting to finish
+                // writing before it reads, and guarantees the request line
+                // was seen whole before it is logged.
+                let head = read_request_head(&mut stream);
+                if let Some(line) = head.lines().next()
+                    && let Ok(mut log) = recorder.lock()
+                {
+                    log.push(line.to_string());
+                }
+                let _ = stream.write_all(&response);
                 let _ = stream.flush();
             }
         });
 
         let base = format!("http://{addr}/");
-        Endpoints {
+        let endpoints = Endpoints {
             forecast: base.clone(),
             geocode: base.clone(),
             air_quality: base.clone(),
             geoip: base,
+        };
+        (endpoints, hits, log)
+    }
+    /// Everything up to the blank line that ends the headers, or as much as
+    /// arrived before the client stopped sending. Bounded so a client that
+    /// never sends the blank line cannot grow the buffer without limit.
+    fn read_request_head(stream: &mut impl Read) -> String {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while head.len() < 64 * 1024 {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+            }
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
         }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    /// The query pairs of a logged request line, percent-decoded, so a test
+    /// can assert on the field list it reads rather than on `%2C`.
+    fn query_pairs(request_line: &str) -> Vec<(String, String)> {
+        let target = request_line.split(' ').nth(1).unwrap_or_default();
+        let Some((_, query)) = target.split_once('?') else {
+            return Vec::new();
+        };
+        query
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (percent_decode(key), percent_decode(value))
+            })
+            .collect()
+    }
+
+    fn percent_decode(encoded: &str) -> String {
+        let bytes = encoded.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => out.push(b' '),
+                b'%' if i + 2 < bytes.len() => {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                    match u8::from_str_radix(hex, 16) {
+                        Ok(byte) => {
+                            out.push(byte);
+                            i += 2;
+                        }
+                        Err(_) => out.push(b'%'),
+                    }
+                }
+                byte => out.push(byte),
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// The one logged request whose query carries `key=value`, as decoded
+    /// pairs. Panics on none or several: each test expects exactly one
+    /// request of each kind, and a duplicate would be its own finding.
+    fn request_with(log: &RequestLog, key: &str, value: &str) -> Vec<(String, String)> {
+        let lines = log.lock().expect("request log").clone();
+        let mut matching = lines
+            .iter()
+            .map(|line| query_pairs(line))
+            .filter(|pairs| pairs.iter().any(|(k, v)| k == key && v == value));
+        let found = matching
+            .next()
+            .unwrap_or_else(|| panic!("no request carried {key}={value}: {lines:?}"));
+        assert!(
+            matching.next().is_none(),
+            "more than one request carried {key}={value}: {lines:?}"
+        );
+        found
+    }
+
+    fn value_of<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Short bounds: these servers answer at once, so a test that hangs is a
     /// bug in the test, and should say so in a moment rather than in 15s.
     fn test_agent() -> Agent {
-        bounded_agent(Duration::from_secs(5), Duration::from_secs(2))
+        bounded_agent(Duration::from_secs(5), Duration::from_secs(2), false)
+    }
+
+    /// `detect_location` against a loopback host, through the test agent: the
+    /// production agent refuses plain HTTP, which is all a loopback server
+    /// speaks. The seam through which `virga now`'s tests answer a detection
+    /// with a refusal (#65).
+    pub(crate) fn detect_location_from(endpoints: &Endpoints) -> Result<Location> {
+        detect_location_with(&test_agent(), endpoints)
+    }
+
+    /// `fetch_forecast` against a loopback host, through the test agent, for
+    /// the same reason: `virga now`'s tests prove a fresh cache is answered
+    /// without a request, and a stale one with exactly one (#111).
+    pub(crate) fn fetch_forecast_from(
+        endpoints: &Endpoints,
+        lat: f64,
+        lon: f64,
+    ) -> Result<Forecast> {
+        fetch_forecast_with(&test_agent(), endpoints, lat, lon)
     }
 
     const CAPTIVE_PORTAL: &str =
@@ -337,7 +736,10 @@ mod tests {
             ..good
         };
 
-        let weather = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
+        let Forecast {
+            weather,
+            air_quality_error,
+        } = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
             .expect("a dead air-quality endpoint must not fail the forecast");
 
         assert!(!weather.daily.is_empty(), "the forecast still arrived");
@@ -349,6 +751,76 @@ mod tests {
             weather.daily.iter().all(|d| d.aqi.is_none()),
             "and no day should carry one either"
         );
+        let reason = air_quality_error.expect("a 503 is a reason, not a gap in coverage");
+        assert!(
+            reason.contains("503") && reason.contains(&endpoints.air_quality),
+            "the reason must say what failed and where, got {reason:?}"
+        );
+    }
+
+    /// The other way round: a forecast with its air quality intact has nothing
+    /// to warn about, so the absence of a reading on a day past coverage stays
+    /// an absence.
+    #[test]
+    fn air_quality_arriving_leaves_nothing_to_warn_about() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+
+        let fetched = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
+            .expect("a forecast");
+
+        assert!(fetched.air_quality_error.is_none());
+    }
+
+    /// A panic in the air-quality thread costs the reading and says so, the
+    /// way a failed request does, rather than taking the worker down with it.
+    #[test]
+    fn a_panicked_air_quality_request_is_a_reason_not_a_crash() {
+        let (report, reason) = air_quality_outcome(Err(Box::new("boom")));
+
+        assert!(report.current.is_none() && report.daily_max.is_empty());
+        assert_eq!(reason.as_deref(), Some("the air-quality request panicked"));
+    }
+
+    /// `http status: 503` on its own does not say which of three Open-Meteo
+    /// hosts, or ipapi.co, produced it. Every failure has to name its host
+    /// once the chain is printed.
+    #[test]
+    fn a_failure_names_the_endpoint_that_produced_it() {
+        let endpoints = serving("503 Service Unavailable", "text/plain", "upstream down");
+        let agent = test_agent();
+
+        let forecast = fetch_forecast_with(&agent, &endpoints, 39.414_27, -77.410_54)
+            .err()
+            .expect("a 503 is not a forecast");
+        let detection = detect_location_with(&agent, &endpoints)
+            .err()
+            .expect("nor a place");
+        let search = search_locations_with(&agent, &endpoints, "reykjavik")
+            .err()
+            .expect("nor a list of cities");
+
+        for (name, error, host) in [
+            ("forecast", forecast, &endpoints.forecast),
+            ("detection", detection, &endpoints.geoip),
+            ("search", search, &endpoints.geocode),
+        ] {
+            let shown = format!("{error:#}");
+            assert!(
+                shown.contains(host) && shown.contains("503"),
+                "{name} error must name its host and the status, got {shown:?}"
+            );
+            // `to_string` is the outermost message alone, and with the host in
+            // that layer it is the status that would go missing. This pins
+            // why the worker has to print the chain rather than the message.
+            assert!(
+                !error.to_string().contains("503"),
+                "{name}: the status is in the chain, not the outermost message"
+            );
+        }
     }
 
     const DETECTED: &str = r#"{"city":"Reykjavík","region":"Capital Region",
@@ -458,6 +930,10 @@ mod tests {
         assert_eq!(timeouts.connect, Some(TIMEOUT_GEOIP_CONNECT));
         assert!(TIMEOUT_GEOIP_GLOBAL < TIMEOUT_GLOBAL);
         assert!(TIMEOUT_GEOIP_CONNECT < TIMEOUT_GEOIP_GLOBAL);
+        assert!(
+            geoip_agent().config().https_only(),
+            "the detection request identifies the user by its source address"
+        );
     }
 
     #[test]
@@ -479,6 +955,51 @@ mod tests {
         assert!(result.is_err(), "a login page is not a list of cities");
     }
 
+    /// The recorded answer lists Maryland, Oklahoma, Colorado — the order the
+    /// geocoder matched them in, which puts the town of 3,700 above the one
+    /// of 11,000. The list the app gets is by size.
+    #[test]
+    fn search_results_come_biggest_first() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/geocode.json"),
+        );
+        let found = search_locations_with(&test_agent(), &endpoints, "frederick")
+            .expect("a list of cities");
+
+        let order: Vec<_> = found.iter().map(|l| l.admin1.as_deref()).collect();
+        assert_eq!(
+            order,
+            [Some("Maryland"), Some("Colorado"), Some("Oklahoma")]
+        );
+        assert_eq!(found[0].timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(found[0].country_code.as_deref(), Some("US"));
+    }
+
+    /// A place the geocoder gave no population sinks below every place it
+    /// did, and two such places keep the geocoder's order between them: the
+    /// sort must be stable, or the rows would shuffle from one keystroke to
+    /// the next.
+    #[test]
+    fn search_results_without_a_population_keep_their_order_at_the_bottom() {
+        let endpoints = serving(
+            "200 OK",
+            "application/json",
+            r#"{"results": [
+                {"name": "A", "latitude": 1.0, "longitude": 1.0},
+                {"name": "B", "latitude": 1.0, "longitude": 1.0, "population": 10},
+                {"name": "C", "latitude": 1.0, "longitude": 1.0},
+                {"name": "D", "latitude": 1.0, "longitude": 1.0, "population": 20}
+            ]}"#,
+        );
+        let found =
+            search_locations_with(&test_agent(), &endpoints, "x").expect("a list of cities");
+
+        let order: Vec<_> = found.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(order, ["D", "B", "A", "C"]);
+    }
+
     /// The agent every request shares must actually carry the bounds, not just
     /// have constants declared near it. With ureq's defaults both of these are
     /// `None`, which is the whole finding.
@@ -492,12 +1013,135 @@ mod tests {
             TIMEOUT_CONNECT < TIMEOUT_GLOBAL,
             "connect must fit inside the end-to-end budget"
         );
+        assert!(agent().config().https_only());
+        assert_eq!(agent().config().max_redirects(), MAX_REDIRECTS);
+    }
+
+    /// The scheme check is what keeps coordinates off the wire in the clear,
+    /// and it has to hold before any byte is sent, not after a redirect has
+    /// already been followed. A production-shaped agent pointed at a plain
+    /// `http://` URL must refuse the request outright.
+    #[test]
+    fn a_production_agent_refuses_to_speak_plain_http() {
+        let endpoints = serving("200 OK", "application/json", DETECTED);
+        let agent = bounded_agent(Duration::from_secs(5), Duration::from_secs(2), true);
+
+        let Err(err) = detect_location_with(&agent, &endpoints) else {
+            panic!("an http:// URL must not be fetched by the production agent");
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<ureq::Error>(),
+                Some(ureq::Error::RequireHttpsOnly(_))
+            ),
+            "refused for the wrong reason: {err:#}"
+        );
+    }
+
+    /// A server that redirects to itself forever. With ureq's default of ten
+    /// the client would make eleven round trips before giving up; the bound
+    /// here caps the tour at the original request plus `MAX_REDIRECTS`.
+    #[test]
+    fn a_redirect_loop_is_cut_short_rather_than_followed_ten_times() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let hops = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hops);
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{addr}/again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut scratch = [0u8; 4096];
+                let _ = stream.read(&mut scratch);
+                counted.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let result = test_agent().get(format!("http://{addr}/")).call();
+
+        assert!(
+            matches!(result, Err(ureq::Error::TooManyRedirects)),
+            "a loop must end in an error, got {result:?}"
+        );
+        assert_eq!(
+            hops.load(Ordering::SeqCst),
+            1 + MAX_REDIRECTS as usize,
+            "the client kept following past its bound"
+        );
+    }
+
+    /// The bound has to be the one this module names, not whatever the ureq
+    /// release in Cargo.lock happens to apply inside `read_json`. The body is
+    /// a well-formed geocode answer padded past the limit, so the only thing
+    /// that can reject it is the limit. Uncompressed, it trips ureq's wire
+    /// limit one read before `take` would, which makes this the test that
+    /// fails if a ureq release stops wrapping `BodyExceedsLimit` the way
+    /// `tripped_wire_limit` reads it.
+    #[test]
+    fn an_oversized_body_is_refused_before_it_is_parsed() {
+        let padding = "x".repeat(MAX_RESPONSE_BYTES as usize);
+        let body = format!(r#"{{"results":[],"padding":"{padding}"}}"#);
+        assert!(body.len() as u64 > MAX_RESPONSE_BYTES);
+        let endpoints = serving("200 OK", "application/json", &body);
+
+        let Err(err) = search_locations_with(&test_agent(), &endpoints, "reykjavik") else {
+            panic!("a body past the limit must not be read into memory");
+        };
+        assert_eq!(
+            limit_that_fired(&err),
+            Some(MAX_RESPONSE_BYTES),
+            "refused for the wrong reason: {err:#}"
+        );
+    }
+
+    /// The wire limit alone does not hold: ureq inflates on the response's
+    /// `Content-Encoding`, and its limit reader counts the bytes underneath
+    /// the decoder. The fixture is a well-formed geocode answer padded to
+    /// 8 MiB and gzipped down to a few KiB, so it is under the limit on the
+    /// wire and eight times over it once decoded. Before the decoded bound
+    /// it parsed to an empty result list.
+    #[test]
+    fn a_gzip_body_inflating_past_the_limit_is_refused() {
+        let fixture = include_bytes!("../../tests/fixtures/geocode_padded_8mib.json.gz");
+        assert!(
+            (fixture.len() as u64) < MAX_RESPONSE_BYTES,
+            "the fixture must fit on the wire, or the wire limit is what fired"
+        );
+        let endpoints = serving_gzip(fixture);
+
+        let Err(err) = search_locations_with(&test_agent(), &endpoints, "reykjavik") else {
+            panic!("a body that inflates past the limit must not be read into memory");
+        };
+        assert_eq!(
+            limit_that_fired(&err),
+            Some(MAX_RESPONSE_BYTES),
+            "refused for the wrong reason: {err:#}"
+        );
+    }
+
+    /// Both bounds surface as the module's own error, so telling "too big"
+    /// from "not JSON" is a downcast rather than a match on prose.
+    fn limit_that_fired(err: &anyhow::Error) -> Option<u64> {
+        err.downcast_ref::<ResponseTooLarge>()
+            .map(|refusal| refusal.limit)
     }
 
     /// A server that completes the handshake, reads the request and then says
     /// nothing at all. This is the case that used to block the sole worker
     /// thread forever while the UI sat on "Loading…" with no way to recover.
     /// Run against a short-bounded agent so the test costs a moment, not 15s.
+    ///
+    /// Only the error is asserted. The bound is what produces it, since the
+    /// server never answers, so measuring the wait as well proved nothing the
+    /// error had not and would fail on a starved runner.
     #[test]
     fn a_silent_server_times_out_instead_of_blocking_forever() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -515,33 +1159,37 @@ mod tests {
             }
         });
 
-        let agent = bounded_agent(Duration::from_millis(400), Duration::from_millis(200));
-        let started = Instant::now();
+        let agent = bounded_agent(
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+            false,
+        );
         let result = agent.get(format!("http://{addr}/")).call();
-        let waited = started.elapsed();
 
         assert!(result.is_err(), "a silent server must not read as success");
-        assert!(
-            waited < Duration::from_secs(5),
-            "gave up after {waited:?}, which is not a bound"
-        );
     }
 
-    /// Nothing is listening, so the connect bound is what has to fire.
+    /// A port that is bound but never accepted from. The earlier form bound a
+    /// port, dropped it, and assumed nothing would claim it before the call;
+    /// but every `serving()` in this process binds an ephemeral port on the
+    /// same loopback, so another test could take it and answer, and the
+    /// assertion here would fail for no fault in the client. A listener that
+    /// is held and never accepted from is the same port for the whole test:
+    /// the kernel completes the handshake into the backlog and the request
+    /// then waits on nobody, so the end-to-end bound is what fires.
     #[test]
-    fn an_unreachable_port_fails_rather_than_waiting() {
-        // Bind then drop, so the port is almost certainly free and unserved.
-        let addr = {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-            listener.local_addr().expect("local addr")
-        };
+    fn a_port_nobody_accepts_from_fails_rather_than_waiting() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
 
-        let agent = bounded_agent(Duration::from_millis(400), Duration::from_millis(200));
-        let started = Instant::now();
+        let agent = bounded_agent(
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+            false,
+        );
         let result = agent.get(format!("http://{addr}/")).call();
 
-        assert!(result.is_err(), "nothing is listening on {addr}");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(result.is_err(), "nobody accepts on {addr}");
     }
 }
 
@@ -552,7 +1200,7 @@ mod live {
     #[test]
     #[ignore]
     fn real_fetch_carries_per_day_air_quality() {
-        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch");
+        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch").weather;
         let covered = weather.daily.iter().filter(|d| d.aqi.is_some()).count();
 
         println!(
@@ -600,7 +1248,7 @@ mod live {
     #[test]
     #[ignore]
     fn real_fetch_carries_a_populated_hourly_series() {
-        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch");
+        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch").weather;
         let forward = weather.forecast_hours();
 
         println!(

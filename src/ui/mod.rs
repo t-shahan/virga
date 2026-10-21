@@ -25,10 +25,10 @@ mod precipitation;
 mod search;
 mod weathergram;
 
-use chart::chart_area_render;
+use chart::{chart_area_render, chart_skeleton_render};
 use classic::classic_render;
-use current::current_area_render;
-use forecast::forecast_area_render;
+use current::{current_area_render, current_skeleton_render};
+use forecast::{forecast_area_render, forecast_skeleton_render};
 use help::help_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
@@ -88,8 +88,15 @@ const _: () = assert!(MIN_WIDTH >= forecast::TABLE_MINIMAL + 2);
 /// the app, not a dashboard.
 const CANVAS_WIDTH: u16 = 120;
 
-pub(crate) fn render(frame: &mut Frame, app: &App) {
-    render_with(frame, app, app.theme.palette_for(app.color_depth));
+/// Draws the frame and reports whether the release notice was part of it.
+///
+/// Whether the notice got a row is decided here, by the screen and the
+/// size, and nowhere else — `App` cannot know without repeating this
+/// layout. The report is what lets a keypress dismiss the notice only when
+/// the user has been shown it, rather than on a terminal too short to have
+/// given it a row.
+pub(crate) fn render(frame: &mut Frame, app: &App) -> bool {
+    render_with(frame, app, app.theme.palette_for(app.color_depth))
 }
 
 /// The frame, drawn in a given palette.
@@ -98,12 +105,12 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
 /// value — no widget reaches for `app.theme` itself. That is what lets a test
 /// render the whole app in a palette of its own choosing and check that no
 /// colour survived being hard-coded.
-fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
+fn render_with(frame: &mut Frame, app: &App, palette: Palette) -> bool {
     let area = frame.area();
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         too_small_render(frame, area, area, (MIN_WIDTH, MIN_HEIGHT), palette);
-        return;
+        return false;
     }
 
     let page_area = if app.screen == Screen::Search {
@@ -143,69 +150,38 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     match app.screen {
         Screen::Weather => match &app.weather {
             Fetch::Ready(w) => {
-                // City and day live in the pane's border now, so the separate
-                // header box is gone and its rows go to the chart.
-                let [current_area, rest] =
-                    Layout::vertical([Constraint::Length(7), Constraint::Fill(1)]).areas(content);
-
-                // Table and chart are separate boxes now. Side by side buys
-                // rows at the cost of chart width, so it is a fallback for
-                // short windows rather than a reward for wide ones.
-                // Clamped to the area before the cast, and saturating after
-                // it: the count is the server's word, the DTO cap
-                // notwithstanding, and a table can never be taller than the
-                // space it draws in anyway.
-                let days = w
-                    .daily
-                    .len()
-                    .saturating_sub(w.today_index)
-                    .min(rest.height as usize) as u16;
-                let table_rows = days.saturating_add(1);
-                let table_box = table_rows.saturating_add(2);
-                let side_by_side = rest.width >= SIDE_BY_SIDE_MIN
-                    && rest.height < table_box.saturating_add(chart::MIN_HEIGHT + 2);
-
-                let (forecast_area, chart_area) = if side_by_side {
-                    let [left, _gutter, right] = Layout::horizontal([
-                        Constraint::Length(forecast::TABLE_FULL + 2),
-                        Constraint::Length(GUTTER),
-                        Constraint::Fill(1),
-                    ])
-                    .areas(rest);
-                    (
-                        Rect {
-                            height: table_box.min(left.height),
-                            ..left
-                        },
-                        Rect {
-                            height: table_box.min(right.height),
-                            ..right
-                        },
-                    )
-                } else {
-                    let [table, chart] =
-                        Layout::vertical([Constraint::Length(table_box), Constraint::Fill(1)])
-                            .areas(rest);
-                    (
-                        table,
-                        Rect {
-                            height: chart.height.min(chart::MAX_HEIGHT + 2),
-                            ..chart
-                        },
-                    )
-                };
-
-                current_area_render(frame, app, w, palette, current_area);
-                forecast_area_render(frame, w, palette, forecast_area, app.unit, app.selected_day);
-                chart_area_render(frame, w, palette, chart_area, app.unit, app.selected_day);
+                let panes = weather_panes(content, w.daily.len().saturating_sub(w.today_index));
+                current_area_render(frame, app, w, palette, panes.current);
+                forecast_area_render(
+                    frame,
+                    w,
+                    palette,
+                    panes.forecast,
+                    app.unit,
+                    app.selected_day,
+                );
+                chart_area_render(frame, w, palette, panes.chart, app.unit, app.selected_day);
             }
-            Fetch::Loading => popup_render(
-                frame,
-                area,
-                palette,
-                loading_title(app),
-                &format!("{} {}", spinner(app.tick), loading_verb(app)),
-            ),
+            // The skeleton: every pane's border and heading, with the
+            // spinner inside the forecast pane. Drawn from the same layout
+            // as the loaded frame so the forecast lands in boxes that are
+            // already there rather than in boxes that appear around it.
+            Fetch::Loading => {
+                let panes = weather_panes(content, SKELETON_DAYS);
+                let title = if app.is_locating() {
+                    "Locating"
+                } else {
+                    app.fetching_for().label.as_str()
+                };
+                current_skeleton_render(frame, title, palette, panes.current);
+                forecast_skeleton_render(
+                    frame,
+                    palette,
+                    panes.forecast,
+                    &format!("{} {}", spinner(app.tick), loading_verb(app)),
+                );
+                chart_skeleton_render(frame, palette, panes.chart);
+            }
             Fetch::Failed(msg) => popup_render(frame, area, palette, "Error", msg),
             Fetch::Idle => {}
         },
@@ -259,6 +235,81 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) {
     // hourly list plus its border needs every row there is.
     if app.help_visible {
         help_render(frame, app, palette, page_area);
+    }
+    notice_visible
+}
+
+/// Forecast days the skeleton lays itself out for. The fetch asks Open-Meteo
+/// for eight, so this is the count the loaded frame all but always has, and
+/// its table box lands on the rows the skeleton drew. A server that answers
+/// with fewer moves the chart's top border up by the difference, once.
+const SKELETON_DAYS: usize = 8;
+
+/// Where the weather screen's three boxes go.
+struct WeatherPanes {
+    current: Rect,
+    forecast: Rect,
+    chart: Rect,
+}
+
+/// The weather screen's layout for a table of `forecast_days` rows. One
+/// function for the loaded frame and the skeleton drawn before it, so the
+/// two cannot drift: a skeleton with its own copy of these sums would put
+/// a border one row off and the whole screen would jump when the data
+/// landed, which is the one thing a skeleton is for.
+fn weather_panes(content: Rect, forecast_days: usize) -> WeatherPanes {
+    // City and day live in the pane's border now, so the separate
+    // header box is gone and its rows go to the chart.
+    let [current, rest] =
+        Layout::vertical([Constraint::Length(7), Constraint::Fill(1)]).areas(content);
+
+    // Table and chart are separate boxes now. Side by side buys
+    // rows at the cost of chart width, so it is a fallback for
+    // short windows rather than a reward for wide ones.
+    // Clamped to the area before the cast, and saturating after
+    // it: in the loaded frame the count is the server's word, the
+    // DTO cap notwithstanding, and in the skeleton it is a guess at
+    // that word; a table can never be taller than the space it
+    // draws in anyway.
+    let days = forecast_days.min(rest.height as usize) as u16;
+    let table_rows = days.saturating_add(1);
+    let table_box = table_rows.saturating_add(2);
+    let side_by_side = rest.width >= SIDE_BY_SIDE_MIN
+        && rest.height < table_box.saturating_add(chart::MIN_HEIGHT + 2);
+
+    let (forecast, chart) = if side_by_side {
+        let [left, _gutter, right] = Layout::horizontal([
+            Constraint::Length(forecast::TABLE_FULL + 2),
+            Constraint::Length(GUTTER),
+            Constraint::Fill(1),
+        ])
+        .areas(rest);
+        (
+            Rect {
+                height: table_box.min(left.height),
+                ..left
+            },
+            Rect {
+                height: table_box.min(right.height),
+                ..right
+            },
+        )
+    } else {
+        let [table, chart] =
+            Layout::vertical([Constraint::Length(table_box), Constraint::Fill(1)]).areas(rest);
+        (
+            table,
+            Rect {
+                height: chart.height.min(chart::MAX_HEIGHT + 2),
+                ..chart
+            },
+        )
+    };
+
+    WeatherPanes {
+        current,
+        forecast,
+        chart,
     }
 }
 
@@ -326,8 +377,23 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     area
 }
 
+/// The popup's width, and the height it keeps for a short body so the
+/// loading spinner sits in the same box it always has.
+const POPUP_WIDTH: u16 = 40;
+const POPUP_MIN_HEIGHT: u16 = 5;
+
 fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, body: &str) {
-    let area = centered(area, 40, 5);
+    // Fitted to the body rather than fixed at five rows: an error names the
+    // host that produced it, and the shortest of those is already longer
+    // than the box is wide. A fixed box clipped the chain at its border,
+    // which showed less than the bare status it replaced (#71).
+    let width = area.width.min(POPUP_WIDTH);
+    let rows = wrapped(body, width.saturating_sub(2) as usize);
+    let height = (rows.len() as u16)
+        .saturating_add(2)
+        .max(POPUP_MIN_HEIGHT)
+        .min(area.height);
+    let area = centered(area, width, height);
 
     // An error is the one message the reader has to act on, so it takes the
     // error colour while the loading spinner stays ordinary text.
@@ -337,9 +403,10 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
         palette.text
     };
 
+    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(body)
+        Paragraph::new(lines)
             .style(Style::new().fg(colour))
             .alignment(Alignment::Center)
             .block(
@@ -352,6 +419,50 @@ fn popup_render(frame: &mut Frame, area: Rect, palette: Palette, title: &str, bo
             ),
         area,
     )
+}
+
+/// `text` broken onto rows of at most `width` columns, between words where
+/// the next word fits and mid-word where it never could. The mid-word cut
+/// is for URLs: an error names its host, and a host is one word that can
+/// be longer than a 34-column terminal, so breaking only at spaces would
+/// leave it clipped at the border exactly as not wrapping did.
+///
+/// Rows are built here rather than by `Paragraph::wrap` because the popup
+/// is sized from the count, and the count ratatui would draw is behind an
+/// unstable feature. Drawing the same rows that were counted keeps the box
+/// and its body from drifting apart.
+pub(super) fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    if width == 0 {
+        return rows;
+    }
+    let mut row = String::new();
+    let mut filled = 0;
+    for word in text.split_whitespace() {
+        let pieces: Vec<String> = word
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(width)
+            .map(|piece| piece.iter().collect())
+            .collect();
+        for piece in pieces {
+            let length = piece.chars().count();
+            if filled > 0 && filled + 1 + length > width {
+                rows.push(std::mem::take(&mut row));
+                filled = 0;
+            }
+            if filled > 0 {
+                row.push(' ');
+                filled += 1;
+            }
+            row.push_str(&piece);
+            filled += length;
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 /// What the forecast on screen is besides fresh, for the left of a pane's
@@ -598,6 +709,9 @@ mod tests {
                 country: Some("United States".to_string()),
                 lat: 39.414_27,
                 lon: -77.410_54,
+                timezone: None,
+                country_code: None,
+                population: None,
             },
             Location {
                 name: "Fredericksburg".to_string(),
@@ -605,6 +719,21 @@ mod tests {
                 country: Some("United States".to_string()),
                 lat: 38.301_8,
                 lon: -77.460_5,
+                timezone: None,
+                country_code: None,
+                population: None,
+            },
+            // Reads the same as the first row, so the list draws its
+            // disambiguating second line and the colour sweep reaches it.
+            Location {
+                name: "Frederick".to_string(),
+                admin1: Some("Maryland".to_string()),
+                country: Some("United States".to_string()),
+                lat: 38.9,
+                lon: -76.9,
+                timezone: Some("America/Chicago".to_string()),
+                country_code: None,
+                population: None,
             },
         ]
     }
@@ -666,8 +795,8 @@ mod tests {
 
     /// A first launch can spend a round trip working out where the user is
     /// before it has anywhere to fetch weather for. Both steps are a spinner
-    /// over an empty screen, so if they said the same thing the first would
-    /// look like a forecast taking suspiciously long.
+    /// with no weather behind it, so if they said the same thing the first
+    /// would look like a forecast taking suspiciously long.
     #[test]
     fn the_first_step_says_it_is_locating_rather_than_fetching() {
         for screen in [Screen::Weather, Screen::Hourly] {
@@ -796,13 +925,280 @@ mod tests {
         assert_eq!(before, after, "help did not put the screen back");
     }
 
+    /// The chains that reach the screen name a host, and the shortest real
+    /// one is longer than the popup is wide. The fixed 40x5 box used to clip
+    /// them at its border, so `http status: 503` on `main` became `fetch the
+    /// forecast from https://api.op` on the branch that meant to add the
+    /// host (#71). The existing sweep uses short messages, which is how it
+    /// passed. Both the host and the status have to be readable at the
+    /// minimum size and at an ordinary one, and the box must still close.
+    #[test]
+    fn a_failure_naming_its_host_shows_the_host_and_the_status() {
+        let host = "https://api.open-meteo.com/v1/forecast";
+        let chain = format!("the forecast service at {host}: http status: 503");
+        for screen in [Screen::Weather, Screen::Hourly] {
+            for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (80, 24)] {
+                let mut app = ready(screen);
+                app.weather = Fetch::Failed(chain.clone());
+                let rows = symbols(&drawn(&app, probe(), width, height), width, height);
+                let shown = visible_ascii(&rows);
+                assert!(
+                    shown.contains(host),
+                    "{screen:?} at {width}x{height} lost the host:\n{}",
+                    rows.join("\n")
+                );
+                assert!(
+                    shown.contains("httpstatus:503"),
+                    "{screen:?} at {width}x{height} lost the status:\n{}",
+                    rows.join("\n")
+                );
+                assert!(
+                    rows.iter().any(|row| row.contains('└')),
+                    "{screen:?} at {width}x{height}: the popup does not close:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+    }
+
+    /// The search box has the same problem in its own list area: one row,
+    /// no wrap, and a geocoder chain longer than either width it is drawn at.
+    #[test]
+    fn a_failed_search_shows_the_host_and_the_status() {
+        let host = "https://geocoding-api.open-meteo.com/v1/search";
+        for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (80, 24)] {
+            let mut app = ready(Screen::Search);
+            app.query = "reykjavik".to_string();
+            app.results = Fetch::Failed(format!("the geocoder at {host}: http status: 503"));
+            let rows = symbols(&drawn(&app, probe(), width, height), width, height);
+            let shown = visible_ascii(&rows);
+            assert!(
+                shown.contains(host) && shown.contains("httpstatus:503"),
+                "search at {width}x{height}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    /// The popup only grows: a one-line body keeps the five rows the
+    /// spinner has always had, so loading looks as it did. On the hourly
+    /// screen, which still loads in a popup; the weather screen draws its
+    /// panes instead (#112).
+    #[test]
+    fn a_short_popup_keeps_its_height() {
+        let mut app = ready(Screen::Hourly);
+        app.weather = Fetch::Loading;
+        let rows = symbols(&drawn(&app, probe(), 80, 24), 80, 24);
+        let top = rows.iter().position(|row| row.contains('┌')).unwrap();
+        let bottom = rows.iter().position(|row| row.contains('└')).unwrap();
+        assert_eq!(bottom - top + 1, POPUP_MIN_HEIGHT as usize);
+    }
+
+    #[test]
+    fn wrapping_breaks_between_words_and_cuts_a_word_wider_than_the_row() {
+        assert_eq!(wrapped("a bb ccc", 5), vec!["a bb", "ccc"]);
+        assert_eq!(wrapped("abcdefgh ij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrapped("x abcdefg", 4), vec!["x", "abcd", "efg"]);
+        assert!(wrapped("", 4).is_empty());
+        assert!(wrapped("anything", 0).is_empty());
+        assert!(
+            wrapped("a bb ccc dddd", 5)
+                .iter()
+                .all(|row| row.chars().count() <= 5)
+        );
+    }
+
+    /// The frame as one run of visible ASCII, with the box and the spacing
+    /// removed: a host is one word that a 32-column box has to cut, and
+    /// where it is cut is not what these tests are about.
+    fn visible_ascii(rows: &[String]) -> String {
+        rows.concat()
+            .chars()
+            .filter(char::is_ascii_graphic)
+            .collect()
+    }
+
+    /// The sizes the skeleton has to read as intentional at: the floor, a
+    /// short terminal just above it, and two ordinary ones.
+    const SKELETON_SIZES: [(u16, u16); 4] =
+        [(MIN_WIDTH, MIN_HEIGHT), (40, 15), (80, 24), (120, 40)];
+
+    /// The rows and columns of the pane whose top border carries `title`:
+    /// its top and bottom rows, and its left and right columns.
+    fn pane_of(rows: &[String], title: &str) -> (usize, usize, usize, usize) {
+        let top = rows
+            .iter()
+            .position(|row| row.contains(title))
+            .unwrap_or_else(|| panic!("no pane titled {title:?}:\n{}", rows.join("\n")));
+        let cells: Vec<char> = rows[top].chars().collect();
+        let left = cells.iter().position(|c| *c == '┌').unwrap();
+        let right = cells.iter().rposition(|c| *c == '┐').unwrap();
+        let bottom = (top + 1..rows.len())
+            .find(|y| rows[*y].chars().nth(left) == Some('└'))
+            .unwrap_or_else(|| panic!("{title:?} has no bottom border:\n{}", rows.join("\n")));
+        (top, bottom, left, right)
+    }
+
+    /// Every cell that is part of a pane's border. Corners and verticals
+    /// only: the top and bottom rules are overwritten by titles, and the
+    /// loaded frame's condition title carries a rule of its own.
+    fn borders(buffer: &Buffer, width: u16, height: u16) -> Vec<(u16, u16, String)> {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|cell| ["┌", "┐", "└", "┘", "│"].contains(&buffer[*cell].symbol()))
+            .map(|(x, y)| (x, y, buffer[(x, y)].symbol().to_string()))
+            .collect()
+    }
+
+    /// A cache miss opens on the panes, not on a popup over an empty
+    /// terminal: the city in its corner, the `Forecast` heading with the
+    /// spinner inside its box, and the key bar, at every size the app
+    /// draws at — the floor included, where the chart pane has no rows in
+    /// the loaded frame either.
+    #[test]
+    fn a_cache_miss_draws_the_panes_with_the_spinner_in_the_forecast_pane() {
+        for (width, height) in SKELETON_SIZES {
+            let rows = symbols(&drawn(&App::new(), probe(), width, height), width, height);
+            let text = rows.join("\n");
+            assert!(text.contains("NEW YORK"), "{width}x{height}:\n{text}");
+            assert!(text.contains("[q] quit"), "{width}x{height}:\n{text}");
+            assert!(text.contains("[?] keybinds"), "{width}x{height}:\n{text}");
+            assert!(!text.contains("Loading"), "{width}x{height}:\n{text}");
+
+            let (top, bottom, left, right) = pane_of(&rows, "Forecast");
+            let row = rows
+                .iter()
+                .position(|row| row.contains("fetching..."))
+                .unwrap_or_else(|| panic!("{width}x{height} lost the spinner:\n{text}"));
+            assert!(
+                top < row && row < bottom,
+                "{width}x{height}: the spinner is on row {row}, outside rows {top}..{bottom}:\n{text}"
+            );
+            let cells: Vec<char> = rows[row].chars().collect();
+            assert_eq!(cells[left], '│', "{width}x{height}:\n{text}");
+            assert_eq!(cells[right], '│', "{width}x{height}:\n{text}");
+
+            let loaded = symbols(
+                &drawn(&ready(Screen::Weather), probe(), width, height),
+                width,
+                height,
+            )
+            .join("\n");
+            assert_eq!(
+                text.contains("Daily Highs"),
+                loaded.contains("Daily Highs"),
+                "{width}x{height}: the chart pane is drawn in one frame and not the other:\n{text}"
+            );
+        }
+    }
+
+    /// The property the skeleton exists for: the forecast lands in the boxes
+    /// already on screen, so nothing moves when it does.
+    #[test]
+    fn the_forecast_lands_on_the_skeletons_borders() {
+        for (width, height) in SKELETON_SIZES {
+            let skeleton = borders(&drawn(&App::new(), probe(), width, height), width, height);
+            let loaded = borders(
+                &drawn(&ready(Screen::Weather), probe(), width, height),
+                width,
+                height,
+            );
+            assert!(!skeleton.is_empty(), "{width}x{height} drew no borders");
+            assert_eq!(skeleton, loaded, "{width}x{height}: the layout jumped");
+        }
+    }
+
+    /// Before the place is known the city's corner has no city to name, and
+    /// the compiled-in fallback is not the user's: the corner says what the
+    /// app is doing instead.
+    #[test]
+    fn the_skeleton_says_locating_in_the_citys_corner_until_the_place_is_known() {
+        let text = symbols(&drawn(&locating(Screen::Weather), probe(), 80, 24), 80, 24).join("\n");
+        assert!(text.contains("LOCATING"), "{text}");
+        assert!(!text.contains("NEW YORK"), "{text}");
+        assert!(text.contains("locating..."), "{text}");
+    }
+
+    /// The place whose forecast is on its way, as the corner should name it.
+    fn berlin() -> crate::app::ActiveLocation {
+        crate::app::ActiveLocation {
+            label: "Berlin, Germany".to_string(),
+            lat: 52.52,
+            lon: 13.405,
+        }
+    }
+
+    /// The ordinary first run: detection has answered and the forecast for
+    /// the place it found is on its way. The corner names that place, not
+    /// the compiled-in fallback the app opened with — `LOCATING` was put
+    /// there to keep the fallback off the screen, and naming it one step
+    /// later would undo that.
+    #[test]
+    fn the_skeleton_names_the_place_detection_found_while_its_forecast_is_fetched() {
+        let mut app = App::with_startup(crate::app::Startup {
+            location: crate::app::ActiveLocation::default(),
+            source: crate::app::LocationSource::Fallback,
+            detect: true,
+            cached: None,
+        });
+        let crate::events::Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+        let _ = app.on_message(crate::events::Message::Detected {
+            id,
+            location: berlin(),
+        });
+
+        let text = symbols(&drawn(&app, probe(), 80, 24), 80, 24).join("\n");
+        assert!(text.contains("BERLIN, GERMANY"), "{text}");
+        assert!(!text.contains("NEW YORK"), "{text}");
+    }
+
+    /// A forecast on screen, then another city picked: the skeleton is for
+    /// the city on its way, not the one just left.
+    #[test]
+    fn the_skeleton_names_the_city_picked_rather_than_the_one_left() {
+        let mut app = ready(Screen::Search);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52,
+            lon: 13.405,
+            timezone: None,
+            country_code: None,
+            population: None,
+        }]);
+        let _ = app.on_action(crate::input::Action::Submit);
+        assert!(
+            matches!(app.weather, Fetch::Loading),
+            "the pick did not clear the screen"
+        );
+
+        let text = symbols(&drawn(&app, probe(), 80, 24), 80, 24).join("\n");
+        assert!(text.contains("BERLIN, GERMANY"), "{text}");
+        assert!(!text.contains("NEW YORK"), "{text}");
+    }
+
     fn drawn(app: &App, palette: Palette, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| render_with(f, app, palette))
+            .draw(|f| {
+                render_with(f, app, palette);
+            })
             .unwrap()
             .buffer
             .clone()
+    }
+
+    /// What `render` reports about the notice for a given size.
+    fn notice_reported(app: &App, width: u16, height: u16) -> bool {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut reported = false;
+        terminal
+            .draw(|f| reported = render_with(f, app, probe()))
+            .unwrap();
+        reported
     }
 
     fn symbols(buffer: &Buffer, width: u16, height: u16) -> Vec<String> {
@@ -976,7 +1372,11 @@ mod tests {
         let expected_accent = Color::Indexed(208);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(frame, &app);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let colours: Vec<Color> = (0..40u16)
             .flat_map(|y| (0..120u16).map(move |x| buffer[(x, y)].fg))
@@ -1000,7 +1400,10 @@ mod tests {
 
         for (width, height) in [(1, 1), (10, 5), (33, 11), (34, 11), (33, 12)] {
             let mut t = Terminal::new(TestBackend::new(width, height)).unwrap();
-            t.draw(|f| render(f, &app)).unwrap();
+            t.draw(|f| {
+                render(f, &app);
+            })
+            .unwrap();
 
             let buf = t.backend().buffer();
             let text: String = (0..height)
@@ -1020,7 +1423,10 @@ mod tests {
         app.weather = Fetch::Ready(Weather::fixture(22, 14));
 
         let mut t = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).unwrap();
-        t.draw(|f| render(f, &app)).unwrap();
+        t.draw(|f| {
+            render(f, &app);
+        })
+        .unwrap();
 
         let buf = t.backend().buffer();
         let text: String = (0..MIN_HEIGHT)
@@ -1400,6 +1806,37 @@ mod tests {
         let text = symbols(&buffer, 100, 20).join("\n");
 
         assert!(!text.contains("update: virga"));
+    }
+
+    /// The report has to agree with the frame in every case above, because
+    /// it is what decides whether the next key may let the notice go. A
+    /// frame that withheld the row and reported it drawn would lose news
+    /// nobody saw; the reverse would leave a key that saw it changing
+    /// nothing.
+    #[test]
+    fn the_render_reports_the_notice_exactly_when_it_drew_it() {
+        assert!(notice_reported(&noticed(Screen::Weather), 100, 20));
+        assert!(
+            !notice_reported(&ready(Screen::Weather), 100, 20),
+            "no notice, nothing to report"
+        );
+        assert!(
+            !notice_reported(&noticed(Screen::Weather), MIN_WIDTH, MIN_HEIGHT),
+            "the minimum terminal has no row to give it"
+        );
+        assert!(
+            !notice_reported(&noticed(Screen::Weather), MIN_WIDTH, MIN_HEIGHT - 1),
+            "a terminal below the floor draws nothing but its size"
+        );
+        assert!(!notice_reported(&noticed(Screen::Search), 100, 20));
+
+        let hourly = noticed(Screen::Hourly);
+        let fits = hourly_fits_at(&hourly, 100);
+        assert!(
+            !notice_reported(&hourly, 100, fits),
+            "the notice yielded to the hourly floor but was reported drawn"
+        );
+        assert!(notice_reported(&hourly, 100, fits + 1));
     }
 
     /// The complaint this replaced a role for: the bars in both charts were a

@@ -3,17 +3,18 @@ use crate::app::{
     Remembered, Screen, Startup,
 };
 use crate::cli::Invocation;
-use crate::events::{Message, Request};
+use crate::events::{Message, Request, Workers};
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use ratatui::backend::{Backend, ClearType};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::Event;
 use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::TrySendError;
 use std::time::{Duration, Instant};
 
 mod app;
@@ -21,6 +22,7 @@ mod cache;
 mod cli;
 mod events;
 mod input;
+mod interrupt;
 mod now;
 mod state;
 mod theme;
@@ -81,9 +83,9 @@ fn main() -> Result<()> {
             }
         }
         // The one command that fetches weather without the interface. It
-        // speaks the same sources' answers in the same order of preference
-        // the app opens with, so `virga now` and a launch agree about where
-        // "here" is.
+        // speaks the same sources' answers, and reads the same state file,
+        // but a remembered detection is reused rather than refreshed — see
+        // `now::where_to_ask` for why a one-shot must not re-detect.
         Invocation::Now(city) => {
             let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
             if let Some(warning) = warning {
@@ -93,14 +95,14 @@ fn main() -> Result<()> {
             // with it — not the state file, not detection. Asking about
             // somewhere is a question, not a move: the remembered city
             // stays whatever it was.
-            let (location, freshly_detected, state_path) = match &city {
+            let (location, detection, state_path) = match &city {
                 Some(query) => match weather::client::search_locations(query) {
                     // The geocoder answered and knows no such place: the
                     // argument is wrong, which is `theme`'s unknown-name
                     // treatment. A lookup that failed to happen is the
                     // environment's fault instead, and exits like `update`'s.
                     Ok(found) => match found.first() {
-                        Some(first) => (ActiveLocation::from(first), false, None),
+                        Some(first) => (ActiveLocation::from(first), Detection::Skipped, None),
                         None => {
                             eprintln!("virga: no city matched {query:?}.");
                             std::process::exit(2);
@@ -138,27 +140,55 @@ fn main() -> Result<()> {
                             None
                         }
                     };
-                    let (location, fresh) = asked_location(detect, state_path.as_deref());
-                    (location, fresh, state_path)
+                    let (location, detection) = asked_location(detect, state_path.as_deref());
+                    (location, detection, state_path)
                 }
             };
-            match weather::client::fetch_forecast(location.lat, location.lon) {
-                Ok(weather) => {
+            let (cache_path, warning) = report_cache_path(
+                city.as_deref(),
+                detection == Detection::Found,
+                std::env::var("VIRGA_CACHE").ok().as_deref(),
+                state_path.as_deref(),
+            );
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            match report_weather(
+                cache_path.as_deref(),
+                &location,
+                chrono::Local::now(),
+                || weather::client::fetch_forecast(location.lat, location.lon),
+            ) {
+                Ok((weather, air_quality_warning)) => {
+                    // Stderr, so a status bar parsing stdout still gets its
+                    // report and a human still learns why the AQI is missing.
+                    if let Some(warning) = air_quality_warning {
+                        eprintln!("{warning}");
+                    }
                     // The app's rule, kept here too: a detection is written
                     // down only once weather has actually loaded for it. And
                     // written down it must be — remembering the answer is
                     // what lets a status bar poll `virga now` all day without
                     // asking the location provider anything after the first.
-                    if freshly_detected && let Some(path) = &state_path {
-                        let remembered = Remembered {
-                            location: location.clone(),
-                            source: LocationSource::Detected,
-                        };
-                        if let Err(error) = state::save_location(path, &remembered) {
-                            eprintln!("virga: could not remember location: {error:#}");
-                        }
+                    // A detection that found nothing waits for the weather
+                    // too: with the network down both fail, and a marker
+                    // written then would hold the fallback in place for the
+                    // whole backoff after the network came back.
+                    if let Some(path) = &state_path
+                        && let Some(warning) =
+                            remember_detection_at(path, &location, detection, Utc::now())
+                    {
+                        eprintln!("{warning}");
                     }
-                    println!("{}", now::report(&location.label, &weather, unit));
+                    println!(
+                        "{}",
+                        now::report(
+                            &location.label,
+                            &weather,
+                            unit,
+                            chrono::Local::now().fixed_offset()
+                        )
+                    );
                     return Ok(());
                 }
                 Err(error) => {
@@ -168,14 +198,17 @@ fn main() -> Result<()> {
             }
         }
         Invocation::Update => {
-            match check_for_update() {
-                Ok(answer) => println!("{answer}"),
+            let outcome = match check_for_update() {
+                Ok((answer, outcome)) => {
+                    println!("{answer}");
+                    outcome
+                }
                 Err(error) => {
                     eprintln!("virga: could not check the latest release: {error:#}");
-                    std::process::exit(1);
+                    update::Outcome::Failed
                 }
-            }
-            return Ok(());
+            };
+            std::process::exit(update::exit_code(outcome));
         }
         Invocation::Usage(complaint) => {
             eprintln!("virga: {complaint}\n");
@@ -217,7 +250,7 @@ fn main() -> Result<()> {
         eprintln!("{warning}");
     }
 
-    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style) =
+    let (startup, state_path, cache_path, persisted_theme, persisted_key_hint_style, dismissed) =
         match state::path() {
             Ok(path) => {
                 let (persisted, warning) = load_persisted(&path);
@@ -243,6 +276,7 @@ fn main() -> Result<()> {
                     cache_path,
                     persisted.theme,
                     persisted.key_hint_style,
+                    persisted.dismissed,
                 )
             }
             // Nowhere to remember a location is not a reason to stop working out
@@ -250,7 +284,7 @@ fn main() -> Result<()> {
             // state directory still deserves their own city.
             Err(error) => {
                 eprintln!("virga: could not determine where to remember location: {error:#}");
-                (startup_location(None, detect), None, None, None, None)
+                (startup_location(None, detect), None, None, None, None, None)
             }
         };
 
@@ -268,6 +302,14 @@ fn main() -> Result<()> {
         std::env::var("TERM").ok().as_deref(),
     );
 
+    // Hooked before the terminal is taken over, so there is no moment at
+    // which a signal finds raw mode on and nobody listening.
+    let interrupt = interrupt::Interrupt::new();
+    #[cfg(unix)]
+    interrupt
+        .register()
+        .context("could not hook the signals that restore the terminal")?;
+
     let terminal = ratatui::init();
     let mut warning = None;
     let mut notice = None;
@@ -282,7 +324,11 @@ fn main() -> Result<()> {
         },
         state_path.as_deref(),
         cache_path,
-        check_updates,
+        UpdateCheck {
+            enabled: check_updates,
+            dismissed,
+        },
+        &interrupt,
         &mut warning,
         &mut notice,
     );
@@ -294,6 +340,11 @@ fn main() -> Result<()> {
     // complaint, so it goes to stdout.
     if let Some(notice) = notice {
         println!("{notice}");
+    }
+    // After the restore and the notices: the whole point of catching the
+    // signal was to reach them. Now it can end the process as it meant to.
+    if let Some(signal) = interrupt.signal() {
+        interrupt::end(signal);
     }
     result
 }
@@ -318,7 +369,18 @@ fn load_persisted(path: &Path) -> (state::Persisted, Option<String>) {
 /// way `load_persisted` does: a cache that cannot be read costs a spinner,
 /// never a launch.
 fn load_cached(path: &Path, location: &ActiveLocation) -> (Option<CachedWeather>, Option<String>) {
-    match cache::load(path, location, chrono::Local::now()) {
+    load_cached_within(path, location, chrono::Local::now(), cache::MAX_AGE)
+}
+
+/// `load_cached` with the clock and the age bound taken out, for `virga
+/// now`'s tighter bound and for a test that must not read the clock.
+fn load_cached_within(
+    path: &Path,
+    location: &ActiveLocation,
+    now: chrono::DateTime<chrono::Local>,
+    max_age: chrono::TimeDelta,
+) -> (Option<CachedWeather>, Option<String>) {
+    match cache::load(path, location, now, max_age) {
         Ok(cached) => (cached, None),
         Err(error) => (
             None,
@@ -327,6 +389,70 @@ fn load_cached(path: &Path, location: &ActiveLocation) -> (Option<CachedWeather>
             )),
         ),
     }
+}
+
+/// Where `virga now` may look for the app's last forecast, given what was
+/// asked, how the place was found, the `VIRGA_CACHE` value, and the state
+/// file the cache sits beside; and any complaint about that value, for the
+/// caller to print.
+///
+/// Only a bare report may answer from the cache, and only for the place the
+/// state file gave it or the fallback standing in for one: a named city is
+/// a question about somewhere else, and a place detected just now has
+/// nothing on disk to match. Neither consults the switch, so a typo in it
+/// is not complained about on a report the cache could not have served.
+/// Nowhere with `VIRGA_CACHE` off, the switch that also keeps the app from
+/// writing one. Whether what is there is that place, and fresh, is the
+/// cache's own judgement.
+fn report_cache_path(
+    city: Option<&str>,
+    freshly_detected: bool,
+    cache_switch: Option<&str>,
+    state: Option<&Path>,
+) -> (Option<PathBuf>, Option<String>) {
+    if city.is_some() || freshly_detected {
+        return (None, None);
+    }
+    let (caching, warning) = env_switch("VIRGA_CACHE", cache_switch, "the forecast cache");
+    if !caching {
+        return (None, warning);
+    }
+    (state.map(cache::path_beside), warning)
+}
+
+/// The forecast `virga now` prints: the app's last one when it describes
+/// `location` and is under `cache::REPORT_MAX_AGE`, relocated to the current
+/// hour the way a launch relocates it, and `fetch`'s answer otherwise. A
+/// cache that cannot be read costs the fetch it would have saved and a line
+/// on stderr, never the report. Nothing is written back: the app keeps the
+/// file fresh, and the report stays the read it is documented as.
+///
+/// Beside the forecast, the line for stderr when a fetch brought it without
+/// its air quality. A cached answer carries none: its air quality is
+/// whatever the app's own fetch got, and the app said so at the time.
+/// `fetch` is a function rather than a host because the production agent
+/// refuses plain HTTP, which is all a test's loopback server speaks.
+fn report_weather(
+    cache_path: Option<&Path>,
+    location: &ActiveLocation,
+    now: chrono::DateTime<chrono::Local>,
+    fetch: impl FnOnce() -> Result<weather::client::Forecast>,
+) -> Result<(weather::model::Weather, Option<String>)> {
+    if let Some(path) = cache_path {
+        let (cached, warning) = load_cached_within(path, location, now, cache::REPORT_MAX_AGE);
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
+        }
+        if let Some(cached) = cached {
+            return Ok((cached.weather, None));
+        }
+    }
+    let forecast = fetch()?;
+    let warning = forecast
+        .air_quality_error
+        .as_deref()
+        .map(app::air_quality_warning);
+    Ok((forecast.weather, warning))
 }
 
 /// How the app should open, given what was remembered and whether detection
@@ -427,6 +553,17 @@ fn persist_key_hint_style(state_path: Option<&Path>, style: KeyHintStyle) -> Opt
         .map(|error| format!("virga: could not save the key hint style: {error:#}"))
 }
 
+/// Write a cleared notice down the moment it is cleared, so the release it
+/// named is not announced again. A write failure is a warning for the same
+/// reason as above: the notice is gone from the screen either way, and the
+/// worst a lost dismissal costs is one more line next launch.
+fn persist_dismissal(state_path: Option<&Path>, release: &update::Release) -> Option<String> {
+    let path = state_path?;
+    state::save_dismissed(path, release)
+        .err()
+        .map(|error| format!("virga: could not remember the dismissed update notice: {error:#}"))
+}
+
 fn retain_first_warning(warning: &mut Option<String>, candidate: Option<String>) {
     if warning.is_none() {
         *warning = candidate;
@@ -458,33 +595,98 @@ fn startup_theme(requested: Option<&str>, persisted: Option<Theme>) -> Theme {
     })
 }
 
+/// What a bare `virga now` learned from the network about where the user
+/// is. The caller writes it down once weather has loaded, whichever way it
+/// went.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Detection {
+    /// Nothing was asked: a place was remembered, detection is off, or a
+    /// recent failure is still standing in for one.
+    Skipped,
+    /// The network named the place returned beside this.
+    Found,
+    /// The network did not answer; the place returned is the fallback.
+    Failed,
+}
+
 /// Where a bare `virga now` asks about: the remembered city, a fresh
 /// detection when nothing is remembered and `detect` (what `VIRGA_GEOIP`
 /// settled) allows one, and the compiled-in fallback when the network will
 /// not say — a worse guess is not a reason to withhold the forecast, and the
-/// stderr note says which guess it was. The second value reports whether the
-/// place came from a detection made just now, which is the caller's cue to
-/// remember it.
-fn asked_location(detect: bool, state_path: Option<&Path>) -> (ActiveLocation, bool) {
-    let remembered = state_path.and_then(|path| {
-        let (persisted, warning) = load_persisted(path);
-        if let Some(warning) = warning {
-            eprintln!("{warning}");
+/// stderr note says which guess it was. Beside the place, what the detection
+/// did, which is the caller's cue for what to remember.
+fn asked_location(detect: bool, state_path: Option<&Path>) -> (ActiveLocation, Detection) {
+    asked_location_from(
+        state_path,
+        detect,
+        weather::client::detect_location,
+        Utc::now(),
+    )
+}
+
+/// `asked_location` with the detection and the clock taken out, so a test
+/// can hand it a state file, a detection, and a clock of its own. The detection is a
+/// function rather than a host because the production agent refuses plain
+/// HTTP, which is all a test's loopback server speaks.
+fn asked_location_from(
+    state_path: Option<&Path>,
+    detect: bool,
+    locate: impl FnOnce() -> Result<weather::model::Location>,
+    now: DateTime<Utc>,
+) -> (ActiveLocation, Detection) {
+    let persisted = match state_path {
+        Some(path) => {
+            let (persisted, warning) = load_persisted(path);
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            persisted
         }
-        persisted.remembered
-    });
-    match now::where_to_ask(remembered, detect) {
-        now::Ask::Location(location) => (location, false),
-        now::Ask::Detect { fallback } => match weather::client::detect_location() {
-            Ok(found) => (ActiveLocation::from(&found), true),
+        None => state::Persisted::default(),
+    };
+    match now::where_to_ask(
+        persisted.remembered,
+        detect,
+        persisted.detection_failed_at,
+        now,
+    ) {
+        now::Ask::Location(location) => (location, Detection::Skipped),
+        now::Ask::Detect { fallback } => match locate() {
+            Ok(found) => (ActiveLocation::from(&found), Detection::Found),
             Err(error) => {
                 eprintln!(
                     "virga: could not work out where you are: {error:#}; asking about {}.",
                     fallback.label
                 );
-                (fallback, false)
+                (fallback, Detection::Failed)
             }
         },
+    }
+}
+
+/// Write down what the detection found, or that it found nothing, in the
+/// user's state file. A write that fails is a warning to print, never a
+/// reason to withhold a report that has already loaded.
+fn remember_detection_at(
+    path: &Path,
+    location: &ActiveLocation,
+    detection: Detection,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    match detection {
+        Detection::Skipped => None,
+        Detection::Found => {
+            let remembered = Remembered {
+                location: location.clone(),
+                source: LocationSource::Detected,
+            };
+            state::save_location(path, &remembered)
+                .err()
+                .map(|error| format!("virga: could not remember location: {error:#}"))
+        }
+        Detection::Failed => state::save_detection_failure(path, now)
+            .err()
+            .map(|error| format!("virga: could not note the failed detection: {error:#}")),
     }
 }
 
@@ -550,15 +752,19 @@ fn theme_blurb(theme: Theme) -> &'static str {
 }
 
 /// The whole of `virga update`: one probe, one comparison, one answer whose
-/// instruction matches how this copy was installed.
-fn check_for_update() -> Result<String> {
+/// instruction matches how this copy was installed, and the verdict behind
+/// it for the exit status.
+fn check_for_update() -> Result<(String, update::Outcome)> {
     let current = update::Release::parse(env!("CARGO_PKG_VERSION"))
         .context("parse this binary's own version")?;
     let latest = update::Release::parse(&update::latest_tag(update::RELEASES_URL)?)?;
     let exe = update::running_binary();
     let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
     let method = update::install_method(exe.as_deref(), home.as_deref(), cfg!(windows));
-    Ok(update::report(&current, &latest, &method))
+    Ok((
+        update::report(&current, &latest, &method),
+        update::outcome(&current, &latest),
+    ))
 }
 
 fn theme_set_message(theme: Theme) -> String {
@@ -620,22 +826,24 @@ fn clear_screen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> 
 /// drawing and stop reading keys until the network answered. `try_send` keeps
 /// the loop turning and hands the refusal back to `App`, which owns what the
 /// user is told.
-fn dispatch(tx: &SyncSender<Request>, app: &mut App, request: Request) -> Result<()> {
-    match tx.try_send(request) {
+fn dispatch(workers: &Workers, app: &mut App, request: Request) -> Result<()> {
+    match workers.try_send(request) {
         Ok(()) => Ok(()),
-        // Unreachable while the guards in `App` hold — the queue is deeper
+        // Unreachable while the guards in `App` hold — every queue is deeper
         // than it can fill. It is handled anyway so that the day a guard is
         // dropped, the screen says something instead of waiting forever on a
         // request that was never sent.
         Err(TrySendError::Full(request)) => {
             // A dropped detection still has to reach its fallback, so the
             // replacement it asks for is dispatched rather than discarded.
+            // The replacement is a different kind, so it goes to a different
+            // queue: a full one cannot refuse it a second time.
             if let Some(replacement) = app.on_dispatch_dropped(request) {
-                return dispatch(tx, app, replacement);
+                return dispatch(workers, app, replacement);
             }
             Ok(())
         }
-        Err(TrySendError::Disconnected(_)) => Err(anyhow!("the worker thread has stopped")),
+        Err(TrySendError::Disconnected(_)) => Err(anyhow!("a worker thread has stopped")),
     }
 }
 
@@ -650,7 +858,7 @@ fn drain_messages(
     messages: &mpsc::Receiver<Message>,
     state_path: Option<&Path>,
     warning: &mut Option<String>,
-    chain_to: Option<&SyncSender<Request>>,
+    chain_to: Option<&Workers>,
 ) -> Result<bool> {
     let mut applied = false;
     while let Ok(message) = messages.try_recv() {
@@ -663,8 +871,8 @@ fn drain_messages(
             }
         };
         retain_first_warning(warning, message_warning);
-        if let (Some(request), Some(tx)) = (chained, chain_to) {
-            dispatch(tx, app, request)?;
+        if let (Some(request), Some(workers)) = (chained, chain_to) {
+            dispatch(workers, app, request)?;
         }
     }
     Ok(applied)
@@ -691,47 +899,68 @@ impl Opening {
     }
 }
 
+/// What the startup probe is told: whether to run at all, and which release
+/// the user last cleared a notice for, so it can stay quiet about that one.
+struct UpdateCheck {
+    enabled: bool,
+    dismissed: Option<update::Release>,
+}
+
 /// Terminal setup, the draw loop, and carrying messages between the worker and
 /// the app. Every state transition lives in `App` and every decision about what
 /// a key means lives in `input`, so what remains here is the part that
 /// genuinely needs a terminal and a channel.
+// One over Clippy's limit, and the one over is the signal flag. It travels
+// with `warning` and `notice` as exit-path plumbing; the shape that would
+// take all three off the list is an outcome the loop returns, which is a
+// change to the loop's contract, not to this fix.
+#[allow(clippy::too_many_arguments)]
 fn run(
     mut terminal: DefaultTerminal,
     opening: Opening,
     state_path: Option<&Path>,
     cache_path: Option<PathBuf>,
-    check_updates: bool,
+    update_check: UpdateCheck,
+    interrupt: &interrupt::Interrupt,
     warning: &mut Option<String>,
     notice: &mut Option<String>,
 ) -> Result<()> {
-    // Bounded: see `events::REQUEST_QUEUE`. Messages back stay unbounded — the
-    // worker produces at most one per request it was handed, so bounding the
-    // requests bounds the replies too, and a blocking send on the worker side
-    // would be a deadlock waiting to happen.
-    let (request_tx, request_rx) = mpsc::sync_channel(events::REQUEST_QUEUE);
+    // Requests are bounded: see `events::REQUEST_QUEUE`. Messages back stay
+    // unbounded — a worker produces at most one per request it was handed,
+    // so bounding the requests bounds the replies too, and a blocking send
+    // on the worker side would be a deadlock waiting to happen.
     let (message_tx, message_rx) = mpsc::channel();
-    // The probe rides its own thread and the shared message channel; the
-    // worker's request queue is serial, and news must never stall a search.
-    if check_updates {
-        events::spawn_update_check(message_tx.clone(), || {
+    // The probe rides its own thread and the shared message channel; each
+    // worker's queue is serial, and news must never stall a search.
+    if update_check.enabled {
+        let dismissed = update_check.dismissed;
+        events::spawn_update_check(message_tx.clone(), move || {
             let current = update::Release::parse(env!("CARGO_PKG_VERSION")).ok()?;
             let latest =
                 update::Release::parse(&update::latest_tag(update::RELEASES_URL).ok()?).ok()?;
-            update::notice(&current, &latest)
+            let notice = update::notice(&current, &latest, dismissed.as_ref())?;
+            Some((notice, latest))
         });
     }
-    events::spawn_worker(request_rx, message_tx, cache_path);
+    let workers = events::spawn_workers(message_tx, cache_path);
     let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
     let initial = app.startup_request();
-    dispatch(&request_tx, &mut app, initial)?;
+    dispatch(&workers, &mut app, initial)?;
 
     let mut dirty = true;
     let mut last_size = terminal.size()?;
     let mut last_composition = composition(&app);
 
     loop {
+        // A signal has already decided the exit; returning is what gets the
+        // terminal restored. Nothing pending is worth a frame or a save on
+        // the way out: the session that would have seen either is closing.
+        if interrupt.signal().is_some() {
+            return Ok(());
+        }
+
         // The worker's answers are applied before anything is drawn, so a
         // forecast that landed during the last wait is on screen in this
         // pass. Drained after the draw, as this once was, it was on screen
@@ -739,13 +968,7 @@ fn run(
         // then noticed it, and the wait between passes ran in full before
         // the second pass painted it. At launch that second wait was the
         // whole of the delay the user saw beyond the network's.
-        if drain_messages(
-            &mut app,
-            &message_rx,
-            state_path,
-            warning,
-            Some(&request_tx),
-        )? {
+        if drain_messages(&mut app, &message_rx, state_path, warning, Some(&workers))? {
             dirty = true;
         }
 
@@ -795,7 +1018,9 @@ fn run(
 
         if dirty || animating {
             app.tick = app.tick.wrapping_add(1);
-            terminal.draw(|frame| ui::render(frame, &app))?;
+            let mut notice_drawn = false;
+            terminal.draw(|frame| notice_drawn = ui::render(frame, &app))?;
+            app.notice_drawn = notice_drawn;
             dirty = false;
         }
 
@@ -823,13 +1048,16 @@ fn run(
                         dirty = true;
 
                         if let Some(request) = app.on_action(action) {
-                            dispatch(&request_tx, &mut app, request)?;
+                            dispatch(&workers, &mut app, request)?;
                         }
                         if let Some(style) = app.take_key_hint_style_save() {
                             retain_first_warning(
                                 warning,
                                 persist_key_hint_style(state_path, style),
                             );
+                        }
+                        if let Some(release) = app.take_update_dismissal() {
+                            retain_first_warning(warning, persist_dismissal(state_path, &release));
                         }
                         if app.should_quit {
                             // A message already in the queue — above all the
@@ -860,12 +1088,17 @@ mod tests {
 
     use crate::app::ActiveLocation;
     use crate::events::Message;
+    use crate::input::Action;
+    use crate::weather::client::tests::{
+        detect_location_from, fetch_forecast_from, serving_counted,
+    };
     use crate::weather::model::Weather;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
     use ratatui::buffer::Cell;
     use ratatui::layout::{Position, Size};
     use std::convert::Infallible;
+    use std::sync::atomic::Ordering;
 
     /// A backend that counts how often the terminal is asked where its
     /// cursor is, so a test can prove the answer is never waited on.
@@ -949,7 +1182,11 @@ mod tests {
     fn a_clean_repaint_never_asks_where_the_cursor_is() {
         let app = ready_app();
         let mut terminal = Terminal::new(Counting::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
 
         clear_screen(&mut terminal).unwrap();
 
@@ -976,7 +1213,11 @@ mod tests {
     fn a_clean_repaint_writes_every_cell_of_an_unchanged_frame() {
         let app = ready_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         let frame = terminal.backend().buffer().clone();
 
         clear_screen(&mut terminal).unwrap();
@@ -986,7 +1227,11 @@ mod tests {
             "the screen was not wiped"
         );
 
-        terminal.draw(|frame| ui::render(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render(frame, &app);
+            })
+            .unwrap();
         assert_eq!(terminal.backend().buffer(), &frame);
     }
 
@@ -1067,6 +1312,7 @@ mod tests {
             id,
             location,
             weather: Weather::fixture(5, 2),
+            air_quality_error: None,
         }
     }
 
@@ -1234,6 +1480,47 @@ mod tests {
         }
     }
 
+    /// The issue's gates (#111), one row each: only a bare report about the
+    /// remembered city reads the cache, and only while the switch that
+    /// governs writing it is on.
+    #[test]
+    fn only_a_bare_report_about_a_remembered_city_reads_the_cache() {
+        let state = Path::new("/state/virga/state.json");
+        let beside = Some(PathBuf::from("/state/virga/forecast.json"));
+        for (city, fresh, switch, expected, why) in [
+            (None, false, None, beside.clone(), "a bare remembered read"),
+            (Some("berlin"), false, None, None, "a named city fetches"),
+            (None, true, None, None, "a fresh detection fetches"),
+            (
+                None,
+                false,
+                Some("off"),
+                None,
+                "VIRGA_CACHE=off disables the read",
+            ),
+        ] {
+            assert_eq!(
+                report_cache_path(city, fresh, switch, Some(state)),
+                (expected, None),
+                "{why}"
+            );
+        }
+
+        assert_eq!(
+            report_cache_path(None, false, None, None),
+            (None, None),
+            "no state directory means nowhere to look beside"
+        );
+        let (path, warning) = report_cache_path(None, false, Some("maybe"), Some(state));
+        assert_eq!(path, beside, "an unusable value leaves the read on");
+        assert!(warning.unwrap().contains("VIRGA_CACHE"));
+        assert_eq!(
+            report_cache_path(Some("berlin"), false, Some("maybe"), Some(state)),
+            (None, None),
+            "a report the cache could not serve does not complain about the switch"
+        );
+    }
+
     #[test]
     fn an_accepted_load_is_persisted() {
         let test = tempfile::tempdir().unwrap();
@@ -1322,6 +1609,14 @@ mod tests {
         assert!(warning.contains("create"));
     }
 
+    /// Workers whose three queues are one channel of `bound` slots, with
+    /// nothing serving it: what was queued can be read back, and a bound of
+    /// zero refuses every request the way a full queue would.
+    fn queues(bound: usize) -> (Workers, mpsc::Receiver<Request>) {
+        let (tx, rx) = mpsc::sync_channel(bound);
+        (Workers::from_queues(tx.clone(), tx.clone(), tx), rx)
+    }
+
     fn first_run() -> App {
         App::with_startup(Startup {
             location: ActiveLocation::default(),
@@ -1333,11 +1628,11 @@ mod tests {
 
     #[test]
     fn a_dispatched_request_reaches_the_worker_queue() {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (workers, rx) = queues(1);
         let mut app = App::with_location(berlin());
         let request = app.startup_request();
 
-        dispatch(&tx, &mut app, request).unwrap();
+        dispatch(&workers, &mut app, request).unwrap();
 
         assert!(matches!(
             rx.try_recv(),
@@ -1352,11 +1647,11 @@ mod tests {
     /// the guards having to be broken first.
     #[test]
     fn a_refused_fetch_is_handed_back_to_the_app() {
-        let (tx, _rx) = mpsc::sync_channel(0);
+        let (workers, _rx) = queues(0);
         let mut app = App::with_location(berlin());
         let request = app.startup_request();
 
-        dispatch(&tx, &mut app, request).unwrap();
+        dispatch(&workers, &mut app, request).unwrap();
 
         assert!(
             matches!(&app.weather, Fetch::Failed(error) if error.contains("too many requests")),
@@ -1371,12 +1666,12 @@ mod tests {
     /// Loading with nothing in flight.
     #[test]
     fn a_refused_detection_dispatches_its_replacement() {
-        let (tx, _rx) = mpsc::sync_channel(0);
+        let (workers, _rx) = queues(0);
         let mut app = first_run();
         let request = app.startup_request();
         assert!(app.is_locating());
 
-        dispatch(&tx, &mut app, request).unwrap();
+        dispatch(&workers, &mut app, request).unwrap();
 
         assert!(!app.is_locating());
         assert!(
@@ -1387,12 +1682,12 @@ mod tests {
 
     #[test]
     fn a_stopped_worker_is_an_error_not_a_hang() {
-        let (tx, rx) = mpsc::sync_channel::<Request>(1);
+        let (workers, rx) = queues(1);
         drop(rx);
         let mut app = App::with_location(berlin());
         let request = app.startup_request();
 
-        let error = dispatch(&tx, &mut app, request).unwrap_err();
+        let error = dispatch(&workers, &mut app, request).unwrap_err();
 
         assert!(error.to_string().contains("worker thread has stopped"));
     }
@@ -1431,7 +1726,7 @@ mod tests {
     #[test]
     fn a_detection_chains_its_fetch_only_while_the_loop_runs() {
         let (message_tx, message_rx) = mpsc::channel();
-        let (request_tx, request_rx) = mpsc::sync_channel(events::REQUEST_QUEUE);
+        let (workers, request_rx) = queues(events::REQUEST_QUEUE);
         let mut warning = None;
 
         let mut app = first_run();
@@ -1445,7 +1740,7 @@ mod tests {
             })
             .unwrap();
         let applied =
-            drain_messages(&mut app, &message_rx, None, &mut warning, Some(&request_tx)).unwrap();
+            drain_messages(&mut app, &message_rx, None, &mut warning, Some(&workers)).unwrap();
         assert!(applied);
         assert!(matches!(
             request_rx.try_recv(),
@@ -1481,6 +1776,127 @@ mod tests {
         assert!(!applied);
     }
 
+    fn instant(seconds: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(seconds, 0).expect("a representable instant")
+    }
+
+    /// The README's promise, held on the failure path too: a status bar
+    /// polling by the minute asks the location provider once, not once per
+    /// poll. A rate-limited client stays rate-limited, so the next report
+    /// after a refusal must not knock again until the backoff has passed.
+    #[test]
+    fn a_refused_detection_is_not_asked_again_by_the_next_report() {
+        let (endpoints, hits) = serving_counted(
+            "429 Too Many Requests",
+            "application/json",
+            r#"{"error":true}"#,
+        );
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let first_poll = instant(1_800_000_000);
+
+        let (location, detection) = asked_location_from(
+            Some(&path),
+            true,
+            || detect_location_from(&endpoints),
+            first_poll,
+        );
+        assert_eq!(detection, Detection::Failed);
+        assert_eq!(location, ActiveLocation::default());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            remember_detection_at(&path, &location, detection, first_poll),
+            None
+        );
+
+        let next_poll = first_poll + chrono::TimeDelta::minutes(1);
+        let (location, detection) = asked_location_from(
+            Some(&path),
+            true,
+            || detect_location_from(&endpoints),
+            next_poll,
+        );
+        assert_eq!(detection, Detection::Skipped);
+        assert_eq!(location, ActiveLocation::default());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the next report asked the provider again"
+        );
+
+        let after_backoff = first_poll + now::DETECTION_BACKOFF;
+        let (_, detection) = asked_location_from(
+            Some(&path),
+            true,
+            || detect_location_from(&endpoints),
+            after_backoff,
+        );
+        assert_eq!(detection, Detection::Failed);
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the backoff never lifted");
+    }
+
+    /// Once the provider answers, the place is remembered and the marker
+    /// goes with it: the next report asks nothing.
+    #[test]
+    fn a_detection_that_answers_after_a_refusal_is_remembered() {
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            r#"{"city":"Reykjavík","region":"Capital Region","country_name":"Iceland","latitude":64.14659,"longitude":-21.94223}"#,
+        );
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        let now = instant(1_800_000_000);
+        state::save_detection_failure(&path, now - now::DETECTION_BACKOFF).unwrap();
+
+        let (location, detection) =
+            asked_location_from(Some(&path), true, || detect_location_from(&endpoints), now);
+        assert_eq!(detection, Detection::Found);
+        assert!(location.label.contains("Reykjavík"), "{}", location.label);
+        assert_eq!(
+            remember_detection_at(&path, &location, detection, now),
+            None
+        );
+
+        let persisted = state::load_from(&path).unwrap();
+        assert_eq!(
+            persisted.remembered,
+            Some(Remembered {
+                location: location.clone(),
+                source: LocationSource::Detected,
+            })
+        );
+        assert_eq!(persisted.detection_failed_at, None);
+
+        let (again, detection) =
+            asked_location_from(Some(&path), true, || detect_location_from(&endpoints), now);
+        assert_eq!(detection, Detection::Skipped);
+        assert_eq!(again, location);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// A report that asked nothing has nothing to write, and one that cannot
+    /// write says so without withholding the weather.
+    #[test]
+    fn remembering_a_detection_that_was_skipped_or_cannot_be_written_is_a_warning_at_most() {
+        let test = tempfile::tempdir().unwrap();
+        let parent = test.path().join("not-a-directory");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("state.json");
+        let now = instant(1_800_000_000);
+
+        assert_eq!(
+            remember_detection_at(&path, &berlin(), Detection::Skipped, now),
+            None
+        );
+        let warning = remember_detection_at(&path, &berlin(), Detection::Failed, now).unwrap();
+        assert!(
+            warning.contains("could not note the failed detection"),
+            "{warning}"
+        );
+        assert!(!path.exists());
+    }
+
     #[test]
     fn a_toggled_key_hint_style_is_persisted() {
         let test = tempfile::tempdir().unwrap();
@@ -1502,6 +1918,49 @@ mod tests {
     #[test]
     fn without_a_state_path_the_toggle_is_a_silent_no_op() {
         assert_eq!(persist_key_hint_style(None, KeyHintStyle::Full), None);
+    }
+
+    /// The whole path from the key that clears the notice to the file: the
+    /// dismissal the app hands out is written where the next launch's probe
+    /// reads it, and a launch with nowhere to write clears the line for the
+    /// session and complains about nothing. The file holds a key hint style
+    /// first, because a dismissal alone is never written.
+    #[test]
+    fn a_cleared_notice_is_persisted_as_the_dismissed_release() {
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("state.json");
+        state::save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        let latest = update::Release::parse("9.9.9").unwrap();
+        let mut app = App::new();
+        app.on_message(Message::UpdateAvailable {
+            notice: "update: virga 9.9.9 is available".to_string(),
+            latest: latest.clone(),
+        });
+
+        // The frame that drew the notice, which a key has to follow before
+        // it may dismiss it.
+        app.notice_drawn = true;
+        app.on_action(Action::ToggleUnits);
+        let release = app.take_update_dismissal().expect("the key dismissed");
+
+        assert_eq!(persist_dismissal(Some(&path), &release), None);
+        assert_eq!(state::load_from(&path).unwrap().dismissed, Some(latest));
+        assert_eq!(persist_dismissal(None, &release), None);
+    }
+
+    /// A state directory that cannot take the write is a warning, not a
+    /// reason to stop the loop: the notice is gone from the screen either way.
+    #[test]
+    fn a_dismissal_that_cannot_be_written_is_a_warning() {
+        let test = tempfile::tempdir().unwrap();
+        let parent = test.path().join("not-a-directory");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("state.json");
+
+        let warning = persist_dismissal(Some(&path), &update::Release::parse("9.9.9").unwrap())
+            .expect("the failed write warned");
+
+        assert!(warning.contains("dismissed update notice"));
     }
 
     #[test]
@@ -1662,5 +2121,185 @@ mod tests {
                 theme.name()
             );
         }
+    }
+
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+    }
+
+    /// A cache for Berlin fetched at `fetched`, as the app would have
+    /// written it. The fixture's hours run 2026-08-01T00:00 through
+    /// 2026-08-09T23:00, and the city is placed in the test machine's own
+    /// zone so the stamps below read as plain local times wherever the
+    /// tests run — the cache module's own arrangement.
+    fn cached_forecast(dir: &Path, fetched: chrono::DateTime<chrono::Local>) -> PathBuf {
+        let path = dir.join("forecast.json");
+        let mut weather = Weather::fixture(9, 1);
+        weather.utc_offset_secs = Some(fetched.offset().local_minus_utc());
+        let bytes =
+            cache::encode(&berlin(), &weather, fetched.with_timezone(&chrono::Utc)).unwrap();
+        cache::write(&path, &bytes).unwrap();
+        path
+    }
+
+    /// `report_weather` with its fetch aimed at a loopback host, through the
+    /// test agent.
+    fn report_from(
+        cache: Option<&Path>,
+        location: &ActiveLocation,
+        endpoints: &crate::weather::client::Endpoints,
+        now: chrono::DateTime<chrono::Local>,
+    ) -> Result<(Weather, Option<String>)> {
+        report_weather(cache, location, now, || {
+            fetch_forecast_from(endpoints, location.lat, location.lon)
+        })
+    }
+
+    /// A fetch whose air quality did not arrive hands back the line for
+    /// stderr, naming why, beside a forecast that did (#71).
+    #[test]
+    fn a_fetch_without_its_air_quality_brings_the_warning() {
+        let forecast = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        )
+        .0;
+        let refused = serving_counted("503 Service Unavailable", "text/plain", "down").0;
+        let endpoints = crate::weather::client::Endpoints {
+            air_quality: refused.air_quality,
+            ..forecast
+        };
+
+        let (weather, warning) = report_from(None, &berlin(), &endpoints, local(2026, 8, 2, 12, 0))
+            .expect("the forecast still arrives");
+
+        assert!(!weather.daily.is_empty());
+        let warning = warning.expect("the missing air quality is a reason");
+        assert!(
+            warning.contains("air quality") && warning.contains("503"),
+            "{warning}"
+        );
+    }
+
+    /// The point of the feature (#111): a status bar polling by the minute
+    /// is answered from disk, so the server must not hear from it. It
+    /// answers 500 here so a fetch that slipped through would fail loudly
+    /// as well as being counted.
+    #[test]
+    fn a_fresh_cache_answers_a_bare_now_without_asking_the_network() {
+        use std::sync::atomic::Ordering;
+
+        let (endpoints, hits) =
+            serving_counted("500 Internal Server Error", "application/json", "{}");
+        let test = tempfile::tempdir().unwrap();
+        let path = cached_forecast(test.path(), local(2026, 8, 2, 17, 52));
+
+        let (weather, warning) =
+            report_from(Some(&path), &berlin(), &endpoints, local(2026, 8, 2, 18, 5))
+                .expect("a thirteen minute old forecast answers");
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the report asked the network"
+        );
+        assert_eq!(weather.today_index, 1);
+        assert_eq!(
+            warning, None,
+            "the app reported its own fetch's air quality"
+        );
+    }
+
+    /// "Now" is the current hour, not the hour of the fetch: a cache written
+    /// before midnight and read after it reports the new day's outlook, the
+    /// way a launch would open on it.
+    #[test]
+    fn a_cached_report_is_relocated_to_the_current_hour() {
+        let (endpoints, _) = serving_counted("500 Internal Server Error", "application/json", "{}");
+        let test = tempfile::tempdir().unwrap();
+        let path = cached_forecast(test.path(), local(2026, 8, 2, 23, 50));
+
+        let read_at = local(2026, 8, 3, 0, 5);
+        let (weather, _) = report_from(Some(&path), &berlin(), &endpoints, read_at)
+            .expect("a fifteen minute old forecast answers");
+
+        assert_eq!(weather.today_index, 2, "midnight has passed");
+        assert_eq!(weather.now_hour, 48);
+        let text = now::report(
+            &berlin().label,
+            &weather,
+            Unit::Metric,
+            read_at.fixed_offset(),
+        );
+        assert!(text.contains("Today: 22°C / 12°C"), "{text}");
+    }
+
+    /// Everything the cache is not good for goes to the network: another
+    /// place, a forecast past the report's bound, and a cache switched off,
+    /// which reaches here as no path at all.
+    #[test]
+    fn a_stale_foreign_or_disabled_cache_fetches() {
+        use std::sync::atomic::Ordering;
+
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        );
+        let test = tempfile::tempdir().unwrap();
+        let fetched = local(2026, 8, 2, 12, 0);
+        let path = cached_forecast(test.path(), fetched);
+        let soon_after = fetched + chrono::TimeDelta::minutes(5);
+
+        let elsewhere = ActiveLocation {
+            label: "Berlin, Germany".to_string(),
+            lat: 52.0,
+            lon: 13.41053,
+        };
+        report_from(Some(&path), &elsewhere, &endpoints, soon_after)
+            .expect("the loopback forecast parses");
+        let after_elsewhere = hits.load(Ordering::SeqCst);
+        assert!(after_elsewhere > 0, "somewhere else was answered from disk");
+
+        let past_the_bound = fetched + cache::REPORT_MAX_AGE + chrono::TimeDelta::minutes(1);
+        report_from(Some(&path), &berlin(), &endpoints, past_the_bound)
+            .expect("the loopback forecast parses");
+        let after_stale = hits.load(Ordering::SeqCst);
+        assert!(
+            after_stale > after_elsewhere,
+            "an hour-old forecast was answered from disk"
+        );
+
+        report_from(None, &berlin(), &endpoints, soon_after).expect("the loopback forecast parses");
+        assert!(
+            hits.load(Ordering::SeqCst) > after_stale,
+            "VIRGA_CACHE=off was answered from disk"
+        );
+    }
+
+    /// A cache that cannot be read is a warning and a fetch, the launch's
+    /// rule: the report is never withheld over a file it did not need.
+    #[test]
+    fn an_unreadable_cache_costs_the_fetch_not_the_report() {
+        use std::sync::atomic::Ordering;
+
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../tests/fixtures/forecast.json"),
+        );
+        let test = tempfile::tempdir().unwrap();
+        let path = test.path().join("forecast.json");
+        std::fs::write(&path, "{").unwrap();
+
+        report_from(Some(&path), &berlin(), &endpoints, local(2026, 8, 2, 12, 0))
+            .expect("the loopback forecast parses");
+
+        assert!(hits.load(Ordering::SeqCst) > 0);
     }
 }

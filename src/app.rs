@@ -2,6 +2,7 @@ use crate::events::{Message, Request, RequestId};
 use crate::input::Action;
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
+use crate::update::Release;
 use crate::weather::model::{Location, Weather};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -206,6 +207,13 @@ impl Outcome {
     }
 }
 
+/// The warning for a forecast that arrived without its air quality, in one
+/// place because the TUI prints it on the way out and `virga now` prints it
+/// to stderr, and two copies of the sentence would drift apart.
+pub fn air_quality_warning(error: &str) -> String {
+    format!("virga: the forecast loaded without air quality: {error}")
+}
+
 /// The weather request in flight: which one it is, the place it is for, and
 /// where that place came from. Refresh and retry aim at the place, so a failed
 /// switch retries the city you asked for rather than the one still on screen —
@@ -275,9 +283,24 @@ pub struct App {
     /// better use — and on a narrow terminal it costs a whole binding.
     theme_readout_until: Option<Instant>,
     /// The one line of release news, when the background probe found any.
-    /// Composed in the probe, so this module never learns about versions,
-    /// paths, or the network — it holds a string and lets it go.
+    /// Composed in the probe, so this module never learns about paths or
+    /// the network — it holds a string and lets it go.
     pub update_notice: Option<String>,
+    /// The release `update_notice` is about, held only until the notice is
+    /// let go, so the dismissal can say which release it was. The string
+    /// stays the thing this module displays; this is the thing it records.
+    noticed_release: Option<Release>,
+    /// Set the moment the notice is cleared, so the caller knows to write
+    /// the release down — the same "persist the moment it changes" shape as
+    /// `key_hint_style_dirty`, carrying the value rather than a flag because
+    /// the notice it came from is gone by the time the caller asks.
+    dismissed_release: Option<Release>,
+    /// Whether the last frame drawn had the notice on it. Set by the draw
+    /// loop from what `ui::render` reports, because only the layout knows:
+    /// the search screen never gives it a row, and neither does a terminal
+    /// too short to spare one. A key is allowed to dismiss the notice only
+    /// when this says the user could have read it.
+    pub notice_drawn: bool,
     /// Whether the key reference overlay is open. Only reachable from the
     /// weather screens: search binds `?` to text, and while the overlay is
     /// open every action closes it before it could change screen.
@@ -359,6 +382,9 @@ impl App {
             search_return: Screen::Weather,
             theme_readout_until: None,
             update_notice: None,
+            noticed_release: None,
+            dismissed_release: None,
+            notice_drawn: false,
             help_visible: false,
             key_hint_style: KeyHintStyle::default(),
             key_hint_style_dirty: false,
@@ -396,12 +422,20 @@ impl App {
             return None;
         }
         // The notice is dismissed by living — but only by a key that could
-        // have seen it. The search screen never renders the notice, so keys
-        // pressed there must not silently delete news nobody was shown; and
-        // quit keeps it, so the event loop can hand it back for the ordinary
-        // screen a straight-to-quit launch never gave it a frame on.
-        if !matches!(action, Action::Quit) && self.screen != Screen::Search {
+        // have seen it, which means one pressed after a frame that drew it.
+        // The search screen never renders the notice and a short terminal
+        // has no row for it, so keys pressed on either must not silently
+        // delete news nobody was shown; and quit keeps it, so the event loop
+        // can hand it back for the ordinary screen a straight-to-quit launch
+        // never gave it a frame on.
+        if !matches!(action, Action::Quit) && self.notice_drawn {
             self.update_notice = None;
+            // Letting the notice go is the dismissal: the release it named
+            // is not news next launch either, and only the caller can
+            // write that down.
+            if let Some(release) = self.noticed_release.take() {
+                self.dismissed_release = Some(release);
+            }
         }
         match action {
             Action::Quit => self.should_quit = true,
@@ -414,9 +448,14 @@ impl App {
                 self.theme_readout_until = Some(Instant::now() + THEME_READOUT);
             }
             Action::OpenSearch => self.open_search(),
+            // Waits for a forecast, as the day keys do: with nothing loaded
+            // the hourly screen has only a spinner to show, and that one is
+            // already on the weather screen, inside the panes.
             Action::OpenHourly => {
-                self.screen = Screen::Hourly;
-                self.select_now();
+                if matches!(self.weather, Fetch::Ready(_)) {
+                    self.screen = Screen::Hourly;
+                    self.select_now();
+                }
             }
             Action::PrevDay => self.select_prev_day(),
             Action::NextDay => self.select_next_day(),
@@ -469,14 +508,16 @@ impl App {
         match message {
             // No id and no staleness: at most one is ever sent, and news
             // about a release does not go stale over a session.
-            Message::UpdateAvailable { notice } => {
+            Message::UpdateAvailable { notice, latest } => {
                 self.update_notice = Some(notice);
+                self.noticed_release = Some(latest);
                 Outcome::nothing()
             }
             Message::Loaded {
                 id,
                 location,
                 weather,
+                air_quality_error,
             } => {
                 let Some(Pending { source, .. }) = self.pending.take_if(|p| p.id == id) else {
                     return Outcome::nothing();
@@ -489,6 +530,7 @@ impl App {
                 self.shown = Shown::default();
                 Outcome {
                     remember: self.remembered(),
+                    warning: air_quality_error.as_deref().map(air_quality_warning),
                     ..Outcome::nothing()
                 }
             }
@@ -638,6 +680,13 @@ impl App {
         })
     }
 
+    /// Takes the release whose notice a key just cleared, if one did, so
+    /// the caller can remember not to announce it again. Once per
+    /// dismissal, for the same reason `take_key_hint_style_save` is.
+    pub fn take_update_dismissal(&mut self) -> Option<Release> {
+        self.dismissed_release.take()
+    }
+
     /// A request this app asked for that never reached the worker, because the
     /// bounded queue had no room for it.
     ///
@@ -700,6 +749,15 @@ impl App {
     /// forecast showing would be a lie under the new name.
     fn fetch(&mut self, location: ActiveLocation, source: LocationSource) -> Request {
         let id = self.next_id();
+        // A choice outranks a detection still in flight, so the detection is
+        // abandoned here, not merely outvoted later. Left pending, its answer
+        // would chain a fetch that replaces this one, and the chosen city's
+        // load would be thrown away as stale while the guess got saved.
+        // Nothing in the message order prevents that: the two are answered
+        // by different threads.
+        if source == LocationSource::Chosen {
+            self.pending_detect = None;
+        }
         let showing_it =
             matches!(self.weather, Fetch::Ready(_)) && self.location.same_place(&location);
         self.pending = Some(Pending {
@@ -716,7 +774,8 @@ impl App {
     }
 
     /// Ignored while a fetch or a detection is already running, so a held
-    /// `r` cannot queue one request per keypress against a single worker.
+    /// `r` cannot queue one request per keypress on the fetch queue, which
+    /// serves them one at a time.
     fn refresh(&mut self) -> Option<Request> {
         if self.is_fetching() || self.is_locating() {
             return None;
@@ -766,14 +825,26 @@ impl App {
         };
     }
 
-    /// What `r` should fetch: whatever we are already chasing, else what is on
-    /// screen. Never the compiled-in default — that was the bug. The source
-    /// rides along, so a refresh cannot quietly relabel where a place came from.
+    /// The place the app is chasing: the fetch in flight, else what is on
+    /// screen. `location` only moves on a load, so a frame drawn from it
+    /// during a fetch for somewhere else names the place just left — or,
+    /// on a first run, the compiled-in fallback the detection was there to
+    /// replace.
+    pub fn fetching_for(&self) -> &ActiveLocation {
+        self.pending
+            .as_ref()
+            .map_or(&self.location, |p| &p.location)
+    }
+
+    /// What `r` should fetch. Never the compiled-in default — that was the
+    /// bug. The source rides along, so a refresh cannot quietly relabel
+    /// where a place came from.
     fn refresh_target(&self) -> (ActiveLocation, LocationSource) {
-        self.pending.as_ref().map_or_else(
-            || (self.location.clone(), self.location_source),
-            |p| (p.location.clone(), p.source),
-        )
+        let source = self
+            .pending
+            .as_ref()
+            .map_or(self.location_source, |p| p.source);
+        (self.fetching_for().clone(), source)
     }
 
     /// Both directions wrap, so the window is a loop rather than a corridor.
@@ -1014,6 +1085,8 @@ mod tests {
         let mut app = app_with(22, 14);
         app.on_action(Action::ToggleHelp);
         app.update_notice = Some("update: virga 9.9.9".to_string());
+        // The row is drawn under the card; the card is what hides it.
+        app.notice_drawn = true;
 
         app.on_action(Action::NextDay);
         assert!(!app.help_visible);
@@ -1249,6 +1322,61 @@ mod tests {
         assert_eq!(app.selected_day, 0);
     }
 
+    fn results(count: usize) -> Vec<Location> {
+        (0..count)
+            .map(|i| Location {
+                name: format!("Place {i}"),
+                admin1: None,
+                country: None,
+                lat: 10.0 + i as f64,
+                lon: 20.0 + i as f64,
+                timezone: None,
+                country_code: None,
+                population: None,
+            })
+            .collect()
+    }
+
+    /// `↓` stops on the last result rather than walking off the list, and
+    /// `↑` stops on the first: the cursor picks with `Enter`, so one step
+    /// too far would submit nothing or, worse, index past the end.
+    #[test]
+    fn the_result_cursor_stops_at_both_ends_of_the_list() {
+        let mut app = App::new();
+        app.results = Fetch::Ready(results(3));
+
+        for _ in 0..5 {
+            app.on_action(Action::NextResult);
+        }
+        assert_eq!(app.selected, 2, "past the last result");
+
+        for _ in 0..5 {
+            app.on_action(Action::PrevResult);
+        }
+        assert_eq!(app.selected, 0, "before the first result");
+    }
+
+    /// With nothing to pick from the arrows must not move: a cursor that
+    /// advanced against an empty or pending list would be pointing at a
+    /// result that arrives later, or at none at all.
+    #[test]
+    fn result_navigation_is_inert_without_a_ready_list() {
+        for (name, results) in [
+            ("idle", Fetch::Idle),
+            ("loading", Fetch::Loading),
+            ("failed", Fetch::Failed("upstream down".to_string())),
+            ("empty", Fetch::Ready(Vec::new())),
+        ] {
+            let mut app = App::new();
+            app.results = results;
+
+            app.on_action(Action::NextResult);
+            assert_eq!(app.selected, 0, "{name}: next moved the cursor");
+            app.on_action(Action::PrevResult);
+            assert_eq!(app.selected, 0, "{name}: prev moved the cursor");
+        }
+    }
+
     #[test]
     fn navigation_is_inert_with_an_empty_forecast() {
         let mut app = App::new();
@@ -1318,6 +1446,37 @@ mod tests {
         assert_eq!(app_with(22, 14).hours_left_today(), HOURS_PER_DAY);
         // Nothing loaded is not nothing left; the arrows still have to behave.
         assert_eq!(App::new().hours_left_today(), HOURS_PER_DAY);
+    }
+
+    /// The stamp is the provider's, and the slice at `11..13` is the one place
+    /// a short or non-ASCII value could panic. Each of the three exits — no
+    /// slice, no number, a number that is not a clock hour — folds to a whole
+    /// day, which keeps the arrows stepping rather than guessing at a day
+    /// boundary the stamp does not name.
+    #[test]
+    fn a_malformed_first_stamp_counts_as_a_whole_day_rather_than_panicking() {
+        for stamp in [
+            "",
+            "2026-08-10",
+            "2026-08-10T1",
+            "2026-08-10Txx:00",
+            "2026-08-10T24:00",
+            "2026-08-10T99:00",
+            // `get(11..13)` lands inside a two-byte character.
+            "2026-08-10T1é:00",
+            // And here it lands on one, which parses as no number at all.
+            "2026-08-10Té9:00",
+        ] {
+            let mut app = app_with(22, 14);
+            if let Fetch::Ready(weather) = &mut app.weather {
+                weather.hourly[weather.now_hour].time = stamp.to_string();
+            }
+            assert_eq!(
+                app.hours_left_today(),
+                HOURS_PER_DAY,
+                "stamp {stamp:?} was read as a clock hour"
+            );
+        }
     }
 
     /// The complaint. With the window opened at 6 PM, today holds six hours,
@@ -1623,6 +1782,22 @@ mod tests {
         detecting_app(ActiveLocation::default(), LocationSource::Fallback)
     }
 
+    /// `p` with nothing loaded has nothing to show. It used to open the
+    /// hourly screen anyway, onto the old centred popup over an empty
+    /// terminal — the frame the skeleton replaced.
+    #[test]
+    fn the_hourly_screen_waits_for_a_forecast() {
+        let mut app = first_run();
+        let _ = app.startup_request();
+
+        assert!(app.on_action(Action::OpenHourly).is_none());
+        assert_eq!(app.screen, Screen::Weather);
+
+        app.weather = Fetch::Ready(Weather::fixture(5, 2));
+        assert!(app.on_action(Action::OpenHourly).is_none());
+        assert_eq!(app.screen, Screen::Hourly);
+    }
+
     /// The promise: a city you picked is not a question the network gets asked
     /// again.
     #[test]
@@ -1781,9 +1956,87 @@ mod tests {
             country: Some("Germany".to_string()),
             lat: 52.52437,
             lon: 13.41053,
+            timezone: None,
+            country_code: None,
+            population: None,
         }]);
         let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
 
+        assert_eq!(
+            deliver(&mut app, picked, Weather::fixture(5, 2)),
+            Some(Remembered {
+                location: berlin(),
+                source: LocationSource::Chosen,
+            })
+        );
+    }
+
+    /// The race the serial worker used to hide: a detection that answers
+    /// after the user has already picked a city. Its fetch must not replace
+    /// the chosen one, and the choice is what gets saved.
+    #[test]
+    fn a_detection_answered_after_a_choice_is_ignored() {
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+
+        app.on_action(Action::OpenSearch);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52437,
+            lon: 13.41053,
+            timezone: None,
+            country_code: None,
+            population: None,
+        }]);
+        let picked = app.on_action(Action::Submit).expect("a fetch for the pick");
+        assert!(!app.is_locating(), "a choice abandons the detection");
+
+        let late = app.on_message(Message::Detected {
+            id,
+            location: reykjavik(),
+        });
+        assert!(
+            late.request.is_none(),
+            "a detection answered after a choice chained a fetch"
+        );
+
+        assert_eq!(
+            deliver(&mut app, picked, Weather::fixture(5, 2)),
+            Some(Remembered {
+                location: berlin(),
+                source: LocationSource::Chosen,
+            })
+        );
+        assert_eq!(app.location, berlin());
+    }
+
+    /// The failing half of the same race: a detection that gives up after
+    /// the choice must not fetch the fallback over the chosen city.
+    #[test]
+    fn a_detection_failing_after_a_choice_is_ignored() {
+        let mut app = first_run();
+        let Request::Detect { id } = app.startup_request() else {
+            panic!("not a detection")
+        };
+        let picked = app.fetch(berlin(), LocationSource::Chosen);
+
+        let late = app.on_message(Message::DetectFailed {
+            id,
+            error: "no route to host".to_string(),
+        });
+
+        assert!(
+            late.request.is_none(),
+            "the fallback fetch replaced the choice"
+        );
+        assert!(
+            late.warning.is_none(),
+            "nothing went wrong that the user can see"
+        );
         assert_eq!(
             deliver(&mut app, picked, Weather::fixture(5, 2)),
             Some(Remembered {
@@ -1816,6 +2069,7 @@ mod tests {
             id,
             location,
             weather,
+            air_quality_error: None,
         })
         .remember
     }
@@ -1978,6 +2232,44 @@ mod tests {
         assert!(outcome.request.is_none());
     }
 
+    /// A forecast that arrived without its air quality is still a forecast,
+    /// so the reason is a line on the way out, never a frame — and the reason
+    /// has to be there, because a blank cell with no explanation is the bug.
+    #[test]
+    fn a_forecast_missing_its_air_quality_is_a_warning() {
+        let mut app = App::new();
+        let request = app.startup_request();
+        let Request::Fetch { id, location } = request else {
+            panic!("not a fetch")
+        };
+        let outcome = app.on_message(Message::Loaded {
+            id,
+            location,
+            weather: Weather::fixture(5, 2),
+            air_quality_error: Some("http status: 503".to_string()),
+        });
+        assert!(matches!(app.weather, Fetch::Ready(_)));
+        let warning = outcome.warning.expect("the reason reaches the user");
+        assert!(warning.contains("air quality"), "{warning:?}");
+        assert!(warning.contains("http status: 503"), "{warning:?}");
+    }
+
+    #[test]
+    fn a_forecast_with_its_air_quality_carries_no_warning() {
+        let mut app = App::new();
+        let request = app.startup_request();
+        let Request::Fetch { id, location } = request else {
+            panic!("not a fetch")
+        };
+        let outcome = app.on_message(Message::Loaded {
+            id,
+            location,
+            weather: Weather::fixture(5, 2),
+            air_quality_error: None,
+        });
+        assert!(outcome.warning.is_none());
+    }
+
     /// The bug ActiveLocation exists to kill: `r` used to refetch the
     /// compiled-in default whatever city was on screen, so the user saw
     /// Frederick's weather under Berlin's name.
@@ -2124,6 +2416,9 @@ mod tests {
                 country: Some("Germany".to_string()),
                 lat: 52.52437,
                 lon: 13.41053,
+                timezone: None,
+                country_code: None,
+                population: None,
             }],
         });
 
@@ -2269,6 +2564,9 @@ mod tests {
             country: Some("Germany".to_string()),
             lat: 52.52437,
             lon: 13.41053,
+            timezone: None,
+            country_code: None,
+            population: None,
         };
 
         assert_eq!(ActiveLocation::from(&found), berlin());
@@ -2415,6 +2713,7 @@ mod tests {
             id,
             location,
             weather: Weather::fixture(5, 2),
+            air_quality_error: None,
         });
 
         assert!(
@@ -2453,6 +2752,7 @@ mod tests {
     fn news() -> Message {
         Message::UpdateAvailable {
             notice: "update: virga 9.9.9 is available — run `virga update`".to_string(),
+            latest: Release::parse("9.9.9").unwrap(),
         }
     }
 
@@ -2473,11 +2773,87 @@ mod tests {
     fn the_next_action_clears_the_notice_and_still_acts() {
         let mut app = App::new();
         app.on_message(news());
+        app.notice_drawn = true;
 
         app.on_action(Action::ToggleUnits);
 
         assert_eq!(app.update_notice, None);
         assert_eq!(app.unit, Unit::Metric, "the keypress still did its work");
+    }
+
+    /// The key that clears the notice is the one that dismisses the release,
+    /// and the dismissal is handed out once: a caller that asks on every
+    /// idle tick must not rewrite the state file forever.
+    #[test]
+    fn the_clearing_key_leaves_exactly_one_pending_dismissal() {
+        let mut app = App::new();
+        assert_eq!(app.take_update_dismissal(), None);
+        app.on_message(news());
+        assert_eq!(
+            app.take_update_dismissal(),
+            None,
+            "news that is still on screen has not been dismissed"
+        );
+
+        // A key before any frame drew the notice could not have read it, so
+        // it clears nothing and dismisses nothing (#75).
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(app.take_update_dismissal(), None);
+
+        app.notice_drawn = true;
+        app.on_action(Action::ToggleUnits);
+
+        assert_eq!(
+            app.take_update_dismissal(),
+            Some(Release::parse("9.9.9").unwrap())
+        );
+        assert_eq!(
+            app.take_update_dismissal(),
+            None,
+            "the dismissal was not taken exactly once"
+        );
+
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(
+            app.take_update_dismissal(),
+            None,
+            "a key with no notice to clear dismissed something"
+        );
+    }
+
+    /// Keys that spare the notice — search keys that never saw it, the key
+    /// that closes the overlay covering it, and quit — dismiss nothing, or
+    /// the release would be silenced for a user who never read the line.
+    #[test]
+    fn keys_that_spare_the_notice_dismiss_nothing() {
+        let mut searching = App::new();
+        searching.on_action(Action::OpenSearch);
+        searching.on_message(news());
+        searching.on_action(Action::Insert('a'));
+        searching.on_action(Action::Back);
+        assert!(searching.update_notice.is_some());
+        assert_eq!(
+            searching.take_update_dismissal(),
+            None,
+            "a search key dismissed"
+        );
+
+        let mut reading = App::new();
+        reading.on_action(Action::ToggleHelp);
+        reading.on_message(news());
+        reading.on_action(Action::NextDay);
+        assert!(reading.update_notice.is_some());
+        assert_eq!(
+            reading.take_update_dismissal(),
+            None,
+            "closing the overlay dismissed"
+        );
+
+        let mut quitting = App::new();
+        quitting.on_message(news());
+        quitting.on_action(Action::Quit);
+        assert!(quitting.update_notice.is_some());
+        assert_eq!(quitting.take_update_dismissal(), None, "quitting dismissed");
     }
 
     /// The search screen never renders the notice, so keys pressed there —
@@ -2488,6 +2864,8 @@ mod tests {
         let mut app = App::new();
         app.on_action(Action::OpenSearch);
         app.on_message(news());
+        // What every frame of the search screen reports.
+        app.notice_drawn = false;
 
         app.on_action(Action::Insert('a'));
         assert!(app.update_notice.is_some(), "typing deleted hidden news");
@@ -2498,8 +2876,32 @@ mod tests {
             "leaving search is the first chance to see it"
         );
 
+        app.notice_drawn = true;
         app.on_action(Action::ToggleUnits);
         assert_eq!(app.update_notice, None, "a key that saw it clears it");
+    }
+
+    /// The same rule off the search screen: a terminal too short to give the
+    /// notice a row reports it undrawn, and keys pressed there leave it
+    /// standing — for a taller frame, or for the way out, where quit hands
+    /// it to the ordinary screen. Before this any key on the weather screen
+    /// let it go, and on a short terminal that meant nobody ever read it.
+    #[test]
+    fn keys_on_a_frame_without_the_notice_keep_it() {
+        let mut app = App::new();
+        app.on_message(news());
+        assert!(!app.notice_drawn, "no frame has been drawn yet");
+
+        app.on_action(Action::ToggleUnits);
+        assert!(
+            app.update_notice.is_some(),
+            "a key pressed before the notice had a frame deleted it"
+        );
+        assert_eq!(app.unit, Unit::Metric, "the keypress still did its work");
+
+        app.notice_drawn = true;
+        app.on_action(Action::ToggleUnits);
+        assert_eq!(app.update_notice, None);
     }
 
     /// A straight-to-quit launch may never give the notice a frame, so quit
@@ -2509,6 +2911,7 @@ mod tests {
     fn quitting_keeps_the_notice_for_the_ordinary_screen() {
         let mut app = App::new();
         app.on_message(news());
+        app.notice_drawn = true;
 
         app.on_action(Action::Quit);
 

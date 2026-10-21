@@ -15,7 +15,9 @@
 //! the hourly screen now states the size it needs instead (#50).
 
 use crate::theme::Palette;
-use crate::ui::axis::{hour_ticks_render, put, put_right, put_styled, put_text};
+use crate::ui::axis::{
+    hour_ticks_render, put, put_right, put_styled, put_text, widest_window_label, window_label,
+};
 use crate::ui::bars::window_start;
 use crate::ui::condition_symbol;
 use crate::ui::precipitation::{PrecipitationAggregate, aggregate};
@@ -24,7 +26,7 @@ use crate::weather::model::HourlyForecast;
 use chrono::{NaiveDateTime, Timelike};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 
@@ -34,7 +36,7 @@ const TEMP_ROWS: u16 = 4;
 const RAIN_ROWS: u16 = 2;
 
 /// The full interior, top to bottom: sky, the temperature silhouette, the
-/// rain band, wind, the clock axis, and the selection marker.
+/// rain band, wind, the clock axis, and the marker row.
 const SKY_ROW: u16 = 0;
 const TEMP_ROW: u16 = 1;
 const RAIN_ROW: u16 = TEMP_ROW + TEMP_ROWS;
@@ -53,6 +55,15 @@ const HORIZONS: [usize; 3] = [48, 36, 24];
 /// hour. The inspector's minimum width leaves fifteen columns here.
 const NARROW_HORIZON: usize = 12;
 const MAX_CELL_WIDTH: u16 = 3;
+
+/// Under the selected hour on the marker row.
+const SELECTED_MARKER: &str = "▲";
+/// Under the current hour on the same row: the classic chart's glyph for now,
+/// so the two hourly views share one vocabulary. The axis anchor above it is
+/// coloured for the role as well, but colour was all that label had, and a
+/// monochrome or colour-blind reading of the row could not find the current
+/// hour among its neighbours.
+const NOW_MARKER: &str = "┬";
 
 /// Every eighth from a floor line to a full block: the vertical resolution
 /// both bands draw with.
@@ -172,30 +183,31 @@ fn clock_hour(time: &str) -> Option<u32> {
         .map(|at| at.hour())
 }
 
+/// A window whose extremes round to the same degree states it once: the en
+/// dash against a minus sign made a flat freezing day read `-5–-5°C`.
 fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
-    temperature_range(hours).map_or_else(
-        || "—".to_string(),
-        |(low, high)| {
-            format!(
-                "{:.0}–{:.0}{}",
-                unit.temp_rounded(low),
-                unit.temp_rounded(high),
-                unit.temp_symbol()
-            )
-        },
-    )
+    let Some((low, high)) = temperature_range(hours) else {
+        return "—".to_string();
+    };
+    let (low, high) = (unit.temp_rounded(low), unit.temp_rounded(high));
+    if low == high {
+        return format!("{low:.0}{}", unit.temp_symbol());
+    }
+    format!("{low:.0}–{high:.0}{}", unit.temp_symbol())
 }
 
-fn precipitation_summary(hours: &[HourlyForecast], selected: usize, unit: Unit) -> String {
-    let end = selected.saturating_add(24).min(hours.len());
-    let window = hours.get(selected..end).unwrap_or_default();
-    let total = aggregate(window, unit);
+/// The visible window, like the temperature and wind summaries beside it.
+/// It used to total the day ahead of the selection, which is the figure the
+/// inspector already prints two rows up as "24 h ahead" (#78). At 80 columns
+/// both windows are a day long and, once the selection has left the page's
+/// first hour, not the same day: that is why the inspector's row names its
+/// anchor.
+fn precipitation_summary(hours: &[HourlyForecast], unit: Unit) -> String {
+    let total = aggregate(hours, unit);
     match total {
         PrecipitationAggregate::Unavailable => "—".to_string(),
         PrecipitationAggregate::Zero => format!("0 {}", unit.precip_label()),
-        PrecipitationAggregate::Trace(_) | PrecipitationAggregate::Measured(_) => total
-            .positive_text(unit, " ")
-            .expect("positive aggregate has text"),
+        PrecipitationAggregate::Positive(amount) => amount.text(unit, " "),
     }
 }
 
@@ -216,18 +228,48 @@ fn wind_summary(hours: &[HourlyForecast], unit: Unit) -> String {
 }
 
 /// Everything a track needs to place itself: the visible window and the
-/// measured columns the frame gave it.
+/// measured columns and interior the frame gave it.
 struct Plot {
     window: Window,
+    /// The interior's first row; every track is a fixed number of rows below.
+    y: u16,
     content_x: u16,
     plot_x: u16,
     plot_width: u16,
     summary_x: u16,
 }
 
+impl Plot {
+    /// The first cell of the hour `offset` columns into the window.
+    fn column_x(&self, offset: usize) -> u16 {
+        self.plot_x + offset as u16 * self.window.cell_width
+    }
+
+    /// The cell a one-cell glyph takes to sit centred on that hour.
+    fn centre_x(&self, offset: usize) -> u16 {
+        self.column_x(offset) + (self.window.cell_width - 1) / 2
+    }
+}
+
+/// One hour's place in the window: its column and the colour its state
+/// demands. Its position in the series is derived from the window rather than
+/// stored beside `offset`, so no caller can fill the two in inconsistently.
+#[derive(Clone, Copy)]
+struct Column {
+    offset: usize,
+    state_colour: Option<Color>,
+}
+
+impl Column {
+    /// The hour's index in the series the window was cut from.
+    fn index(&self, plot: &Plot) -> usize {
+        plot.window.start + self.offset
+    }
+}
+
 /// The colour a column's state demands, or `None` for an ordinary hour that
 /// takes its track's own colour.
-fn state_colour(palette: Palette, index: usize, selected: usize) -> Option<ratatui::style::Color> {
+fn state_colour(palette: Palette, index: usize, selected: usize) -> Option<Color> {
     if index == selected {
         Some(palette.selection)
     } else if index == 0 {
@@ -250,7 +292,7 @@ pub(super) fn weathergram_render(
     let visible = hours.get(window.start..end).unwrap_or_default();
     let block = Block::bordered()
         .border_style(Style::new().fg(palette.border))
-        .title(Line::from(format!(" Hourly weather · next {} h ", window.hours)).fg(palette.muted));
+        .title(Line::from(title(window, visible, area.width)).fg(palette.muted));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -259,47 +301,115 @@ pub(super) fn weathergram_render(
     let content_x = inner.x + inner.width.saturating_sub(used_width) / 2;
     let plot = Plot {
         window,
+        y: inner.y,
         content_x,
         plot_x: content_x + LABEL_WIDTH,
         plot_width,
         summary_x: content_x + LABEL_WIDTH + plot_width + SUMMARY_GAP,
     };
 
-    full_tracks_render(frame, hours, visible, palette, unit, selected, &plot, inner);
+    full_tracks_render(frame, visible, palette, unit, selected, &plot);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The pane's name gives way before the window does. At the 36-column floor
+/// "Hourly weather · 12 h from Sun 12p" overruns the 34 title cells, and the
+/// position is the part a reader who has paged forward needs. The long form
+/// has to fit the widest span a page can carry, not only this page's, so
+/// the name does not come and go as the anchor's digits change.
+fn title(window: Window, visible: &[HourlyForecast], width: u16) -> String {
+    let first = visible.first().map(|hour| hour.time.as_str());
+    let span = window_label(window.start, window.hours, first);
+    let widest = widest_window_label(window.start, window.hours);
+    let room = width.saturating_sub(BORDER_COLS) as usize;
+    let fits = |span: &str| format!(" Hourly weather · {span} ").chars().count() <= room;
+    if fits(&span) && fits(&widest) {
+        return format!(" Hourly weather · {span} ");
+    }
+    format!(" Hourly · {span} ")
+}
+
 fn full_tracks_render(
     frame: &mut Frame,
-    hours: &[HourlyForecast],
     visible: &[HourlyForecast],
     palette: Palette,
     unit: Unit,
     selected: usize,
     plot: &Plot,
-    inner: Rect,
 ) {
     let window = plot.window;
-    let sky_y = inner.y + SKY_ROW;
-    let temp_y = inner.y + TEMP_ROW;
-    let rain_y = inner.y + RAIN_ROW;
-    let wind_y = inner.y + WIND_ROW;
-    let axis_y = inner.y + AXIS_ROW;
-    let marker_y = inner.y + MARKER_ROW;
+    labels_render(frame, plot, visible, palette, unit);
 
+    let range = temperature_range(visible);
+    for (offset, hour) in visible.iter().enumerate() {
+        let column = Column {
+            offset,
+            state_colour: state_colour(palette, window.start + offset, selected),
+        };
+        sky_render(frame, plot, column, hour, palette);
+        temperature_render(frame, plot, column, hour, palette, range);
+        rain_render(frame, plot, column, hour, palette);
+        wind_render(frame, plot, column, hour, palette, unit, selected);
+    }
+
+    // The clock reads at the bottom, under the columns it measures, where a
+    // meteogram keeps it.
+    hour_ticks_render(
+        frame,
+        Rect::new(plot.plot_x, plot.y + AXIS_ROW, plot.plot_width, 1),
+        visible.iter().map(|hour| hour.time.as_str()),
+        window.cell_width,
+        if window.start == 0 {
+            palette.now
+        } else {
+            palette.muted
+        },
+        palette,
+    );
+
+    // Hour 0 is the first column of the first page and nowhere else, so the
+    // page number is the whole test. The selection draws last and takes the
+    // cell when both fall on now, as the classic chart's rule gives its
+    // selection precedence: the arrows move the selection, and stepping off
+    // now uncovers the tick.
+    if window.start == 0 && !visible.is_empty() {
+        put(
+            frame,
+            plot.centre_x(0),
+            plot.y + MARKER_ROW,
+            NOW_MARKER,
+            palette.now,
+        );
+    }
+    let end = window.start + visible.len();
+    if selected >= window.start && selected < end {
+        let offset = selected - window.start;
+        put(
+            frame,
+            plot.centre_x(offset),
+            plot.y + MARKER_ROW,
+            SELECTED_MARKER,
+            palette.selection,
+        );
+    }
+}
+
+/// Each track's name on the left and its summary on the right.
+fn labels_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    visible: &[HourlyForecast],
+    palette: Palette,
+    unit: Unit,
+) {
     // A band's label and summary sit low in the band, where its ink gathers.
-    let temp_label_y = temp_y + TEMP_ROWS / 2;
-    let rain_label_y = rain_y + RAIN_ROWS - 1;
+    let temp_label_y = plot.y + TEMP_ROW + TEMP_ROWS / 2;
+    let rain_label_y = plot.y + RAIN_ROW + RAIN_ROWS - 1;
 
     for (label, summary, y) in [
-        ("sky", String::new(), sky_y),
+        ("sky", String::new(), plot.y + SKY_ROW),
         ("temp", temperature_summary(visible, unit), temp_label_y),
-        (
-            "rain",
-            precipitation_summary(hours, selected, unit),
-            rain_label_y,
-        ),
-        ("wind", wind_summary(visible, unit), wind_y),
+        ("rain", precipitation_summary(visible, unit), rain_label_y),
+        ("wind", wind_summary(visible, unit), plot.y + WIND_ROW),
     ] {
         put_text(frame, plot.content_x, y, label, palette.muted);
         put_right(
@@ -311,128 +421,161 @@ fn full_tracks_render(
             palette.muted,
         );
     }
+}
 
-    let range = temperature_range(visible);
+/// Sky: the condition's emoji every third clock hour, on a faint rail. The
+/// steady cadence is what keeps the row from reading as scattered leftovers,
+/// and a two-cell emoji spans its two-cell hour column exactly, so the
+/// symbols sit centred where one-cell glyphs never could. The rail still says
+/// the condition is known between marks, and a gap still says the provider
+/// made no claim. An hour column too narrow for a wide glyph falls back to
+/// the one-cell text symbol.
+fn sky_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+) {
+    let sky_y = plot.y + SKY_ROW;
+    let x0 = plot.column_x(column.offset);
+    let cell_width = plot.window.cell_width;
+    let colour = column.state_colour.unwrap_or(palette.text);
     let rail = Style::new().fg(palette.muted).add_modifier(Modifier::DIM);
 
-    for (offset, hour) in visible.iter().enumerate() {
-        let index = window.start + offset;
-        let x0 = plot.plot_x + offset as u16 * window.cell_width;
-        let centre = x0 + (window.cell_width - 1) / 2;
-        let state = state_colour(palette, index, selected);
-        let clock = clock_hour(&hour.time);
-
-        // Sky: the condition's emoji every third clock hour, on a faint rail.
-        // The steady cadence is what keeps the row from reading as scattered
-        // leftovers, and a two-cell emoji spans its two-cell hour column
-        // exactly, so the symbols sit centred where one-cell glyphs never
-        // could. The rail still says the condition is known between marks,
-        // and a gap still says the provider made no claim. An hour column too
-        // narrow for a wide glyph falls back to the one-cell text symbol.
-        let known = condition_symbol::symbol(hour.code) != " ";
-        let cadence = clock.map_or(offset % 3 == 0, |hour| hour % 3 == 0);
-        let emoji_cells = if cadence && known && window.cell_width >= 2 {
-            put(
-                frame,
-                x0,
-                sky_y,
-                condition_symbol::emoji(hour.code),
-                state.unwrap_or(palette.text),
-            );
-            2
-        } else if cadence && known {
-            put(
-                frame,
-                centre,
-                sky_y,
-                condition_symbol::symbol(hour.code),
-                state.unwrap_or(palette.text),
-            );
-            1
-        } else {
-            0
-        };
-        if known {
-            for column in emoji_cells..window.cell_width {
-                put_styled(frame, x0 + column, sky_y, "─", rail);
-            }
-        }
-
-        // Temperature: every cell of the hour inked, so the silhouette is
-        // continuous rather than a picket fence of centred glyphs.
-        if let Some(height) = temperature_eighths(hour.temp_c, range) {
-            let style = Style::new().fg(state.unwrap_or(palette.accent));
-            for column in 0..window.cell_width {
-                band_render(frame, x0 + column, temp_y, TEMP_ROWS, height, style);
-            }
-        }
-
-        // Rain: the same floor. Dim below the week strip's faint threshold,
-        // except for the selection and the current hour, which are states
-        // rather than readings and draw at full strength.
-        if let Some(height) = rain_sixteenths(hour.chance) {
-            let mut style = Style::new().fg(state.unwrap_or(palette.accent));
-            if state.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
-                style = style.add_modifier(Modifier::DIM);
-            }
-            for column in 0..window.cell_width {
-                band_render(frame, x0 + column, rain_y, RAIN_ROWS, height, style);
-            }
-        }
-
-        // Wind: an arrow every second hour, its speed on the six-hour ticks.
-        // Hour after hour of near-identical arrows says less than a sparse
-        // row the eye can actually compare; the selected hour always draws so
-        // the marker below never points at a blank.
-        if clock.map_or(offset % 2 == 0, |hour| hour % 2 == 0) || index == selected {
-            let arrow = wind_symbol(hour.wind_kph, hour.wind_dir_deg);
-            put(frame, centre, wind_y, arrow, state.unwrap_or(palette.text));
-
-            // Not beside the selection: the selected hour's off-cadence arrow
-            // would overprint the tick's digits, and the inspector already
-            // carries that hour's exact speed.
-            if arrow != " "
-                && clock.is_some_and(|hour| hour % 6 == 0)
-                && selected.abs_diff(index) > 1
-                && let Some(speed) = hour.wind_kph
-            {
-                let text = format!("{:.0}", unit.speed(speed));
-                let cells = text.chars().count() as u16;
-                // The next even hour's arrow sits two hour-columns on, so
-                // the digits get the cells between: one at the narrowest
-                // tier, which holds a single digit. A speed that does not
-                // fit is left off rather than clipped — `↑2↑` for 20 km/h
-                // told the reader the wind was 2.
-                let before_next_arrow = cells < 2 * window.cell_width;
-                let inside_plot = centre + 1 + cells <= plot.plot_x + plot.plot_width;
-                if before_next_arrow && inside_plot {
-                    put_text(frame, centre + 1, wind_y, &text, palette.muted);
-                }
-            }
+    let known = condition_symbol::symbol(hour.code) != " ";
+    let cadence =
+        clock_hour(&hour.time).map_or(column.offset.is_multiple_of(3), |hour| hour % 3 == 0);
+    let emoji_cells = if cadence && known && cell_width >= 2 {
+        put(frame, x0, sky_y, condition_symbol::emoji(hour.code), colour);
+        2
+    } else if cadence && known {
+        let centre = plot.centre_x(column.offset);
+        put(
+            frame,
+            centre,
+            sky_y,
+            condition_symbol::symbol(hour.code),
+            colour,
+        );
+        1
+    } else {
+        0
+    };
+    if known {
+        for cell in emoji_cells..cell_width {
+            put_styled(frame, x0 + cell, sky_y, "─", rail);
         }
     }
+}
 
-    // The clock reads at the bottom, under the columns it measures, where a
-    // meteogram keeps it.
-    hour_ticks_render(
+/// Temperature: every cell of the hour inked, so the silhouette is continuous
+/// rather than a picket fence of centred glyphs.
+fn temperature_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+    range: Option<(f64, f64)>,
+) {
+    let Some(height) = temperature_eighths(hour.temp_c, range) else {
+        return;
+    };
+    let style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
+    let x0 = plot.column_x(column.offset);
+    for cell in 0..plot.window.cell_width {
+        band_render(
+            frame,
+            x0 + cell,
+            plot.y + TEMP_ROW,
+            TEMP_ROWS,
+            height,
+            style,
+        );
+    }
+}
+
+/// Rain: the same floor as the silhouette. Dim below the week strip's faint
+/// threshold, except for the selection and the current hour, which are states
+/// rather than readings and draw at full strength.
+fn rain_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+) {
+    let Some(height) = rain_sixteenths(hour.chance) else {
+        return;
+    };
+    let mut style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
+    if column.state_colour.is_none() && hour.chance.is_some_and(|chance| chance < FAINT_BELOW) {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    let x0 = plot.column_x(column.offset);
+    for cell in 0..plot.window.cell_width {
+        band_render(
+            frame,
+            x0 + cell,
+            plot.y + RAIN_ROW,
+            RAIN_ROWS,
+            height,
+            style,
+        );
+    }
+}
+
+/// Wind: an arrow every second hour, its speed on the six-hour ticks. Hour
+/// after hour of near-identical arrows says less than a sparse row the eye
+/// can actually compare; the selected hour always draws so the marker below
+/// never points at a blank.
+fn wind_render(
+    frame: &mut Frame,
+    plot: &Plot,
+    column: Column,
+    hour: &HourlyForecast,
+    palette: Palette,
+    unit: Unit,
+    selected: usize,
+) {
+    let clock = clock_hour(&hour.time);
+    let on_cadence = clock.map_or(column.offset.is_multiple_of(2), |hour| hour % 2 == 0);
+    let index = column.index(plot);
+    if !on_cadence && index != selected {
+        return;
+    }
+    let wind_y = plot.y + WIND_ROW;
+    let centre = plot.centre_x(column.offset);
+    let arrow = wind_symbol(hour.wind_kph, hour.wind_dir_deg);
+    put(
         frame,
-        Rect::new(plot.plot_x, axis_y, plot.plot_width, 1),
-        visible.iter().map(|hour| hour.time.as_str()),
-        window.cell_width,
-        0,
-        if window.start == 0 {
-            palette.now
-        } else {
-            palette.muted
-        },
-        palette,
+        centre,
+        wind_y,
+        arrow,
+        column.state_colour.unwrap_or(palette.text),
     );
 
-    let end = window.start + visible.len();
-    if selected >= window.start && selected < end {
-        let offset = selected - window.start;
-        let x = plot.plot_x + offset as u16 * window.cell_width + (window.cell_width - 1) / 2;
-        put(frame, x, marker_y, "▲", palette.selection);
+    // Not beside the selection: the selected hour's off-cadence arrow
+    // would overprint the tick's digits, and the inspector already
+    // carries that hour's exact speed.
+    if arrow != " "
+        && clock.is_some_and(|hour| hour % 6 == 0)
+        && selected.abs_diff(index) > 1
+        && let Some(speed) = hour.wind_kph
+    {
+        let text = format!("{:.0}", unit.speed(speed));
+        let cells = text.chars().count() as u16;
+        // The next even hour's arrow sits two hour-columns on, so
+        // the digits get the cells between: one at the narrowest
+        // tier, which holds a single digit. A speed that does not
+        // fit is left off rather than clipped — `↑2↑` for 20 km/h
+        // told the reader the wind was 2.
+        let before_next_arrow = cells < 2 * plot.window.cell_width;
+        let inside_plot = centre + 1 + cells <= plot.plot_x + plot.plot_width;
+        if before_next_arrow && inside_plot {
+            put_text(frame, centre + 1, wind_y, &text, palette.muted);
+        }
     }
 }
 
@@ -452,6 +595,7 @@ mod tests {
     const FULL_TEMP_FLOOR_Y: u16 = 1 + TEMP_ROW + TEMP_ROWS - 1;
     const FULL_WIND_Y: u16 = 1 + WIND_ROW;
     const FULL_AXIS_Y: u16 = 1 + AXIS_ROW;
+    const FULL_MARKER_Y: u16 = 1 + MARKER_ROW;
 
     #[test]
     fn horizons_are_quantized_from_measured_plot_width() {
@@ -863,11 +1007,11 @@ mod tests {
         );
     }
 
-    /// The selection keeps its shape in monochrome, while the opening label
-    /// still states the current day and time without a separate marker.
+    /// Shape is all this palette has, so both markers have to be found by it.
     #[test]
     fn selected_marker_and_current_time_anchor_survive_a_monochrome_palette() {
         let weather = Weather::fixture(22, 14);
+        let count = weather.forecast_hours().len();
         let monochrome = Palette {
             accent: Color::Gray,
             text: Color::Gray,
@@ -879,53 +1023,65 @@ mod tests {
         };
 
         for palette in [Theme::default().palette(), monochrome] {
-            let text = rendered_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
-            assert!(text.contains('▲'), "selection lost without colour:\n{text}");
-            assert!(
-                text.contains("Sun 12a"),
-                "current day and time lost without colour:\n{text}"
-            );
-            assert!(
-                !text.contains('┬'),
-                "redundant current marker returned:\n{text}"
-            );
+            for width in [36, 80] {
+                let buffer =
+                    rendered_buffer_in(&weather, width, FULL_ROWS, 3, palette, Unit::Metric);
+                let text = text_of(&buffer, width, FULL_ROWS);
+                let cell_width = window_for(width, 3, count).cell_width;
+                let now_x = plot_x(&buffer, width) + (cell_width - 1) / 2;
+
+                assert_eq!(
+                    marker_coordinates(&buffer, width, FULL_ROWS, SELECTED_MARKER).len(),
+                    1,
+                    "selection lost without colour at {width} columns:\n{text}"
+                );
+                assert_eq!(
+                    marker_coordinates(&buffer, width, FULL_ROWS, NOW_MARKER),
+                    [(now_x, FULL_MARKER_Y)],
+                    "current hour lost without colour at {width} columns:\n{text}"
+                );
+                assert!(
+                    text.contains("Sun 12a"),
+                    "current day and time lost without colour:\n{text}"
+                );
+            }
         }
     }
 
-    /// The current time label itself is the indicator. Giving it the `now`
-    /// role keeps the day and time readable without stacking a separate glyph
-    /// above the first weather column.
+    /// The anchor label is the current time, coloured for the role, and the
+    /// tick under it is the shape that survives without the colour. The tick
+    /// sits on the marker row rather than in a column of its own on the axis:
+    /// an earlier design reserved one there, and it pushed the anchor label
+    /// off the hour it names.
     #[test]
-    fn current_time_anchor_replaces_the_separate_marker() {
+    fn the_current_hour_is_marked_under_its_anchor_at_every_cell_width() {
         let weather = Weather::fixture(22, 14);
         let palette = Theme::default().palette();
+        let count = weather.forecast_hours().len();
 
-        for width in [36, 80] {
+        // One-, two-, and three-cell hours.
+        for width in [36, 80, 165] {
             let buffer = rendered_buffer_in(&weather, width, FULL_ROWS, 3, palette, Unit::Metric);
-            let text: String = (0..FULL_ROWS)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let axis_y = FULL_AXIS_Y;
-            let anchor_x = (1..width - 1)
-                .find(|x| buffer[(*x, axis_y)].symbol() == "S")
-                .expect("current time anchor");
-            let axis: String = (0..width).map(|x| buffer[(x, axis_y)].symbol()).collect();
+            let text = text_of(&buffer, width, FULL_ROWS);
+            let anchor_x = plot_x(&buffer, width);
+            let axis: String = (0..width)
+                .map(|x| buffer[(x, FULL_AXIS_Y)].symbol())
+                .collect();
 
             assert!(
                 axis.contains("Sun") && axis.contains("12a"),
                 "current day and time disappeared from {axis:?}"
             );
-            assert_eq!(buffer[(anchor_x, axis_y)].fg, palette.now);
-            assert!(
-                !text.contains('┬'),
-                "redundant current marker returned:\n{text}"
+            assert_eq!(buffer[(anchor_x, FULL_AXIS_Y)].fg, palette.now);
+
+            let cell_width = window_for(width, 3, count).cell_width;
+            let now = (anchor_x + (cell_width - 1) / 2, FULL_MARKER_Y);
+            assert_eq!(
+                marker_coordinates(&buffer, width, FULL_ROWS, NOW_MARKER),
+                [now],
+                "the current hour has no shape at {width} columns:\n{text}"
             );
-            assert!(text.contains('▲'), "selection marker missing:\n{text}");
+            assert_eq!(buffer[now].fg, palette.now);
 
             let label_x = (1..width - 3)
                 .find(|x| {
@@ -935,6 +1091,89 @@ mod tests {
                 })
                 .expect("sky label");
             assert_eq!(anchor_x, label_x + LABEL_WIDTH);
+        }
+    }
+
+    /// The title names the page's span, and a page is the same size wherever
+    /// the selection has scrolled it to — the last page is pulled back to
+    /// stay full rather than shortened — so the span must not change with
+    /// the page. Where each page opens is the title's other half, tested
+    /// beside it (#78). The stock fixture cannot show this: 192 forecast
+    /// hours is eight whole 24 h pages, so nothing is ever pulled back and a
+    /// title that read the visible count would pass. The series is cut to
+    /// 173 hours so the last selection lands on a page that only the
+    /// pull-back keeps full.
+    #[test]
+    fn the_title_names_the_same_span_on_every_page() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.hourly.truncate(weather.now_hour + 173);
+        let last = weather.forecast_hours().len() - 1;
+        assert_eq!(last % 24, 4, "the last page must be a partial one");
+
+        let page = |selected: usize| {
+            let buffer = rendered_buffer_in(
+                &weather,
+                80,
+                FULL_ROWS,
+                selected,
+                Theme::default().palette(),
+                Unit::Metric,
+            );
+            let title: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
+            let on_page = !marker_coordinates(&buffer, 80, FULL_ROWS, "▲").is_empty();
+            (title, on_page)
+        };
+
+        let (first, _) = page(0);
+        assert!(first.contains("Hourly weather · next 24 h"), "{first:?}");
+        for selected in [24, 100, 168, last] {
+            let (scrolled, on_page) = page(selected);
+            assert!(on_page, "selection {selected} is not on the page");
+            assert!(
+                scrolled.contains("Hourly weather · 24 h from "),
+                "selection {selected} changed the span: {scrolled:?}"
+            );
+        }
+    }
+
+    /// One cell, two markers: the selection takes it, as the classic chart's
+    /// rule gives its selection the cell over now. One step on uncovers the
+    /// tick beside the arrow, at the one-cell hour width as well.
+    #[test]
+    fn the_selection_covers_the_current_marker_until_it_steps_off() {
+        let weather = Weather::fixture(22, 14);
+        let palette = Theme::default().palette();
+        let count = weather.forecast_hours().len();
+
+        for width in [36, 80] {
+            let cell_width = window_for(width, 0, count).cell_width;
+            let on_now = rendered_buffer_in(&weather, width, FULL_ROWS, 0, palette, Unit::Metric);
+            let now = (plot_x(&on_now, width) + (cell_width - 1) / 2, FULL_MARKER_Y);
+            let text = text_of(&on_now, width, FULL_ROWS);
+
+            assert_eq!(
+                marker_coordinates(&on_now, width, FULL_ROWS, SELECTED_MARKER),
+                [now],
+                "the selection is not on the current hour at {width} columns:\n{text}"
+            );
+            assert!(
+                marker_coordinates(&on_now, width, FULL_ROWS, NOW_MARKER).is_empty(),
+                "the current marker was drawn beside the selection at {width} columns:\n{text}"
+            );
+            assert_eq!(on_now[now].fg, palette.selection);
+
+            let stepped = rendered_buffer_in(&weather, width, FULL_ROWS, 1, palette, Unit::Metric);
+            let text = text_of(&stepped, width, FULL_ROWS);
+            assert_eq!(
+                marker_coordinates(&stepped, width, FULL_ROWS, NOW_MARKER),
+                [now],
+                "stepping off now did not uncover its marker at {width} columns:\n{text}"
+            );
+            assert_eq!(
+                marker_coordinates(&stepped, width, FULL_ROWS, SELECTED_MARKER),
+                [(now.0 + cell_width, now.1)],
+                "the selection did not move one hour on at {width} columns:\n{text}"
+            );
         }
     }
 
@@ -972,7 +1211,7 @@ mod tests {
             "a later page presented its anchor as the current time"
         );
         assert!(
-            marker_coordinates(&buffer, width, FULL_ROWS, "┬").is_empty(),
+            marker_coordinates(&buffer, width, FULL_ROWS, NOW_MARKER).is_empty(),
             "current marker leaked onto a scrolled page"
         );
     }
@@ -1017,7 +1256,8 @@ mod tests {
             Theme::default().palette(),
             Unit::Metric,
         );
-        let selected = marker_coordinates(&baseline, 80, FULL_ROWS, "▲");
+        let selected = marker_coordinates(&baseline, 80, FULL_ROWS, SELECTED_MARKER);
+        let now = marker_coordinates(&baseline, 80, FULL_ROWS, NOW_MARKER);
         let anchor_x = (1..79)
             .find(|x| baseline[(*x, FULL_AXIS_Y)].symbol() == "S")
             .expect("current time anchor");
@@ -1026,11 +1266,25 @@ mod tests {
             let palette = theme.palette();
             let buffer = rendered_buffer_in(&weather, 80, FULL_ROWS, 3, palette, Unit::Metric);
             assert_eq!(
-                marker_coordinates(&buffer, 80, FULL_ROWS, "▲"),
+                marker_coordinates(&buffer, 80, FULL_ROWS, SELECTED_MARKER),
                 selected,
                 "{} moved the selected marker",
                 theme.name()
             );
+            assert_eq!(
+                marker_coordinates(&buffer, 80, FULL_ROWS, NOW_MARKER),
+                now,
+                "{} moved the current marker",
+                theme.name()
+            );
+            for &cell in &now {
+                assert_eq!(
+                    buffer[cell].fg,
+                    palette.now,
+                    "{} did not style the current marker",
+                    theme.name()
+                );
+            }
             assert_eq!(
                 buffer[(anchor_x, FULL_AXIS_Y)].fg,
                 palette.now,
@@ -1069,6 +1323,145 @@ mod tests {
         }
     }
 
+    /// Nothing used to render a scrolled page and read its title back, so
+    /// every page said "next 24 h" — four days ahead, over an axis reading
+    /// `Thu 12a`. A later page names the hour it opens on instead.
+    #[test]
+    fn a_scrolled_page_is_titled_from_where_it_opens() {
+        let weather = Weather::fixture(22, 14);
+
+        let first = rendered(&weather, 80, FULL_ROWS, 3);
+        assert!(first.contains("Hourly weather · next 24 h"), "\n{first}");
+
+        let paged = rendered(&weather, 80, FULL_ROWS, 24);
+        let top = paged.lines().next().unwrap_or_default();
+        assert!(
+            top.contains("Hourly weather · 24 h from Mon 12a"),
+            "{top:?}"
+        );
+        assert!(!top.contains("next"), "{top:?}");
+    }
+
+    /// At the 36-column floor the long form overruns the border, so the
+    /// pane's name shortens and the position survives whole, corner to
+    /// corner.
+    #[test]
+    fn a_narrow_scrolled_page_keeps_its_position_in_the_title() {
+        let weather = Weather::fixture(22, 14);
+        let width = 36;
+        assert_eq!(window_for(width, 12, 192).start, 12);
+
+        let text = rendered(&weather, width, FULL_ROWS, 12);
+        let top = text.lines().next().unwrap_or_default();
+        assert!(top.contains("Hourly · 12 h from Sun 12p"), "{top:?}");
+        assert!(top.ends_with('┐'), "the title overran the corner: {top:?}");
+        assert_eq!(top.chars().count(), width as usize);
+    }
+
+    /// The last page stops at the end of the series rather than past it, so
+    /// it opens where the clamp puts it and not on a page boundary. The
+    /// fixture's 192 hours hide that: its last page opens at hour 168, which
+    /// is `Sun 12a` again. One hour fewer and the clamp shows.
+    #[test]
+    fn the_clamped_last_page_is_titled_from_its_real_first_hour() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.hourly.truncate(weather.now_hour + 191);
+        assert_eq!(window_for(80, 190, 191).start, 167);
+
+        let text = rendered(&weather, 80, FULL_ROWS, 190);
+        let top = text.lines().next().unwrap_or_default();
+        assert!(
+            top.contains("Hourly weather · 24 h from Sat 11p"),
+            "{top:?}"
+        );
+    }
+
+    /// One column above the floor the long form fits a one-digit clock and
+    /// not a two-digit one, and the clamped last page is where the two meet:
+    /// from 1 AM every page opens at `1a` or `1p` until the last, which opens
+    /// at `12p`. Kept wherever it fit, the name would be on every page but
+    /// that one.
+    #[test]
+    fn a_narrow_title_keeps_one_shape_from_page_to_page() {
+        let mut weather = Weather::fixture(22, 14);
+        weather.now_hour += 1;
+        let count = weather.forecast_hours().len();
+        assert_eq!(count, 191);
+        let width = 37;
+
+        let pages: Vec<String> = (12..count)
+            .step_by(12)
+            .map(|selected| {
+                let text = rendered(&weather, width, FULL_ROWS, selected);
+                text.lines().next().unwrap_or_default().to_string()
+            })
+            .collect();
+        assert!(
+            pages.iter().any(|top| top.contains("12 h from Sun 1a")),
+            "{pages:#?}"
+        );
+        assert!(
+            pages.iter().any(|top| top.contains("12 h from Sun 12p")),
+            "{pages:#?}"
+        );
+        for top in &pages {
+            assert!(top.contains("┌ Hourly · 12 h from "), "{top:?}");
+            assert!(top.ends_with('┐'), "the title overran the corner: {top:?}");
+            assert_eq!(top.chars().count(), width as usize);
+        }
+    }
+
+    #[test]
+    fn a_flat_temperature_window_states_one_value() {
+        let mut weather = Weather::fixture(22, 14);
+        for hour in weather.hourly.iter_mut() {
+            hour.temp_c = Some(-5.0);
+        }
+        let flat = &weather.forecast_hours()[..12];
+        assert_eq!(temperature_summary(flat, Unit::Metric), "-5°C");
+        assert_eq!(temperature_summary(flat, Unit::Imperial), "23°F");
+
+        // Different readings that round to the same degree are flat too.
+        weather.hourly[weather.now_hour].temp_c = Some(-5.2);
+        assert_eq!(
+            temperature_summary(&weather.forecast_hours()[..12], Unit::Metric),
+            "-5°C"
+        );
+        weather.hourly[weather.now_hour].temp_c = Some(-6.0);
+        assert_eq!(
+            temperature_summary(&weather.forecast_hours()[..12], Unit::Metric),
+            "-6–-5°C"
+        );
+    }
+
+    /// One window for all three summaries: the rain total describes the
+    /// hours on screen, not the day ahead of the selection, which is the
+    /// inspector's "24 h ahead" already.
+    #[test]
+    fn the_rain_summary_totals_the_visible_window() {
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.precip_mm = Some(0.0);
+        }
+        // Wet only in the second page's hours.
+        weather.hourly[now + 30].precip_mm = Some(5.0);
+
+        let first = rendered(&weather, 80, FULL_ROWS, 20);
+        let rain = first
+            .lines()
+            .find(|line| line.contains("rain"))
+            .unwrap_or_else(|| panic!("rain row missing:\n{first}"));
+        assert!(rain.contains("0 mm"), "{rain:?}");
+
+        let second = rendered(&weather, 80, FULL_ROWS, 24);
+        let rain = second
+            .lines()
+            .find(|line| line.contains("rain"))
+            .unwrap_or_else(|| panic!("rain row missing:\n{second}"));
+        assert!(rain.contains("5.0 mm"), "{rain:?}");
+    }
+
     #[test]
     fn empty_and_missing_weathergrams_draw_without_panicking() {
         let mut empty = Weather::fixture(22, 14);
@@ -1096,7 +1489,7 @@ mod tests {
         }
 
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "—"
         );
         let text = rendered(&weather, 80, FULL_ROWS, 0);
@@ -1120,7 +1513,7 @@ mod tests {
         weather.hourly[now + 7].precip_mm = None;
 
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "—"
         );
     }
@@ -1134,21 +1527,21 @@ mod tests {
         }
 
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "0 mm"
         );
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Imperial),
             "0 in"
         );
 
         weather.hourly[now].precip_mm = Some(0.01);
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Metric),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Metric),
             "<0.1 mm"
         );
         assert_eq!(
-            precipitation_summary(weather.forecast_hours(), 0, Unit::Imperial),
+            precipitation_summary(&weather.forecast_hours()[..24], Unit::Imperial),
             "<0.01 in"
         );
     }
@@ -1172,7 +1565,14 @@ mod tests {
         palette: Palette,
         unit: Unit,
     ) -> String {
-        let buffer = rendered_buffer_in(weather, width, height, selected, palette, unit);
+        text_of(
+            &rendered_buffer_in(weather, width, height, selected, palette, unit),
+            width,
+            height,
+        )
+    }
+
+    fn text_of(buffer: &Buffer, width: u16, height: u16) -> String {
         (0..height)
             .map(|y| {
                 (0..width)
@@ -1181,6 +1581,13 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The plot's first column, which the axis anchor opens on every page.
+    fn plot_x(buffer: &Buffer, width: u16) -> u16 {
+        (1..width - 1)
+            .find(|x| !buffer[(*x, FULL_AXIS_Y)].symbol().trim().is_empty())
+            .expect("leading axis anchor")
     }
 
     fn rendered_buffer_in(

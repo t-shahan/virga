@@ -308,7 +308,13 @@ fn next_precipitation(hours: &[HourlyForecast]) -> String {
         }
     }
 
-    format!("no rain in the next {} days", hours.len() / 24)
+    // Rounded up, as the week strip counts: `len / 24` called a 191-hour
+    // series seven days while the strip below it drew eight rows, and called
+    // anything under a day none at all.
+    match hours.len().div_ceil(24) {
+        1 => "no rain in the next day".to_string(),
+        days => format!("no rain in the next {days} days"),
+    }
 }
 
 fn falling_word(hour: &HourlyForecast) -> &'static str {
@@ -427,6 +433,26 @@ mod tests {
         );
     }
 
+    /// A forecast fetched mid-afternoon is a few hours short of eight days,
+    /// and the strip under it still draws eight rows; the sentence must not
+    /// count one fewer. Under a day is a day, not "0 days".
+    #[test]
+    fn a_partial_last_day_still_counts_and_a_short_series_is_not_zero_days() {
+        assert_eq!(
+            next_precipitation(&dry_hours(191)),
+            "no rain in the next 8 days"
+        );
+        assert_eq!(
+            next_precipitation(&dry_hours(24)),
+            "no rain in the next day"
+        );
+        assert_eq!(next_precipitation(&dry_hours(5)), "no rain in the next day");
+        assert_eq!(
+            next_precipitation(&dry_hours(25)),
+            "no rain in the next 2 days"
+        );
+    }
+
     /// Probability alone must not trigger it: an hour with a 90% chance and no
     /// forecast accumulation is not rain.
     #[test]
@@ -523,6 +549,20 @@ mod tests {
         trace[0].precip_mm = Some(0.01);
         assert_eq!(total_line(&trace, Unit::Metric), "<0.1 mm");
         assert_eq!(total_line(&trace, Unit::Imperial), "<0.01 in");
+    }
+
+    /// The window, not the series, is what has to be whole: a hole a day and
+    /// more ahead of the selection is no reason to withhold today's total,
+    /// and a hole inside the window is every reason.
+    #[test]
+    fn a_total_is_withheld_only_when_the_hole_falls_inside_its_window() {
+        let mut hours = dry_hours(48);
+        hours[2].precip_mm = Some(3.0);
+        hours[30].precip_mm = None;
+
+        assert_eq!(total_line(window_from(&hours, 0), Unit::Metric), "3.0 mm");
+        assert_eq!(total_line(window_from(&hours, 10), Unit::Metric), UNKNOWN);
+        assert_eq!(total_line(&[], Unit::Metric), UNKNOWN);
     }
 
     #[test]
