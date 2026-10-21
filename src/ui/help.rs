@@ -15,10 +15,12 @@ use super::legend::bindings;
 /// wrapping tops out at two rows and drops bindings from the tail, which is
 /// the right trade for a hint and the wrong one for the reference — a card
 /// that omits keys at narrow widths answers the exact question it was opened
-/// for with silence. One line each fits the floor almost exactly: the
-/// longest list is one line taller than the minimum terminal height can hold
-/// with its border, and the one line that clips there is `[?] keys` — the one
-/// binding the footer, "any key closes", already restates.
+/// for with silence. One line each fits the floor almost exactly. The weather
+/// screen's list fills the minimum terminal height with its border. The
+/// hourly screen's, the longest, runs two lines over, so `[t] theme` and
+/// `[?] keys` clip there: the second is the one binding the footer, "any key
+/// closes", already restates, and at that size the hourly screen is only a
+/// size warning, so the theme key is the cheapest to lose.
 pub(super) fn help_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     let bindings = bindings(app);
 

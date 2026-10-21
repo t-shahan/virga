@@ -232,7 +232,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) -> bool {
 
     // Last, so the reference sits over whatever the screen drew. It gets the
     // whole canvas rather than just the content: at the minimum height the
-    // hourly list plus its border needs every row there is.
+    // hourly list plus its border needs more rows than there are.
     if app.help_visible {
         help_render(frame, app, palette, page_area);
     }
@@ -825,13 +825,15 @@ mod tests {
         }
         assert!(text.contains("Keys"), "{text}");
 
-        // And only that screen's bindings: `l` is not bound on the hourly
-        // screen, and its card must not claim otherwise.
+        // And that screen's bindings, not the weather screen's: on the hourly
+        // screen `p` goes back rather than opening it, and `l` opens the
+        // search there too, though the card left it out until #148.
         let mut app = ready(Screen::Hourly);
         app.help_visible = true;
         let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
         assert!(text.contains("[v] view"), "{text}");
-        assert!(!text.contains("location"), "{text}");
+        assert!(text.contains("[l] location"), "{text}");
+        assert!(!text.contains("[p] hourly"), "{text}");
     }
 
     /// Closed is the resting state, and it must not leak the reference onto
@@ -870,12 +872,14 @@ mod tests {
         }
     }
 
-    /// The hourly card is now one line taller than the floor can hold with
-    /// its border, so exactly one line clips from the tail — and it must be
-    /// `[?] keys`, the binding the footer already restates, rather than the
-    /// hide toggle just added beside it.
+    /// The hourly card is two lines taller than the floor can hold with its
+    /// border, so the last two clip: `[t] theme` and `[?] keys`, the second
+    /// being the binding the footer already restates. At 34x12 the hourly
+    /// screen itself is only a size warning, so the theme key is the cheapest
+    /// to lose; the ways out and around survive, `[l] location` among them
+    /// (#148).
     #[test]
-    fn the_floor_clips_the_redundant_question_mark_line_and_keeps_the_rest() {
+    fn the_floor_clips_the_card_from_its_tail() {
         let mut app = ready(Screen::Hourly);
         app.help_visible = true;
         let text = symbols(
@@ -885,13 +889,15 @@ mod tests {
         )
         .join("\n");
 
-        for entry in ["[q] quit", "[b] back", "[,] hide"] {
+        for entry in ["[q] quit", "[b] back", "[,] hide", "[l] location"] {
             assert!(text.contains(entry), "lost {entry:?}: {text:?}");
         }
-        assert!(
-            !text.contains("[?] keys"),
-            "the redundant line should have clipped: {text:?}"
-        );
+        for entry in ["[t] theme", "[?] keys"] {
+            assert!(
+                !text.contains(entry),
+                "{entry:?} should have clipped: {text:?}"
+            );
+        }
     }
 
     /// `Full` style is the pre-overlay bar revived: every binding named on
