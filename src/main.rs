@@ -81,9 +81,9 @@ fn main() -> Result<()> {
             }
         }
         // The one command that fetches weather without the interface. It
-        // speaks the same sources' answers in the same order of preference
-        // the app opens with, so `virga now` and a launch agree about where
-        // "here" is.
+        // speaks the same sources' answers, and reads the same state file,
+        // but a remembered detection is reused rather than refreshed — see
+        // `now::where_to_ask` for why a one-shot must not re-detect.
         Invocation::Now(city) => {
             let (unit, warning) = startup_unit(std::env::var("VIRGA_UNITS").ok().as_deref());
             if let Some(warning) = warning {
