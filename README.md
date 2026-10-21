@@ -42,7 +42,7 @@ https://github.com/user-attachments/assets/5044c045-0f86-448c-9000-19c9fe541134
 
 ## Hourly weathergram
 
-<img width="2000" height="1609" alt="percip_screen_demo" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
+<img width="2000" height="1609" alt="Animated: the hourly weathergram, with the selected hour's readings in a pane above it and the week's precipitation strip below. Temperature, precipitation chance, sky and wind share one hour axis; the selection steps through hours and days, then v flips to the classic precipitation bars" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
 
 Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
 share one clock, so a change in the forecast reads down a column instead of
@@ -163,9 +163,10 @@ Virga checks for a newer release once per launch, in the background, and
 shows one muted line above the key bar when it finds one. The next keypress
 on a screen that shows it clears it — letters typed into the city search
 leave it standing, because that screen never shows it — and news that
-arrived before you quit is printed on the way out instead. Set
-`VIRGA_UPDATE=off` to skip the check; a launch that cannot reach GitHub — or
-that quits before GitHub answers — simply shows no notice.
+arrived before you quit is printed on the way out instead. Clearing it is
+remembered: the release it named is not announced again, only one newer
+than it. Set `VIRGA_UPDATE=off` to skip the check; a launch that cannot
+reach GitHub — or that quits before GitHub answers — simply shows no notice.
 
 `virga update` asks the same question on demand and, judging from where the
 running binary lives, says which row of this table applies to you. Neither
@@ -181,10 +182,12 @@ ever replaces the binary itself:
 Uninstalling from source takes the *package* name, `virga-tui`, not the binary
 name.
 
-Removing the binary leaves the two files Virga writes: a `state.json` holding
+Removing the binary leaves the files Virga writes: a `state.json` holding
 the last location you chose and, if you set them, your startup theme and key
-bar style, and a `forecast.json` holding the last forecast it fetched. Both
-live in the platform's per-user state directory:
+bar style, a `forecast.json` holding the last forecast it fetched, and beside
+each an empty `.lock` file — `state.json.lock` and `forecast.json.lock` — that
+serialises writes to it. All of them live in the platform's per-user state
+directory:
 
 | Platform | Directory |
 |---|---|
@@ -199,9 +202,9 @@ live in the platform's per-user state directory:
 | Key | Action |
 |---|---|
 | `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
-| `↑` `↓` | Back / forward a day — keeping the time of day, on the hourly screen |
+| `↑` `↓` | Back / forward a day — on the hourly screen too, keeping the time of day |
 | `n` / `Home` | Jump back to now |
-| `p` | Hourly weathergram — `b`, `Enter` or `Esc` to go back |
+| `p` | Hourly weathergram — `p` again, `b`, `Enter` or `Esc` to go back |
 | `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location |
@@ -209,14 +212,16 @@ live in the platform's per-user state directory:
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `?` | Every key for the current screen, on a card — any key closes it |
 | `,` | Switch the bar between hinting at `?` and naming every binding itself — persisted, like the theme |
-| `q` / `Esc` / `Ctrl-C` | Quit |
+| `q` / `Ctrl-C` | Quit — `Esc` too, except on the hourly and search screens, where it only backs out |
 
 The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
 hour, a weather emoji marks the sky every three hours, and wind arrows every
 second hour carry their speed on the six-hour ticks.
 
-Choosing a city — or cancelling — returns to whichever screen the search was
-opened from.
+Search results come biggest first. Two that would read the same — one name,
+one region, one country — get a second line naming the timezone, or the
+coordinates where even that is shared. Choosing a city — or cancelling —
+returns to whichever screen the search was opened from.
 
 ## Commands
 
@@ -235,7 +240,7 @@ What the command line answers, it answers without starting up.
 | `virga version` / `-V` / `--version` | Print the version |
 
 `virga now` is the whole forecast reduced to a glance — the same sources, the
-same city the app would open with, and none of the terminal:
+city the app remembers, and none of the terminal:
 
 ```
 $ virga now
@@ -244,6 +249,10 @@ Frederick, Maryland, United States · Partly cloudy
 Today: 84°F / 63°F · rain 20% · UV 6 · sun 06:24–20:07
 ```
 
+A city whose clocks disagree with the machine's says what time it is there
+on the first line, as `· local time 21:30 (UTC+09:00)`; a city on the same
+clock says nothing about it.
+
 Plain lines on stdout, so a script or a status bar reads it as easily as a
 person does; a reading the provider did not report simply does not appear.
 Set `VIRGA_UNITS=metric` to change what a degree is, here and on the app's
@@ -251,7 +260,15 @@ first frame. Asking about a named city is a question, not a move — the
 remembered city stays whatever it was. And when nothing is remembered yet,
 the one location lookup `virga now` makes is remembered afterwards, so a
 status bar polling by the minute asks the location provider once, not once
-per poll.
+per poll. That is the one place the two disagree: the app re-detects a
+detected location on every launch, and `virga now` never does, so after
+travelling it keeps reporting the old city until the next launch overwrites
+it. A lookup the provider does not answer is remembered too, for a quarter
+of an hour: the report names the fallback city meanwhile, and asks again
+once that has passed. When the app fetched a forecast for the remembered
+city within the last hour, `virga now` answers from it, moved to the current
+hour, without asking the network; a named city always fetches, and
+`VIRGA_CACHE=off` turns this off along with the rest of the cache.
 
 An unknown argument is an error rather than something to skip past. A typo
 would otherwise start the application while the question behind it went
@@ -293,9 +310,10 @@ API conversion independently testable.
 
 ## Engineering Quality
 
-Virga's default locked test suite passes **481 deterministic tests**; four
-provider-dependent live tests — three against Open-Meteo, one against
-GitHub's release redirect — are ignored during normal runs.
+Virga's default locked test suite passes **several hundred deterministic
+tests**; four provider-dependent live tests — two against Open-Meteo, one
+against ipapi.co, one against GitHub's release redirect — are ignored during
+normal runs.
 Coverage includes:
 
 - deterministic rendering checks built with Ratatui's `TestBackend`, including
@@ -466,6 +484,22 @@ That is not bookkeeping for its own sake: release notes are generated from that
 file, and both the release script and CI refuse to publish a version it does not
 describe.
 
+### Manual render check
+
+CI compiles and tests on all three platforms but never looks at a terminal,
+so a change to layout or drawing is checked by eye before it merges, in at
+least one of the terminals named under [Limitations](#limitations):
+
+- Every screen at the floor size, 34×12 and 36×19 for the hourly
+  weathergram, and at a wide one.
+- The hourly weathergram's `┬` under the current hour and `▲` under the
+  selected hour sit beneath their columns at the one-, two-, and three-cell
+  hour widths, and the classic chart's `┬` and `═` match.
+- The `▲`, `┬`, `═`, and box-drawing borders are East Asian ambiguous-width
+  glyphs. In a terminal that draws those two cells wide, such as one set to
+  an East Asian locale, the hourly views' markers still sit under their
+  columns and the week strip's rows still share one axis.
+
 ### Cutting a release
 
 ```bash
@@ -497,9 +531,12 @@ still publishes and only the tap update is skipped, with a warning.
 - Terminals below 34×12 show a size warning instead of the interface. The
   hourly weathergram needs 36 columns and 19 rows above the key bar, and
   shows the same warning below that.
-- “Today” is distinguished by colour alone in the daily chart. The selection
-  is not: every screen marks it by shape as well — a `>` in the forecast
-  table's gutter and a `▲` in the hourly weathergram.
+- “Today” is distinguished by colour alone in the daily chart. The current
+  hour is not: both hourly views hang a `┬` under it, which the selection
+  marker covers while the selection sits there, and the week strip sets it in
+  bold. Nor is the selection: every screen marks it by shape as well — a `>`
+  in the forecast table's gutter and before the week strip's day, and a `▲`
+  in the hourly weathergram.
 - Ghostty and Apple's Terminal app have been tested manually on macOS.
 - Automated tests run on Linux, macOS, and Windows. They do not validate
   real-terminal rendering, font fallback, or held-key behavior.
@@ -512,7 +549,8 @@ Weather, air quality, and geocoding all come from
 Each weather load makes two requests, and each submitted search makes a third.
 `virga now` asks the same questions the same way — two requests per report,
 one more for a named city, and the location lookup only on a first run where
-nothing is remembered.
+nothing is remembered — or none, when the app's last forecast for the city
+is under an hour old.
 
 Location detection is the one thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to
@@ -532,18 +570,22 @@ fetched, so the next launch can open on it. It is read by Virga alone and
 never sent anywhere. `VIRGA_CACHE=off` stops it being written or read.
 
 Checking for a newer release makes one request to GitHub's release-redirect
-endpoint at github.com, carrying nothing but the request itself: no version
+endpoint at github.com, carrying nothing Virga puts there: no version
 string, no identifier. The answer is read from a response header, and no
 release page or file is downloaded. The check runs once per launch in the
 background and whenever you run `virga update`; set `VIRGA_UPDATE=off` and
 the launch-time request is not made at all.
 
+Every request, to any of these hosts, goes out with the HTTP library's own
+default `User-Agent`, which names the library and its version, not Virga.
+
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
 chose it or it was detected — and, if you set them, the name of your startup
-theme (with `virga theme`) and your key bar style (with `,`). Your IP address
-is never written to disk — the resolved city is. It does not store weather
-responses, searches, or history.
+theme (with `virga theme`), your key bar style (with `,`), and the version of
+the last update notice you cleared. Your IP address is never written to disk —
+the resolved city is. It does not store weather responses, searches, or
+history.
 Weather and air-quality requests send the location coordinates to Open-Meteo;
 city searches submit their search text to its geocoder. Open-Meteo's
 free-service logs may retain IP addresses and coordinates for 90 days. See
