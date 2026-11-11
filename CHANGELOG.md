@@ -22,8 +22,8 @@ refuse to publish a version this file does not describe.
   shifted to agree with the forecast's model over the recent days both
   describe. The archive is asked once per place, a large request that
   Open-Meteo counts as several hundred calls, and the result is kept in
-  `normals.json` beside the forecast cache for the eight most recent
-  places. Until the table arrives, with `VIRGA_CACHE=off`, or if the
+  `normals.json` beside the forecast cache for the eight places used most
+  recently. Until the table arrives, with `VIRGA_CACHE=off`, or if the
   request fails, the pane keeps the comparison with the days on screen,
   and a failure is printed on exit.
 

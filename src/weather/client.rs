@@ -312,17 +312,23 @@ fn search_locations_with(
     Ok(locations)
 }
 
-/// The first day of the baseline the normals are taken from. The request
-/// runs from here to `through` in one go, because the days just gone are
-/// what the archive's model is compared with the forecast's over.
-const HISTORY_START: &str = "1991-01-01";
+/// The thirty years the normals are taken from.
+const BASELINE: (&str, &str) = ("1991-01-01", "2020-12-31");
 
-/// The archive's daily highs for a place, from 1991 through `through`.
+/// Days before `through` that are asked for beside the baseline. They are
+/// what the archive's model is compared with the forecast's over, and the
+/// forecast describes fourteen past days, so a month covers them with room
+/// for the archive's newest days being empty.
+const RECENT_DAYS: i64 = 30;
+
+/// The archive's daily highs for a place: the baseline, and the days up to
+/// `through`.
 ///
-/// Thirty-odd years in one response is about a quarter of a megabyte, and
-/// Open-Meteo weighs a request by the weeks it covers, so this one counts
-/// for several hundred calls of the free tier's 10,000 a day. The caller
-/// keeps what it learns on disk and asks once per place.
+/// Open-Meteo weighs a request by the weeks it covers, so the baseline
+/// counts for several hundred calls of the free tier's 10,000 a day. The
+/// years between it and now would add a fifth to that and are used for
+/// nothing, so they are left out and the recent days are a second, small
+/// request. The caller keeps what it learns on disk and asks once per place.
 pub fn fetch_history(lat: f64, lon: f64, through: NaiveDate) -> Result<Vec<(NaiveDate, f64)>> {
     fetch_history_with(agent(), &Endpoints::default(), lat, lon, through)
 }
@@ -334,12 +340,35 @@ fn fetch_history_with(
     lon: f64,
     through: NaiveDate,
 ) -> Result<Vec<(NaiveDate, f64)>> {
+    let day = |date: NaiveDate| date.format("%Y-%m-%d").to_string();
+    let recent_from = through - chrono::TimeDelta::days(RECENT_DAYS);
+
+    let mut highs = fetch_archive_span(agent, endpoints, lat, lon, BASELINE.0, BASELINE.1)?;
+    highs.extend(fetch_archive_span(
+        agent,
+        endpoints,
+        lat,
+        lon,
+        &day(recent_from),
+        &day(through),
+    )?);
+    Ok(highs)
+}
+
+fn fetch_archive_span(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+    start: &str,
+    end: &str,
+) -> Result<Vec<(NaiveDate, f64)>> {
     let mut response = agent
         .get(&endpoints.archive)
         .query("latitude", lat.to_string())
         .query("longitude", lon.to_string())
-        .query("start_date", HISTORY_START)
-        .query("end_date", through.format("%Y-%m-%d").to_string())
+        .query("start_date", start)
+        .query("end_date", end)
         .query("daily", "temperature_2m_max")
         .query("timezone", "auto")
         .call()
@@ -901,8 +930,10 @@ pub(crate) mod tests {
         assert_eq!(value_of(&ensemble, "longitude"), Some("-77.41054"));
     }
 
+    /// Two requests: the thirty baseline years, and the month up to the
+    /// day given. The years between are not asked for.
     #[test]
-    fn the_archive_request_runs_from_the_baseline_to_the_day_given() {
+    fn the_archive_is_asked_for_the_baseline_and_the_recent_days() {
         let (endpoints, log) = serving_recorded(
             "200 OK",
             "application/json",
@@ -914,12 +945,20 @@ pub(crate) mod tests {
         let highs = fetch_history_with(&test_agent(), &endpoints, 39.414_27, -77.410_54, through)
             .expect("a history");
 
-        assert_eq!(highs, [(NaiveDate::from_ymd_opt(1991, 1, 1).unwrap(), 2.5)]);
-        let request = request_with(&log, "start_date", "1991-01-01");
-        assert_eq!(value_of(&request, "end_date"), Some("2026-11-10"));
-        assert_eq!(value_of(&request, "daily"), Some("temperature_2m_max"));
-        assert_eq!(value_of(&request, "timezone"), Some("auto"));
-        assert_eq!(value_of(&request, "latitude"), Some("39.41427"));
+        // The loopback server gives both requests the same day.
+        let first = (NaiveDate::from_ymd_opt(1991, 1, 1).unwrap(), 2.5);
+        assert_eq!(highs, [first, first]);
+        assert_eq!(log.lock().unwrap().len(), 2);
+
+        let baseline = request_with(&log, "start_date", "1991-01-01");
+        assert_eq!(value_of(&baseline, "end_date"), Some("2020-12-31"));
+        assert_eq!(value_of(&baseline, "daily"), Some("temperature_2m_max"));
+        assert_eq!(value_of(&baseline, "timezone"), Some("auto"));
+        assert_eq!(value_of(&baseline, "latitude"), Some("39.41427"));
+
+        let recent = request_with(&log, "end_date", "2026-11-10");
+        assert_eq!(value_of(&recent, "start_date"), Some("2026-10-11"));
+        assert_eq!(value_of(&recent, "daily"), Some("temperature_2m_max"));
     }
 
     #[test]
@@ -1126,8 +1165,10 @@ pub(crate) mod tests {
             // `to_string` is the outermost message alone, and with the host in
             // that layer it is the status that would go missing. This pins
             // why the worker has to print the chain rather than the message.
+            // Looked for by its words and not its number: the loopback
+            // port is in the outermost message and is sometimes 5503x.
             assert!(
-                !error.to_string().contains("503"),
+                !error.to_string().contains("http status"),
                 "{name}: the status is in the chain, not the outermost message"
             );
         }
@@ -1529,17 +1570,14 @@ mod live {
         );
     }
 
-    /// The detection provider is not Open-Meteo and is not covered by anything
-    /// in CI, so a field rename at their end would show up as everyone quietly
-    /// launching in New York. An operational smoke test, not a contract — it
-    /// prints what it resolved so a human can see whether it is plausible.
-    /// The archive's whole span reduces to a table with a summer warmer
-    /// than its winter, at a northern test point.
+    /// Both archive requests against the real service, ending yesterday as
+    /// the app's do, at a northern test point: a summer warmer than its
+    /// winter, and recent days for the forecast to be compared with.
     #[test]
     #[ignore]
     fn real_history_reduces_to_seasonal_normals() {
         use crate::weather::climate::Normals;
-        let through = chrono::Utc::now().date_naive() - chrono::TimeDelta::days(3);
+        let through = chrono::Utc::now().date_naive() - chrono::TimeDelta::days(1);
         let history = fetch_history(52.52, 13.41, through).expect("history");
         let normals = Normals::from_history(&history, &[]);
 
@@ -1552,8 +1590,14 @@ mod live {
 
         assert!(july.mean_c > january.mean_c + 10.0);
         assert!(july.low_c < july.mean_c && july.mean_c < july.high_c);
+        let week_ago = through - chrono::TimeDelta::days(7);
+        assert!(history.iter().filter(|(date, _)| *date >= week_ago).count() >= 3);
     }
 
+    /// The detection provider is not Open-Meteo and is not covered by anything
+    /// in CI, so a field rename at their end would show up as everyone quietly
+    /// launching in New York. An operational smoke test, not a contract — it
+    /// prints what it resolved so a human can see whether it is plausible.
     #[test]
     #[ignore]
     fn real_detection_names_somewhere_plausible() {

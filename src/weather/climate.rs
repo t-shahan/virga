@@ -24,9 +24,10 @@ const MIN_SAMPLES: usize = 150;
 /// Days the forecast and the archive must share before their difference is
 /// believed.
 const MIN_OVERLAP: usize = 3;
-/// The share of history that counts as ordinary. A high outside it is called
-/// unusual.
-const ORDINARY: (f64, f64) = (0.05, 0.95);
+/// The share of history that counts as ordinary: the middle nineteen
+/// twentieths. A high outside it is called unusual, which then happens on
+/// about eighteen days a year and not on one day in ten.
+const ORDINARY: (f64, f64) = (0.025, 0.975);
 
 /// One day of the year at one place, in Celsius, from the archive's own
 /// model and uncorrected.
@@ -35,6 +36,20 @@ struct Row {
     mean_c: f64,
     low_c: f64,
     high_c: f64,
+}
+
+impl Row {
+    /// A row a person edited, or a disk damaged, can still parse. One whose
+    /// bounds are out of order would call a day unusually warm and below
+    /// normal at once, and one far off any thermometer would be printed.
+    fn is_plausible(&self) -> bool {
+        /// Wider than any surface temperature, in Celsius.
+        const BOUND_C: f64 = 150.0;
+        self.low_c <= self.mean_c
+            && self.mean_c <= self.high_c
+            && self.low_c >= -BOUND_C
+            && self.high_c <= BOUND_C
+    }
 }
 
 /// What a date's high usually is, corrected to the forecast's model.
@@ -98,7 +113,9 @@ impl Normals {
     /// Whether this is the shape `for_date` relies on. A table read back
     /// from disk is checked before it is trusted.
     pub fn is_well_formed(&self) -> bool {
-        self.rows.len() == DAYS && self.bias_c.is_finite()
+        self.rows.len() == DAYS
+            && self.bias_c.is_finite()
+            && self.rows.iter().flatten().all(Row::is_plausible)
     }
 }
 
@@ -219,11 +236,14 @@ mod tests {
         assert_eq!(midsummer.mean_c, 15.0);
     }
 
-    /// The ordinary range is the middle of what the date has seen, so a
-    /// single freak year in thirty does not stretch it.
+    /// The ordinary range is the middle of what the date has seen, so one
+    /// freak week in thirty years does not stretch it.
     #[test]
     fn the_ordinary_range_ignores_the_rare_extremes() {
-        let history = baseline(|day| if day.year() == 2003 { 40.0 } else { 20.0 });
+        let is_heatwave = |day: NaiveDate| {
+            day.year() == 2003 && day.month() == 7 && (12..=18).contains(&day.day())
+        };
+        let history = baseline(|day| if is_heatwave(day) { 40.0 } else { 20.0 });
         let normals = Normals::from_history(&history, &[]);
 
         let july = normals.for_date("2026-07-15").expect("a row");

@@ -605,12 +605,13 @@ nothing is remembered — or none, when the app's last forecast for the city
 is under an hour old.
 
 The first time the app loads a place it also asks Open-Meteo's archive once
-for that place's daily highs since 1991. This is by far the largest thing
-Virga asks for: Open-Meteo weighs a request by its span, and thirty-six
-years of one variable counts as several hundred calls against the daily
-allowance. Virga reduces the answer to a table of 366 rows and keeps it in
-`normals.json` in the state directory, for the eight places looked at most
-recently, so a place is asked about once and not once per launch. With
+for that place's daily highs from 1991 to 2020, and in a second, small
+request for the last month. The first is by far the largest thing Virga
+asks for: Open-Meteo weighs a request by its span, and thirty years of one
+variable counts as several hundred calls against the daily allowance. Virga reduces the answer to a table of 366 rows and keeps it in
+`normals.json` in the state directory, for the eight places used most
+recently, so a place is asked about once and not once per launch. A request
+that fails is not repeated until the next launch. With
 `VIRGA_CACHE=off` there is nowhere to keep the table and the request is not
 made. `virga now` never makes it.
 

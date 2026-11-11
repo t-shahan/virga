@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 const VERSION: u8 = 1;
 const FILE: &str = "normals.json";
 /// How many places are kept. A table is some twenty kilobytes, and someone
-/// browsing cities should not grow the file without limit; the place looked
-/// at longest ago goes first.
+/// browsing cities should not grow the file without limit. The place read
+/// or fetched longest ago goes first: `load` moves the place it returns to
+/// the back, so a home city opened every day outlasts eight others looked
+/// at once.
 const MAX_PLACES: usize = 8;
 
 #[derive(Serialize, Deserialize)]
@@ -50,19 +52,33 @@ pub fn path_beside(state: &Path) -> PathBuf {
     state.with_file_name(FILE)
 }
 
-/// The normals kept for `location`, if any.
+/// The normals kept for `location`, if any, marking them the most recently
+/// used.
 ///
 /// `None`, silently, when there is no file, when a newer virga wrote it, and
 /// when it holds nothing well-formed for this place. A file that is there
-/// and cannot be read is an error for the caller to report.
+/// and cannot be read is an error for the caller to report. Failing to mark
+/// the place is not: the table is in hand, and the cost is only its turn in
+/// the eviction order.
 pub fn load(path: &Path, location: &ActiveLocation) -> Result<Option<Normals>> {
-    Ok(read(path)?.and_then(|document| {
-        document
-            .places
-            .into_iter()
-            .find(|place| place.is(location) && place.normals.is_well_formed())
-            .map(|place| place.normals)
-    }))
+    let Some(document) = read(path)? else {
+        return Ok(None);
+    };
+    let found = document
+        .places
+        .iter()
+        .rposition(|place| place.is(location) && place.normals.is_well_formed());
+    let Some(index) = found else {
+        return Ok(None);
+    };
+    let is_newest = index + 1 == document.places.len();
+    let Some(place) = document.places.into_iter().nth(index) else {
+        return Ok(None);
+    };
+    if !is_newest {
+        let _ = save(path, location, &place.normals);
+    }
+    Ok(Some(place.normals))
 }
 
 fn read(path: &Path) -> Result<Option<Document>> {
@@ -87,15 +103,7 @@ fn read(path: &Path) -> Result<Option<Document>> {
 /// can be fetched again, and leaving it would fail every save after.
 pub fn save(path: &Path, location: &ActiveLocation, normals: &Normals) -> Result<()> {
     let _held = state::exclusive(path)?;
-    if let Ok(existing) = std::fs::read(path)
-        && let Ok(envelope) = serde_json::from_slice::<VersionEnvelope>(&existing)
-    {
-        anyhow::ensure!(
-            envelope.version <= VERSION,
-            "the normals file is version {}, written by a newer virga; refusing to overwrite it",
-            envelope.version
-        );
-    }
+    state::ensure_not_newer(path, VERSION, "normals file")?;
     let mut places = read(path)
         .ok()
         .flatten()
@@ -184,6 +192,47 @@ mod tests {
         assert!(load(&path, &place(99.0)).unwrap().is_some());
         let document = read(&path).unwrap().unwrap();
         assert_eq!(document.places.len(), MAX_PLACES);
+    }
+
+    /// Eviction goes by use, not by first fetch: a place read back since
+    /// is newer than one only ever saved.
+    #[test]
+    fn reading_a_place_keeps_it_from_being_the_next_to_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        for i in 0..MAX_PLACES {
+            save(&path, &place(i as f64), &Normals::flat(1.0, 1.0)).unwrap();
+        }
+
+        assert!(load(&path, &place(0.0)).unwrap().is_some());
+        save(&path, &place(99.0), &Normals::flat(3.0, 1.0)).unwrap();
+
+        assert!(load(&path, &place(0.0)).unwrap().is_some(), "home stays");
+        assert_eq!(
+            load(&path, &place(1.0)).unwrap(),
+            None,
+            "the next oldest went"
+        );
+    }
+
+    /// A row that parses and makes no sense is not shown: bounds out of
+    /// order, or a number no thermometer has read.
+    #[test]
+    fn a_table_with_an_implausible_row_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        for row in [
+            serde_json::json!({"mean_c": 10.0, "low_c": 15.0, "high_c": 5.0}),
+            serde_json::json!({"mean_c": 1e300, "low_c": 0.0, "high_c": 1e300}),
+        ] {
+            save(&path, &place(39.0), &Normals::flat(12.0, 5.0)).unwrap();
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            document["places"][0]["normals"]["rows"][40] = row;
+            std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+            assert_eq!(load(&path, &place(39.0)).unwrap(), None);
+        }
     }
 
     #[test]
