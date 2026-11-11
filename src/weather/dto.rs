@@ -453,6 +453,11 @@ pub(super) const ENSEMBLE_FIELD: &str = "temperature_2m";
 /// More runs than any ensemble Open-Meteo serves, and a bound on what a
 /// hostile answer can make every hour sort.
 const MAX_MEMBERS: usize = 128;
+/// Wider than any real disagreement about one hour's temperature. Two
+/// finite runs can still be far enough apart that their difference is not
+/// finite, and a spread like that would flatten the whole silhouette and
+/// then fail to read back from the cache, which writes it as `null`.
+const MAX_SPREAD_C: f64 = 100.0;
 /// Below this an 80% range is two or three runs' opinion. An hour the
 /// ensemble has mostly stopped covering gets no band rather than a thin one.
 const MIN_MEMBERS: usize = 10;
@@ -478,10 +483,10 @@ fn spread_of(mut runs: Vec<f64>) -> Option<TempSpread> {
     }
     runs.sort_by(f64::total_cmp);
     let median = quantile(&runs, 0.5)?;
-    Some(TempSpread {
-        below_c: median - quantile(&runs, 0.1)?,
-        above_c: quantile(&runs, 0.9)? - median,
-    })
+    let below_c = median - quantile(&runs, 0.1)?;
+    let above_c = quantile(&runs, 0.9)? - median;
+    let believable = |distance: f64| (0.0..=MAX_SPREAD_C).contains(&distance);
+    (believable(below_c) && believable(above_c)).then_some(TempSpread { below_c, above_c })
 }
 
 impl From<EnsembleDto> for SpreadReport {
@@ -489,13 +494,19 @@ impl From<EnsembleDto> for SpreadReport {
         let Some(hourly) = dto.hourly else {
             return Self::default();
         };
-        // A series of the wrong shape is one run fewer, not a failed parse.
-        let members: Vec<Vec<Option<f64>>> = hourly
+        // By name before the cap, so which runs a cap keeps does not turn
+        // on a hash map's order. A series of the wrong shape is one run
+        // fewer, not a failed parse.
+        let mut named: Vec<(String, serde_json::Value)> = hourly
             .series
             .into_iter()
             .filter(|(name, _)| is_member(name))
-            .filter_map(|(_, series)| serde_json::from_value(series).ok())
+            .collect();
+        named.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let members: Vec<Vec<Option<f64>>> = named
+            .into_iter()
             .take(MAX_MEMBERS)
+            .filter_map(|(_, series)| serde_json::from_value(series).ok())
             .collect();
 
         let by_hour = hourly
@@ -504,11 +515,7 @@ impl From<EnsembleDto> for SpreadReport {
             .take(MAX_HOURS)
             .enumerate()
             .filter_map(|(i, time)| {
-                let runs = members
-                    .iter()
-                    .filter_map(|member| at(member, i))
-                    .filter(|value| value.is_finite())
-                    .collect();
+                let runs = members.iter().filter_map(|member| at(member, i)).collect();
                 Some((time, spread_of(runs)?))
             })
             .collect();
@@ -1152,6 +1159,37 @@ mod tests {
             !report.by_hour.contains_key("2026-08-09T01:00"),
             "eight runs are not an ensemble"
         );
+    }
+
+    /// serde_json refuses a literal too large for an `f64`, so every run is
+    /// finite, but half the runs at one end of the range and half at the
+    /// other still have a difference that is not.
+    #[test]
+    fn runs_too_far_apart_to_subtract_leave_the_hour_without_a_band() {
+        let mut json = twenty_runs();
+        for run in 1..20 {
+            let extreme = if run < 10 { -1.7e308 } else { 1.7e308 };
+            json["hourly"][format!("{ENSEMBLE_FIELD}_member{run:02}")] =
+                serde_json::json!([extreme, 15.0]);
+        }
+        let report = spread_report(json);
+
+        assert!(!report.by_hour.contains_key("2026-08-09T00:00"));
+        assert!(report.by_hour.contains_key("2026-08-09T01:00"));
+    }
+
+    /// The cap keeps the first runs by name, the same ones every time.
+    #[test]
+    fn runs_beyond_the_cap_are_dropped_by_name() {
+        let mut hourly = serde_json::json!({"time": ["2026-08-09T00:00"]});
+        for run in 1..=MAX_MEMBERS + 40 {
+            let value = if run <= MAX_MEMBERS { 10.0 } else { 90.0 };
+            hourly[format!("{ENSEMBLE_FIELD}_member{run:03}")] = serde_json::json!([value]);
+        }
+        let report = spread_report(serde_json::json!({"hourly": hourly}));
+
+        let spread = report.by_hour["2026-08-09T00:00"];
+        assert_eq!((spread.below_c, spread.above_c), (0.0, 0.0), "no 90 got in");
     }
 
     /// Whatever the block holds, the answer is a report, possibly empty: a
