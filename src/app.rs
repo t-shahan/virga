@@ -215,6 +215,21 @@ pub fn air_quality_warning(error: &str) -> String {
     format!("virga: the forecast loaded without air quality: {error}")
 }
 
+fn spread_warning(error: &str) -> String {
+    format!("virga: the forecast loaded without its confidence band: {error}")
+}
+
+/// One line per supplementary request that failed, for the single warning a
+/// load can leave behind.
+fn load_warning(air_quality_error: Option<&str>, spread_error: Option<&str>) -> Option<String> {
+    let lines: Vec<String> = air_quality_error
+        .map(air_quality_warning)
+        .into_iter()
+        .chain(spread_error.map(spread_warning))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// The weather request in flight: which one it is, the place it is for, and
 /// where that place came from. Refresh and retry aim at the place, so a failed
 /// switch retries the city you asked for rather than the one still on screen —
@@ -524,6 +539,7 @@ impl App {
                 location,
                 weather,
                 air_quality_error,
+                spread_error,
             } => {
                 let Some(Pending { source, .. }) = self.pending.take_if(|p| p.id == id) else {
                     return Outcome::nothing();
@@ -536,7 +552,7 @@ impl App {
                 self.shown = Shown::default();
                 Outcome {
                     remember: self.remembered(),
-                    warning: air_quality_error.as_deref().map(air_quality_warning),
+                    warning: load_warning(air_quality_error.as_deref(), spread_error.as_deref()),
                     ..Outcome::nothing()
                 }
             }
@@ -2105,6 +2121,7 @@ mod tests {
             location,
             weather,
             air_quality_error: None,
+            spread_error: None,
         })
         .remember
     }
@@ -2282,11 +2299,29 @@ mod tests {
             location,
             weather: Weather::fixture(5, 2),
             air_quality_error: Some("http status: 503".to_string()),
+            spread_error: None,
         });
         assert!(matches!(app.weather, Fetch::Ready(_)));
         let warning = outcome.warning.expect("the reason reaches the user");
         assert!(warning.contains("air quality"), "{warning:?}");
         assert!(warning.contains("http status: 503"), "{warning:?}");
+    }
+
+    /// Both supplementary requests can fail on one load, and the single
+    /// warning a load leaves has to name each.
+    #[test]
+    fn each_missing_supplement_gets_its_own_line_of_the_warning() {
+        assert_eq!(load_warning(None, None), None);
+
+        let band = load_warning(None, Some("http status: 503")).expect("a reason");
+        assert!(
+            band.contains("confidence band") && band.contains("503"),
+            "{band}"
+        );
+
+        let both = load_warning(Some("timed out"), Some("http status: 503")).expect("reasons");
+        assert_eq!(both.lines().count(), 2, "{both}");
+        assert!(both.contains("air quality") && both.contains("confidence band"));
     }
 
     #[test]
@@ -2301,6 +2336,7 @@ mod tests {
             location,
             weather: Weather::fixture(5, 2),
             air_quality_error: None,
+            spread_error: None,
         });
         assert!(outcome.warning.is_none());
     }
@@ -2749,6 +2785,7 @@ mod tests {
             location,
             weather: Weather::fixture(5, 2),
             air_quality_error: None,
+            spread_error: None,
         });
 
         assert!(

@@ -1,4 +1,6 @@
 use crate::weather::dto::AqiDto;
+use crate::weather::dto::ENSEMBLE_FIELD;
+use crate::weather::dto::EnsembleDto;
 use crate::weather::dto::ForecastDto;
 use crate::weather::dto::GeoIpDto;
 use crate::weather::dto::GeocodeDto;
@@ -6,6 +8,7 @@ use crate::weather::dto::GeocodeResultDto;
 use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
 use crate::weather::model::NOWCAST_QUARTERS;
+use crate::weather::model::SpreadReport;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -101,6 +104,7 @@ pub struct Endpoints {
     pub forecast: String,
     pub geocode: String,
     pub air_quality: String,
+    pub ensemble: String,
     /// The one host here that is not Open-Meteo. HTTPS and no API key, because
     /// the request's only identifying content is the connection's own source
     /// address and it should not cross the network in the clear.
@@ -113,6 +117,7 @@ impl Default for Endpoints {
             forecast: "https://api.open-meteo.com/v1/forecast".to_string(),
             geocode: "https://geocoding-api.open-meteo.com/v1/search".to_string(),
             air_quality: "https://air-quality-api.open-meteo.com/v1/air-quality".to_string(),
+            ensemble: "https://ensemble-api.open-meteo.com/v1/ensemble".to_string(),
             geoip: "https://ipapi.co/json/".to_string(),
         }
     }
@@ -156,10 +161,24 @@ fn detect_location_with(agent: &Agent, endpoints: &Endpoints) -> Result<Location
 pub struct Forecast {
     pub weather: Weather,
     pub air_quality_error: Option<String>,
+    /// The same rule for the ensemble's spread: supplementary, and a
+    /// weathergram with no band looks the same whether the runs agree or
+    /// the endpoint is down.
+    pub spread_error: Option<String>,
 }
 
-pub fn fetch_forecast(lat: f64, lon: f64) -> Result<Forecast> {
-    fetch_forecast_with(agent(), &Endpoints::default(), lat, lon)
+/// How much of a forecast the caller has somewhere to show.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Detail {
+    /// Everything the interface draws.
+    Full,
+    /// What `virga now` prints. It has no weathergram, so the ensemble
+    /// request, the largest of the three, is not made for it.
+    Report,
+}
+
+pub fn fetch_forecast(lat: f64, lon: f64, detail: Detail) -> Result<Forecast> {
+    fetch_forecast_with(agent(), &Endpoints::default(), lat, lon, detail)
 }
 
 fn fetch_forecast_with(
@@ -167,6 +186,7 @@ fn fetch_forecast_with(
     endpoints: &Endpoints,
     lat: f64,
     lon: f64,
+    detail: Detail,
 ) -> Result<Forecast> {
     // A scoped thread rather than a detached one. The rule this encodes was
     // already here in prose: `?` on the forecast while air quality was still
@@ -175,25 +195,35 @@ fn fetch_forecast_with(
     // so the borrow checker now enforces what the comment used to ask for.
     thread::scope(|scope| {
         let aqi = scope.spawn(|| fetch_air_quality_with(agent, endpoints, lat, lon));
+        let ensemble = (detail == Detail::Full)
+            .then(|| scope.spawn(|| fetch_spread_with(agent, endpoints, lat, lon)));
         let forecast = fetch_daily_with(agent, endpoints, lat, lon);
 
-        let (report, air_quality_error) = air_quality_outcome(aqi.join());
+        let (report, air_quality_error) = supplement_outcome(aqi.join(), "air-quality");
+        let (spread, spread_error) = match ensemble {
+            Some(ensemble) => supplement_outcome(ensemble.join(), "ensemble"),
+            None => (SpreadReport::default(), None),
+        };
 
         let mut weather = forecast?;
         weather.air_quality = report.current;
         for day in &mut weather.daily {
             day.aqi = report.daily_max.get(&day.date).copied();
         }
+        for hour in &mut weather.hourly {
+            hour.spread = spread.by_hour.get(&hour.time).copied();
+        }
 
         Ok(Forecast {
             weather,
             air_quality_error,
+            spread_error,
         })
     })
 }
 
-/// The air-quality thread's result as a report, and the reason it is empty
-/// when that is a failure rather than a gap in coverage.
+/// A supplementary request's thread result as a report, and the reason it
+/// is empty when that is a failure rather than a gap in coverage.
 ///
 /// A panic in the thread is a bug rather than a network condition, and it
 /// degrades like one. Re-raising it would not take the terminal down:
@@ -201,16 +231,14 @@ fn fetch_forecast_with(
 /// the time `join` returns `Err`. It would kill the worker thread, after
 /// which no request is ever answered and the app sits on "fetching" with no
 /// way back. The payload is not repeated because the hook has printed it.
-fn air_quality_outcome(
-    joined: thread::Result<Result<AirQualityReport>>,
-) -> (AirQualityReport, Option<String>) {
+fn supplement_outcome<T: Default>(
+    joined: thread::Result<Result<T>>,
+    name: &str,
+) -> (T, Option<String>) {
     match joined {
         Ok(Ok(report)) => (report, None),
-        Ok(Err(error)) => (AirQualityReport::default(), Some(format!("{error:#}"))),
-        Err(_) => (
-            AirQualityReport::default(),
-            Some("the air-quality request panicked".to_string()),
-        ),
+        Ok(Err(error)) => (T::default(), Some(format!("{error:#}"))),
+        Err(_) => (T::default(), Some(format!("the {name} request panicked"))),
     }
 }
 
@@ -278,6 +306,36 @@ fn search_locations_with(
     // bottom.
     locations.sort_by_key(|location| Reverse(location.population.unwrap_or(0)));
     Ok(locations)
+}
+
+/// The model whose runs are asked for. ECMWF's ensemble covers the globe and
+/// has the most members of those Open-Meteo serves, 51.
+const ENSEMBLE_MODEL: &str = "ecmwf_ifs025";
+
+/// How far the ensemble's runs disagree about each hour's temperature. Like
+/// air quality, fetched only beside a forecast, with that request's
+/// coordinates, horizon and local time, so its hours carry the forecast's
+/// own timestamps.
+fn fetch_spread_with(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+) -> Result<SpreadReport> {
+    let mut response = agent
+        .get(&endpoints.ensemble)
+        .query("latitude", lat.to_string())
+        .query("longitude", lon.to_string())
+        .query("hourly", ENSEMBLE_FIELD)
+        .query("models", ENSEMBLE_MODEL)
+        .query("timezone", "auto")
+        .query("forecast_days", "8")
+        .call()
+        .with_context(|| service_at("ensemble service", &endpoints.ensemble))?;
+
+    let dto: EnsembleDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("ensemble service", &endpoints.ensemble))?;
+    Ok(dto.into())
 }
 
 /// Air quality is only ever fetched as part of a forecast — it shares that
@@ -407,9 +465,17 @@ pub(crate) mod tests {
             "application/json",
             include_str!("../../tests/fixtures/forecast.json"),
         );
-        fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54).expect("a forecast");
+        fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        )
+        .expect("a forecast");
 
-        let forecast = request_with(&log, "forecast_days", "8");
+        let forecast = request_with(&log, "forecast_minutely_15", "8");
+        assert_eq!(value_of(&forecast, "forecast_days"), Some("8"));
         assert_eq!(value_of(&forecast, "past_days"), Some("14"));
         assert_eq!(value_of(&forecast, "timezone"), Some("auto"));
         assert_eq!(value_of(&forecast, "latitude"), Some("39.41427"));
@@ -450,7 +516,14 @@ pub(crate) mod tests {
             "application/json",
             include_str!("../../tests/fixtures/forecast.json"),
         );
-        fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54).expect("a forecast");
+        fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        )
+        .expect("a forecast");
 
         let aqi = request_with(&log, "domains", "cams_global");
         assert_eq!(value_of(&aqi, "current"), Some("us_aqi"));
@@ -578,6 +651,7 @@ pub(crate) mod tests {
             forecast: base.clone(),
             geocode: base.clone(),
             air_quality: base.clone(),
+            ensemble: base.clone(),
             geoip: base,
         };
         (endpoints, hits, log)
@@ -689,7 +763,7 @@ pub(crate) mod tests {
         lat: f64,
         lon: f64,
     ) -> Result<Forecast> {
-        fetch_forecast_with(&test_agent(), endpoints, lat, lon)
+        fetch_forecast_with(&test_agent(), endpoints, lat, lon, Detail::Report)
     }
 
     const CAPTIVE_PORTAL: &str =
@@ -698,7 +772,13 @@ pub(crate) mod tests {
     #[test]
     fn a_server_error_is_not_mistaken_for_a_forecast() {
         let endpoints = serving("500 Internal Server Error", "text/plain", "upstream down");
-        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+        let result = fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        );
 
         assert!(result.is_err(), "a 500 must not read as weather");
     }
@@ -706,7 +786,13 @@ pub(crate) mod tests {
     #[test]
     fn a_captive_portal_answering_200_is_not_read_as_weather() {
         let endpoints = serving("200 OK", "text/html", CAPTIVE_PORTAL);
-        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+        let result = fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        );
 
         assert!(
             result.is_err(),
@@ -720,7 +806,13 @@ pub(crate) mod tests {
     #[test]
     fn a_forecast_missing_its_required_blocks_fails_rather_than_emptying_the_screen() {
         let endpoints = serving("200 OK", "application/json", "{}");
-        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+        let result = fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        );
 
         assert!(result.is_err(), "an empty object is not a forecast");
     }
@@ -728,9 +820,122 @@ pub(crate) mod tests {
     #[test]
     fn a_truncated_body_fails_rather_than_parsing_to_nothing() {
         let endpoints = serving("200 OK", "application/json", "{\"current\":{\"tem");
-        let result = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54);
+        let result = fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        );
 
         assert!(result.is_err(), "half a document is not a forecast");
+    }
+
+    /// The ensemble's hours are matched to the forecast's by timestamp, so
+    /// it has to be asked for the same place, horizon and local time, and
+    /// for the one variable the band is drawn from.
+    #[test]
+    fn the_ensemble_request_shares_the_forecasts_place_and_horizon() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        )
+        .expect("a forecast");
+
+        let ensemble = request_with(&log, "models", ENSEMBLE_MODEL);
+        assert_eq!(value_of(&ensemble, "hourly"), Some("temperature_2m"));
+        assert_eq!(value_of(&ensemble, "forecast_days"), Some("8"));
+        assert_eq!(value_of(&ensemble, "timezone"), Some("auto"));
+        assert_eq!(value_of(&ensemble, "latitude"), Some("39.41427"));
+        assert_eq!(value_of(&ensemble, "longitude"), Some("-77.41054"));
+    }
+
+    /// `virga now` has nowhere to draw a band, and a status bar polling it
+    /// should not pay for the largest of the three responses.
+    #[test]
+    fn a_report_does_not_ask_for_the_ensemble() {
+        let (endpoints, hits) = serving_counted(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/forecast.json"),
+        );
+        let fetched = fetch_forecast_with(&test_agent(), &endpoints, 39.4, -77.4, Detail::Report)
+            .expect("a forecast");
+
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "forecast and air quality");
+        assert!(fetched.spread_error.is_none());
+    }
+
+    /// A forecast whose hours are the ensemble fixture's first morning.
+    const MORNING: &str = r#"{
+        "current": {"time": "2026-11-11T06:00"},
+        "daily": {"time": ["2026-11-11"], "weather_code": [0],
+                  "temperature_2m_max": [6.0], "temperature_2m_min": [1.0]},
+        "hourly": {"time": ["2026-11-11T05:00", "2026-11-11T06:00"],
+                   "temperature_2m": [1.5, 1.8]}
+    }"#;
+
+    #[test]
+    fn the_spread_lands_on_the_hours_the_ensemble_covered() {
+        let forecast = serving("200 OK", "application/json", MORNING);
+        let ensemble = serving(
+            "200 OK",
+            "application/json",
+            include_str!("../../tests/fixtures/ensemble.json"),
+        );
+        let endpoints = Endpoints {
+            ensemble: ensemble.ensemble,
+            ..forecast
+        };
+
+        let fetched = fetch_forecast_with(&test_agent(), &endpoints, 52.52, 13.41, Detail::Full)
+            .expect("a forecast");
+
+        assert!(fetched.spread_error.is_none());
+        let hours = &fetched.weather.hourly;
+        // The fixture is thinned to every sixth hour, so 05:00 is a gap.
+        assert!(hours[0].spread.is_none());
+        let (low, high) = hours[1].likely_range_c().expect("06:00 is covered");
+        assert!(
+            low <= 1.8 && 1.8 <= high && high - low < 2.5,
+            "{low}..{high}"
+        );
+    }
+
+    /// The same rule as air quality: the band is supplementary, so a dead
+    /// ensemble endpoint costs the band and says why.
+    #[test]
+    fn the_ensemble_failing_does_not_cost_the_forecast() {
+        let good = serving("200 OK", "application/json", MORNING);
+        let broken = serving("503 Service Unavailable", "text/plain", "no runs today");
+        let endpoints = Endpoints {
+            ensemble: broken.ensemble,
+            ..good
+        };
+
+        let fetched = fetch_forecast_with(&test_agent(), &endpoints, 52.52, 13.41, Detail::Full)
+            .expect("a dead ensemble endpoint must not fail the forecast");
+
+        assert!(
+            fetched
+                .weather
+                .hourly
+                .iter()
+                .all(|hour| hour.spread.is_none())
+        );
+        let reason = fetched.spread_error.expect("a 503 is a reason");
+        assert!(
+            reason.contains("503") && reason.contains(&endpoints.ensemble),
+            "{reason:?}"
+        );
     }
 
     /// The degradation rule, exercised rather than asserted: air quality is
@@ -751,8 +956,15 @@ pub(crate) mod tests {
         let Forecast {
             weather,
             air_quality_error,
-        } = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
-            .expect("a dead air-quality endpoint must not fail the forecast");
+            ..
+        } = fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        )
+        .expect("a dead air-quality endpoint must not fail the forecast");
 
         assert!(!weather.daily.is_empty(), "the forecast still arrived");
         assert!(
@@ -781,8 +993,14 @@ pub(crate) mod tests {
             include_str!("../../tests/fixtures/forecast.json"),
         );
 
-        let fetched = fetch_forecast_with(&test_agent(), &endpoints, 39.414_27, -77.410_54)
-            .expect("a forecast");
+        let fetched = fetch_forecast_with(
+            &test_agent(),
+            &endpoints,
+            39.414_27,
+            -77.410_54,
+            Detail::Full,
+        )
+        .expect("a forecast");
 
         assert!(fetched.air_quality_error.is_none());
     }
@@ -791,7 +1009,8 @@ pub(crate) mod tests {
     /// way a failed request does, rather than taking the worker down with it.
     #[test]
     fn a_panicked_air_quality_request_is_a_reason_not_a_crash() {
-        let (report, reason) = air_quality_outcome(Err(Box::new("boom")));
+        let (report, reason): (AirQualityReport, _) =
+            supplement_outcome(Err(Box::new("boom")), "air-quality");
 
         assert!(report.current.is_none() && report.daily_max.is_empty());
         assert_eq!(reason.as_deref(), Some("the air-quality request panicked"));
@@ -805,7 +1024,7 @@ pub(crate) mod tests {
         let endpoints = serving("503 Service Unavailable", "text/plain", "upstream down");
         let agent = test_agent();
 
-        let forecast = fetch_forecast_with(&agent, &endpoints, 39.414_27, -77.410_54)
+        let forecast = fetch_forecast_with(&agent, &endpoints, 39.414_27, -77.410_54, Detail::Full)
             .err()
             .expect("a 503 is not a forecast");
         let detection = detect_location_with(&agent, &endpoints)
@@ -1212,7 +1431,9 @@ mod live {
     #[test]
     #[ignore]
     fn real_fetch_carries_per_day_air_quality() {
-        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch").weather;
+        let weather = fetch_forecast(39.41427, -77.41054, Detail::Full)
+            .expect("fetch")
+            .weather;
         let covered = weather.daily.iter().filter(|d| d.aqi.is_some()).count();
 
         println!(
@@ -1260,7 +1481,9 @@ mod live {
     #[test]
     #[ignore]
     fn real_fetch_carries_a_populated_hourly_series() {
-        let weather = fetch_forecast(39.41427, -77.41054).expect("fetch").weather;
+        let weather = fetch_forecast(39.41427, -77.41054, Detail::Full)
+            .expect("fetch")
+            .weather;
         let forward = weather.forecast_hours();
 
         println!(

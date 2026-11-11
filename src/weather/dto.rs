@@ -1,6 +1,6 @@
 use crate::weather::model::{
     AirQuality, AirQualityReport, Current, DailyForecast, HourlyForecast, Location,
-    NOWCAST_QUARTERS, QuarterHour, Weather,
+    NOWCAST_QUARTERS, QuarterHour, SpreadReport, TempSpread, Weather,
 };
 use chrono::Local;
 use serde::Deserialize;
@@ -332,6 +332,7 @@ fn hourly_from(hour: &HourlyDto) -> Vec<HourlyForecast> {
                 wind_kph: at(&hour.wind_speed_10m, i),
                 gust_kph: at(&hour.wind_gusts_10m, i),
                 wind_dir_deg: at(&hour.wind_direction_10m, i),
+                spread: None,
             })
         })
         .collect()
@@ -428,6 +429,97 @@ impl From<AqiDto> for AirQualityReport {
         }
 
         Self { current, daily_max }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnsembleDto {
+    #[serde(default)]
+    pub hourly: Option<EnsembleHourlyDto>,
+}
+
+/// The ensemble's hourly block names one series per run: the control under
+/// the variable's own name and each member under a numbered suffix. How many
+/// there are is the model's business, so they are taken as they come.
+#[derive(Debug, Deserialize)]
+pub struct EnsembleHourlyDto {
+    #[serde(default)]
+    pub time: Vec<String>,
+    #[serde(flatten)]
+    pub series: HashMap<String, serde_json::Value>,
+}
+
+pub(super) const ENSEMBLE_FIELD: &str = "temperature_2m";
+/// More runs than any ensemble Open-Meteo serves, and a bound on what a
+/// hostile answer can make every hour sort.
+const MAX_MEMBERS: usize = 128;
+/// Wider than any real disagreement about one hour's temperature. Two
+/// finite runs can still be far enough apart that their difference is not
+/// finite, and a spread like that would flatten the whole silhouette and
+/// then fail to read back from the cache, which writes it as `null`.
+const MAX_SPREAD_C: f64 = 100.0;
+/// Below this an 80% range is two or three runs' opinion. An hour the
+/// ensemble has mostly stopped covering gets no band rather than a thin one.
+const MIN_MEMBERS: usize = 10;
+
+fn is_member(name: &str) -> bool {
+    name.strip_prefix(ENSEMBLE_FIELD)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("_member"))
+}
+
+/// The value `fraction` of the way through `sorted`, interpolating between
+/// neighbours. `None` for an empty slice.
+fn quantile(sorted: &[f64], fraction: f64) -> Option<f64> {
+    let last = sorted.len().checked_sub(1)?;
+    let position = fraction.clamp(0.0, 1.0) * last as f64;
+    let below = *sorted.get(position.floor() as usize)?;
+    let above = *sorted.get(position.ceil() as usize)?;
+    Some(below + (above - below) * position.fract())
+}
+
+fn spread_of(mut runs: Vec<f64>) -> Option<TempSpread> {
+    if runs.len() < MIN_MEMBERS {
+        return None;
+    }
+    runs.sort_by(f64::total_cmp);
+    let median = quantile(&runs, 0.5)?;
+    let below_c = median - quantile(&runs, 0.1)?;
+    let above_c = quantile(&runs, 0.9)? - median;
+    let believable = |distance: f64| (0.0..=MAX_SPREAD_C).contains(&distance);
+    (believable(below_c) && believable(above_c)).then_some(TempSpread { below_c, above_c })
+}
+
+impl From<EnsembleDto> for SpreadReport {
+    fn from(dto: EnsembleDto) -> Self {
+        let Some(hourly) = dto.hourly else {
+            return Self::default();
+        };
+        // By name before the cap, so which runs a cap keeps does not turn
+        // on a hash map's order. A series of the wrong shape is one run
+        // fewer, not a failed parse.
+        let mut named: Vec<(String, serde_json::Value)> = hourly
+            .series
+            .into_iter()
+            .filter(|(name, _)| is_member(name))
+            .collect();
+        named.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let members: Vec<Vec<Option<f64>>> = named
+            .into_iter()
+            .take(MAX_MEMBERS)
+            .filter_map(|(_, series)| serde_json::from_value(series).ok())
+            .collect();
+
+        let by_hour = hourly
+            .time
+            .into_iter()
+            .take(MAX_HOURS)
+            .enumerate()
+            .filter_map(|(i, time)| {
+                let runs = members.iter().filter_map(|member| at(member, i)).collect();
+                Some((time, spread_of(runs)?))
+            })
+            .collect();
+        Self { by_hour }
     }
 }
 
@@ -999,6 +1091,134 @@ mod tests {
         each_field_is_read_by::<HourlyDto>(
             HOURLY_FIELDS,
             serde_json::json!({"time": ["2026-08-09T00:00"]}),
+        );
+    }
+
+    fn spread_report(json: serde_json::Value) -> SpreadReport {
+        serde_json::from_value::<EnsembleDto>(json)
+            .expect("an ensemble answer should parse")
+            .into()
+    }
+
+    /// Twenty runs an even degree apart, so the quantiles can be read off.
+    fn twenty_runs() -> serde_json::Value {
+        let mut hourly = serde_json::json!({"time": ["2026-08-09T00:00", "2026-08-09T01:00"]});
+        for run in 0..20 {
+            let name = match run {
+                0 => ENSEMBLE_FIELD.to_string(),
+                run => format!("{ENSEMBLE_FIELD}_member{run:02}"),
+            };
+            hourly[name] = serde_json::json!([10.0 + f64::from(run), 15.0]);
+        }
+        serde_json::json!({"hourly": hourly})
+    }
+
+    #[test]
+    fn the_spread_is_the_middle_of_the_runs_measured_from_their_median() {
+        let report = spread_report(twenty_runs());
+
+        // Runs at 10..=29: the median is 19.5, a tenth of the way in is 11.9
+        // and nine tenths is 27.1.
+        let wide = report.by_hour["2026-08-09T00:00"];
+        assert!((wide.below_c - 7.6).abs() < 1e-9, "{wide:?}");
+        assert!((wide.above_c - 7.6).abs() < 1e-9, "{wide:?}");
+
+        let agreed = report.by_hour["2026-08-09T01:00"];
+        assert_eq!((agreed.below_c, agreed.above_c), (0.0, 0.0));
+    }
+
+    /// Recorded from Berlin with ECMWF's 51 runs and thinned to every sixth
+    /// hour: the runs agree to a degree or two on the first morning and
+    /// disagree by ten a week out.
+    #[test]
+    fn a_recorded_ensemble_widens_with_the_horizon() {
+        let json = include_str!("../../tests/fixtures/ensemble.json");
+        let report: SpreadReport = serde_json::from_str::<EnsembleDto>(json)
+            .expect("fixture should parse")
+            .into();
+        let width = |time: &str| {
+            let spread = report.by_hour[time];
+            spread.below_c + spread.above_c
+        };
+
+        assert_eq!(report.by_hour.len(), 32);
+        assert!(width("2026-11-11T06:00") < 2.5);
+        assert!(width("2026-11-18T00:00") > 5.0);
+    }
+
+    #[test]
+    fn nulls_and_too_few_runs_leave_an_hour_without_a_band() {
+        let mut json = twenty_runs();
+        for run in 1..=12 {
+            json["hourly"][format!("{ENSEMBLE_FIELD}_member{run:02}")][1] = serde_json::json!(null);
+        }
+        let report = spread_report(json);
+
+        assert!(report.by_hour.contains_key("2026-08-09T00:00"));
+        assert!(
+            !report.by_hour.contains_key("2026-08-09T01:00"),
+            "eight runs are not an ensemble"
+        );
+    }
+
+    /// serde_json refuses a literal too large for an `f64`, so every run is
+    /// finite, but half the runs at one end of the range and half at the
+    /// other still have a difference that is not.
+    #[test]
+    fn runs_too_far_apart_to_subtract_leave_the_hour_without_a_band() {
+        let mut json = twenty_runs();
+        for run in 1..20 {
+            let extreme = if run < 10 { -1.7e308 } else { 1.7e308 };
+            json["hourly"][format!("{ENSEMBLE_FIELD}_member{run:02}")] =
+                serde_json::json!([extreme, 15.0]);
+        }
+        let report = spread_report(json);
+
+        assert!(!report.by_hour.contains_key("2026-08-09T00:00"));
+        assert!(report.by_hour.contains_key("2026-08-09T01:00"));
+    }
+
+    /// The cap keeps the first runs by name, the same ones every time.
+    #[test]
+    fn runs_beyond_the_cap_are_dropped_by_name() {
+        let mut hourly = serde_json::json!({"time": ["2026-08-09T00:00"]});
+        for run in 1..=MAX_MEMBERS + 40 {
+            let value = if run <= MAX_MEMBERS { 10.0 } else { 90.0 };
+            hourly[format!("{ENSEMBLE_FIELD}_member{run:03}")] = serde_json::json!([value]);
+        }
+        let report = spread_report(serde_json::json!({"hourly": hourly}));
+
+        let spread = report.by_hour["2026-08-09T00:00"];
+        assert_eq!((spread.below_c, spread.above_c), (0.0, 0.0), "no 90 got in");
+    }
+
+    /// Whatever the block holds, the answer is a report, possibly empty: a
+    /// run of the wrong shape, a series for another variable, short arrays,
+    /// no block at all.
+    #[test]
+    fn a_malformed_ensemble_is_an_empty_report_not_a_panic() {
+        for json in [
+            serde_json::json!({}),
+            serde_json::json!({"hourly": null}),
+            serde_json::json!({"hourly": {}}),
+            serde_json::json!({"hourly": {"time": ["2026-08-09T00:00"]}}),
+            serde_json::json!({"hourly": {"temperature_2m": [1.0]}}),
+            serde_json::json!({"hourly": {"time": ["2026-08-09T00:00"], "temperature_2m": "warm"}}),
+        ] {
+            assert!(spread_report(json.clone()).by_hour.is_empty(), "{json}");
+        }
+
+        let mut json = twenty_runs();
+        json["hourly"]["temperature_2m_member03"] = serde_json::json!("warm");
+        json["hourly"]["temperature_2m_member04"] = serde_json::json!([]);
+        json["hourly"]["temperature_2m_max_member05"] = serde_json::json!([99.0, 99.0]);
+        json["hourly"]["wind_speed_10m"] = serde_json::json!([99.0, 99.0]);
+        let report = spread_report(json);
+        let spread = report.by_hour["2026-08-09T01:00"];
+        assert_eq!(
+            (spread.below_c, spread.above_c),
+            (0.0, 0.0),
+            "99 was not a run"
         );
     }
 

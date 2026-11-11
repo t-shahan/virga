@@ -157,7 +157,13 @@ fn main() -> Result<()> {
                 cache_path.as_deref(),
                 &location,
                 chrono::Local::now(),
-                || weather::client::fetch_forecast(location.lat, location.lon),
+                || {
+                    weather::client::fetch_forecast(
+                        location.lat,
+                        location.lon,
+                        weather::client::Detail::Report,
+                    )
+                },
             ) {
                 Ok((weather, air_quality_warning)) => {
                     // Stderr, so a status bar parsing stdout still gets its
@@ -1316,6 +1322,7 @@ mod tests {
             location,
             weather: Weather::fixture(5, 2),
             air_quality_error: None,
+            spread_error: None,
         }
     }
 

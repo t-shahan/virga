@@ -109,6 +109,20 @@ fn temperature_range(hours: &[HourlyForecast]) -> Option<(f64, f64)> {
     }))
 }
 
+/// The extremes the silhouette is scaled between: the visible temperatures,
+/// with the ceiling raised to the top of any hour's likely range so its cap
+/// has rows to stand in. The floor stays the forecast's, because nothing is
+/// drawn below a forecast. The summary beside the track states the forecast
+/// alone and keeps `temperature_range`.
+fn plot_range(hours: &[HourlyForecast]) -> Option<(f64, f64)> {
+    let (min, max) = temperature_range(hours)?;
+    let ceiling = hours
+        .iter()
+        .filter_map(HourlyForecast::likely_range_c)
+        .fold(max, |ceiling, (_, high)| ceiling.max(high));
+    Some((min, ceiling))
+}
+
 /// Column height in eighths for the silhouette, `1..=32` between the visible
 /// extremes. The coldest visible hour keeps one line of ink, so a present
 /// reading is never confused with a missing one, and a flat window stands at
@@ -150,9 +164,30 @@ fn band_glyph(height: u16, rows_above_floor: u16) -> Option<&'static str> {
 
 /// One bottom-anchored column of a band.
 fn band_render(frame: &mut Frame, x: u16, top_y: u16, rows: u16, height: u16, style: Style) {
+    capped_band_render(frame, x, top_y, rows, height, height, style);
+}
+
+/// A column that is forecast up to `height` and possible up to `reach`. The
+/// forecast draws exactly as it does alone, and the rows above the one its
+/// surface is in are dimmed up to `reach`. A cell holds one glyph, so doubt
+/// that ends inside the surface's own row draws nothing, which is what keeps
+/// a confident day's outline crisp.
+fn capped_band_render(
+    frame: &mut Frame,
+    x: u16,
+    top_y: u16,
+    rows: u16,
+    height: u16,
+    reach: u16,
+    style: Style,
+) {
     for above_floor in 0..rows {
-        let Some(glyph) = band_glyph(height, above_floor) else {
-            continue;
+        let (glyph, style) = match band_glyph(height, above_floor) {
+            Some(glyph) => (glyph, style),
+            None => match band_glyph(reach, above_floor) {
+                Some(glyph) => (glyph, style.add_modifier(Modifier::DIM)),
+                None => continue,
+            },
         };
         put_styled(frame, x, top_y + (rows - 1 - above_floor), glyph, style);
     }
@@ -194,6 +229,16 @@ fn temperature_summary(hours: &[HourlyForecast], unit: Unit) -> String {
         return format!("{low:.0}{}", unit.temp_symbol());
     }
     format!("{low:.0}–{high:.0}{}", unit.temp_symbol())
+}
+
+/// The range most ensemble runs give the selected hour, under the selection
+/// marker's own glyph so the figure reads as that hour's and not the page's.
+/// Nothing when the runs agree to the degree: a band nobody can see needs
+/// no caption.
+fn likely_summary(hour: &HourlyForecast, unit: Unit) -> Option<String> {
+    let (low, high) = hour.likely_range_c()?;
+    let (low, high) = (unit.temp_rounded(low), unit.temp_rounded(high));
+    (low != high).then(|| format!("{SELECTED_MARKER} {low:.0}–{high:.0}{}", unit.temp_symbol()))
 }
 
 /// The visible window, like the temperature and wind summaries beside it.
@@ -338,8 +383,22 @@ fn full_tracks_render(
 ) {
     let window = plot.window;
     labels_render(frame, plot, visible, palette, unit);
+    let likely = selected
+        .checked_sub(window.start)
+        .and_then(|offset| visible.get(offset))
+        .and_then(|hour| likely_summary(hour, unit));
+    if let Some(likely) = likely {
+        put_right(
+            frame,
+            plot.summary_x,
+            plot.y + TEMP_ROW + TEMP_ROWS - 1,
+            SUMMARY_WIDTH,
+            &likely,
+            palette.selection,
+        );
+    }
 
-    let range = temperature_range(visible);
+    let range = plot_range(visible);
     for (offset, hour) in visible.iter().enumerate() {
         let column = Column {
             offset,
@@ -482,15 +541,22 @@ fn temperature_render(
     let Some(height) = temperature_eighths(hour.temp_c, range) else {
         return;
     };
+    // Without a spread the reach is the forecast's own height and the
+    // column draws as it always has.
+    let reach = hour
+        .likely_range_c()
+        .and_then(|(_, high)| temperature_eighths(Some(high), range))
+        .map_or(height, |reach| reach.max(height));
     let style = Style::new().fg(column.state_colour.unwrap_or(palette.accent));
     let x0 = plot.column_x(column.offset);
     for cell in 0..plot.window.cell_width {
-        band_render(
+        capped_band_render(
             frame,
             x0 + cell,
             plot.y + TEMP_ROW,
             TEMP_ROWS,
             height,
+            reach,
             style,
         );
     }
@@ -638,6 +704,176 @@ mod tests {
         assert_eq!(rain_sixteenths(Some(50)), Some(8));
         assert_eq!(rain_sixteenths(Some(69)), Some(11));
         assert_eq!(rain_sixteenths(Some(100)), Some(16));
+    }
+
+    /// A page of flat 20°C hours, with hour five at 25°C and its runs
+    /// reaching five degrees above it and none below.
+    fn one_doubtful_hour() -> Weather {
+        use crate::weather::model::TempSpread;
+
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.temp_c = Some(20.0);
+        }
+        weather.hourly[now + 5].temp_c = Some(25.0);
+        weather.hourly[now + 5].spread = Some(TempSpread {
+            below_c: 0.0,
+            above_c: 5.0,
+        });
+        weather
+    }
+
+    fn drawn(weather: &Weather, width: u16, selected: usize) -> Buffer {
+        rendered_buffer_in(
+            weather,
+            width,
+            FULL_ROWS,
+            selected,
+            Theme::default().palette(),
+            Unit::Metric,
+        )
+    }
+
+    fn is_dim(buffer: &Buffer, x: u16, y: u16) -> bool {
+        buffer[(x, y)].modifier.contains(Modifier::DIM)
+    }
+
+    /// At 80 columns an hour is two cells and hour five starts at x = 22.
+    /// The scale runs 20 to 30, so 25 stands a line into its third row. The
+    /// forecast draws there as it would alone, and only the row above its
+    /// surface is the cap.
+    #[test]
+    fn a_doubtful_hour_keeps_its_forecast_solid_and_dims_the_rows_above() {
+        let buffer = drawn(&one_doubtful_hour(), 80, 0);
+        let floor = FULL_TEMP_FLOOR_Y;
+
+        for x in [22, 23] {
+            for (y, glyph, dim) in [
+                (floor, "█", false),
+                (floor - 1, "█", false),
+                (floor - 2, "▁", false),
+                (floor - 3, "█", true),
+            ] {
+                assert_eq!(buffer[(x, y)].symbol(), glyph, "({x}, {y})");
+                assert_eq!(is_dim(&buffer, x, y), dim, "({x}, {y})");
+            }
+        }
+        // Its neighbours have no spread and draw as they always did.
+        assert_eq!(buffer[(24, floor)].symbol(), "▁");
+        assert!(!is_dim(&buffer, 24, floor));
+        assert_eq!(buffer[(24, floor - 1)].symbol(), " ");
+    }
+
+    /// Doubt that ends in the row the forecast's surface is in has no cell
+    /// of its own, and the column draws exactly as it would without it.
+    #[test]
+    fn doubt_smaller_than_a_row_leaves_the_outline_alone() {
+        use crate::weather::model::TempSpread;
+
+        let mut weather = one_doubtful_hour();
+        let now = weather.now_hour;
+        weather.hourly[now + 5].spread = None;
+        weather.hourly[now + 8].temp_c = Some(30.0);
+        let plain = drawn(&weather, 80, 0);
+
+        // 25 on a 20 to 30 scale is 17 eighths; a degree above it is 20,
+        // still inside the third row.
+        weather.hourly[now + 5].spread = Some(TempSpread {
+            below_c: 1.0,
+            above_c: 1.0,
+        });
+        assert_eq!(drawn(&weather, 80, 0), plain);
+    }
+
+    /// The cap needs rows to stand in, so the scale's ceiling rises to the
+    /// top of the range. Its floor does not drop to the bottom of one.
+    #[test]
+    fn the_scale_makes_room_above_the_forecast_and_not_below() {
+        use crate::weather::model::TempSpread;
+
+        let mut weather = one_doubtful_hour();
+        let now = weather.now_hour;
+        weather.hourly[now + 2].spread = Some(TempSpread {
+            below_c: 8.0,
+            above_c: 0.0,
+        });
+        let visible = &weather.forecast_hours()[..24];
+
+        assert_eq!(temperature_range(visible), Some((20.0, 25.0)));
+        assert_eq!(plot_range(visible), Some((20.0, 30.0)));
+        assert_eq!(temperature_summary(visible, Unit::Metric), "20–25°C");
+    }
+
+    #[test]
+    fn a_forecast_without_spreads_dims_nothing_in_the_silhouette() {
+        let buffer = drawn(&Weather::fixture(22, 14), 80, 0);
+        for y in 1 + TEMP_ROW..=FULL_TEMP_FLOOR_Y {
+            for x in 0..80 {
+                assert!(!is_dim(&buffer, x, y), "({x}, {y})");
+            }
+        }
+    }
+
+    fn drawn_row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    /// The selected hour's range sits on the silhouette's floor row in the
+    /// summary column, and only when there is a range to state.
+    #[test]
+    fn the_selected_hours_range_is_captioned_beside_the_track() {
+        let weather = one_doubtful_hour();
+
+        let on_it = drawn_row(&drawn(&weather, 80, 5), FULL_TEMP_FLOOR_Y);
+        assert!(on_it.contains("▲ 25–30°C"), "{on_it:?}");
+
+        let elsewhere = drawn_row(&drawn(&weather, 80, 0), FULL_TEMP_FLOOR_Y);
+        assert!(!elsewhere.contains("▲"), "{elsewhere:?}");
+
+        // The page summary keeps its own row and its own meaning.
+        let summary = drawn_row(&drawn(&weather, 80, 5), FULL_TEMP_LABEL_Y);
+        assert!(summary.contains("20–25°C"), "{summary:?}");
+    }
+
+    #[test]
+    fn runs_that_agree_to_the_degree_get_no_caption() {
+        use crate::weather::model::TempSpread;
+
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        weather.hourly[now].spread = Some(TempSpread {
+            below_c: 0.2,
+            above_c: 0.2,
+        });
+        assert_eq!(likely_summary(&weather.hourly[now], Unit::Metric), None);
+    }
+
+    /// The hourly screen's floor is 36 columns. The cap and the caption have
+    /// to survive it, with every hour doubtful and the widest figures.
+    #[test]
+    fn a_page_of_doubt_fits_the_narrowest_plot() {
+        use crate::weather::model::TempSpread;
+
+        let mut weather = Weather::fixture(22, 14);
+        let now = weather.now_hour;
+        for hour in weather.hourly.iter_mut().skip(now) {
+            hour.temp_c = Some(-28.0);
+            hour.spread = Some(TempSpread {
+                below_c: 9.0,
+                above_c: 9.0,
+            });
+        }
+
+        let buffer = drawn(&weather, 36, 3);
+        let floor = drawn_row(&buffer, FULL_TEMP_FLOOR_Y);
+        assert!(floor.contains("▲ -37–-19°C"), "{floor:?}");
+        assert!(
+            floor.ends_with('│'),
+            "the caption stays inside the border: {floor:?}"
+        );
     }
 
     #[test]

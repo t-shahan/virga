@@ -53,6 +53,12 @@ second hour. The selected-hour pane gives the exact feels-like temperature,
 humidity, rain or snow amount, wind and gusts, and the following 24-hour
 precipitation total.
 
+Where the forecast is less certain, the silhouette says so. Virga asks
+ECMWF's 51-run ensemble how far its runs disagree about each hour, and draws
+a dimmed cap above the temperature as far as nine runs in ten reach. Tomorrow
+usually has a crisp edge and day six a hazy one. `▲ 7–13°C` beside the track
+is the range most runs give the selected hour.
+
 The visible horizon adapts through 12-, 24-, 36-, and 48-hour tiers as the
 terminal widens. Arrow keys still browse the full eight-day hourly forecast,
 and tall terminals retain the week-long precipitation strip below the
@@ -75,6 +81,9 @@ The weathergram is the default; the choice lasts for the session.
   the current forecast, so today does not sit alone.
 - **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
   an adaptive horizon, and an optional weekly precipitation strip.
+- **Forecast confidence** — a dimmed cap on the temperature silhouette shows
+  how far an ensemble's runs disagree, hour by hour, and the selected hour
+  states its likely range.
 - **Opens on the last forecast** — the forecast from your previous launch is
   on screen before the network answers, marked with its age until the fresh
   one replaces it in place.
@@ -547,6 +556,15 @@ still publishes and only the tap update is skipped, with a warning.
   wait by up to a quarter hour. The sentence moves on as the app sits open,
   and gives way to the comparison once the fetched two hours have passed;
   `r` fetches the next two.
+- The confidence cap is drawn with the terminal's dim attribute. A terminal
+  that ignores it shows the cap at full strength, as a taller silhouette.
+  The cap only rises: uncertainty below the forecast is in the `▲` range
+  and not in the drawing. It also starts on the row above the one the
+  forecast's surface is in, so doubt that ends inside that row draws
+  nothing, and how much doubt that hides depends on where in the row the
+  surface sits.
+- The ensemble is a coarser model than the forecast, so only how much its
+  runs disagree is used, centred on the forecast's own temperature.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface. The
   hourly weathergram needs 36 columns and 19 rows above the key bar, and
@@ -566,8 +584,9 @@ still publishes and only the tap update is skipped, with a warning.
 Weather, air quality, and geocoding all come from
 [Open-Meteo](https://open-meteo.com), which needs no API key. Its free tier is
 **for non-commercial use only** and is rate limited to 10,000 calls per day.
-Each weather load makes two requests, and each submitted search makes a third.
-`virga now` asks the same questions the same way — two requests per report,
+Each weather load makes three requests — the forecast, air quality, and the
+ensemble behind the confidence band — and each submitted search makes one
+more. `virga now` draws no band and skips the ensemble — two requests per report,
 one more for a named city, and the location lookup only on a first run where
 nothing is remembered — or none, when the app's last forecast for the city
 is under an hour old.
