@@ -495,6 +495,44 @@ fn save_document(path: &Path, merged: Merged) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to go on if the file at `path` says a newer virga wrote it. What
+/// a later format holds is not this binary's to lose. A file that is
+/// missing, unreadable or without a version claim passes: the first two
+/// have nothing to lose and the third is already lost. `what` names the
+/// file in the refusal. For the files beside the state file, which share
+/// its rule and not its schema.
+pub(crate) fn ensure_not_newer(path: &Path, version: u8, what: &str) -> Result<()> {
+    if let Ok(existing) = std::fs::read(path)
+        && let Ok(envelope) = serde_json::from_slice::<VersionEnvelope>(&existing)
+    {
+        anyhow::ensure!(
+            envelope.version <= version,
+            "the {what} is version {}, written by a newer virga; refusing to overwrite it",
+            envelope.version
+        );
+    }
+    Ok(())
+}
+
+/// Replace `path` with `bytes` so a reader sees the old file or the new one
+/// and never part of either: written beside it, synced, then renamed over.
+/// The caller holds `exclusive` if two writers could race.
+pub(crate) fn replace_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary file in {}", parent.display()))?;
+    use std::io::Write as _;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
 pub fn path() -> Result<PathBuf> {
     let project = directories::ProjectDirs::from("com", "t-shahan", "virga")
         .context("the operating system has no user state directory")?;

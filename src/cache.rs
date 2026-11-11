@@ -164,28 +164,8 @@ struct Borrowed<'a> {
 /// virga, as `state` does: what a later format holds is not ours to lose.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     let _held = state::exclusive(path)?;
-    if let Ok(existing) = std::fs::read(path)
-        && let Ok(envelope) = serde_json::from_slice::<VersionEnvelope>(&existing)
-    {
-        anyhow::ensure!(
-            envelope.version <= VERSION,
-            "the forecast cache is version {}, written by a newer virga; refusing to overwrite it",
-            envelope.version
-        );
-    }
-    let parent = path.parent().context("cache path has no parent")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary cache in {}", parent.display()))?;
-    use std::io::Write as _;
-    temporary.write_all(bytes)?;
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+    state::ensure_not_newer(path, VERSION, "forecast cache")?;
+    state::replace_atomically(path, bytes)
 }
 
 #[cfg(test)]

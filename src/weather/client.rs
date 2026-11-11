@@ -1,4 +1,5 @@
 use crate::weather::dto::AqiDto;
+use crate::weather::dto::ArchiveDto;
 use crate::weather::dto::ENSEMBLE_FIELD;
 use crate::weather::dto::EnsembleDto;
 use crate::weather::dto::ForecastDto;
@@ -11,6 +12,7 @@ use crate::weather::model::NOWCAST_QUARTERS;
 use crate::weather::model::SpreadReport;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
 use std::cmp::Reverse;
 use std::fmt;
@@ -105,6 +107,7 @@ pub struct Endpoints {
     pub geocode: String,
     pub air_quality: String,
     pub ensemble: String,
+    pub archive: String,
     /// The one host here that is not Open-Meteo. HTTPS and no API key, because
     /// the request's only identifying content is the connection's own source
     /// address and it should not cross the network in the clear.
@@ -118,6 +121,7 @@ impl Default for Endpoints {
             geocode: "https://geocoding-api.open-meteo.com/v1/search".to_string(),
             air_quality: "https://air-quality-api.open-meteo.com/v1/air-quality".to_string(),
             ensemble: "https://ensemble-api.open-meteo.com/v1/ensemble".to_string(),
+            archive: "https://archive-api.open-meteo.com/v1/archive".to_string(),
             geoip: "https://ipapi.co/json/".to_string(),
         }
     }
@@ -306,6 +310,73 @@ fn search_locations_with(
     // bottom.
     locations.sort_by_key(|location| Reverse(location.population.unwrap_or(0)));
     Ok(locations)
+}
+
+/// The thirty years the normals are taken from.
+const BASELINE: (&str, &str) = ("1991-01-01", "2020-12-31");
+
+/// Days before `through` that are asked for beside the baseline. They are
+/// what the archive's model is compared with the forecast's over, and the
+/// forecast describes fourteen past days, so a month covers them with room
+/// for the archive's newest days being empty.
+const RECENT_DAYS: i64 = 30;
+
+/// The archive's daily highs for a place: the baseline, and the days up to
+/// `through`.
+///
+/// Open-Meteo weighs a request by the weeks it covers, so the baseline
+/// counts for several hundred calls of the free tier's 10,000 a day. The
+/// years between it and now would add a fifth to that and are used for
+/// nothing, so they are left out and the recent days are a second, small
+/// request. The caller keeps what it learns on disk and asks once per place.
+pub fn fetch_history(lat: f64, lon: f64, through: NaiveDate) -> Result<Vec<(NaiveDate, f64)>> {
+    fetch_history_with(agent(), &Endpoints::default(), lat, lon, through)
+}
+
+fn fetch_history_with(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+    through: NaiveDate,
+) -> Result<Vec<(NaiveDate, f64)>> {
+    let day = |date: NaiveDate| date.format("%Y-%m-%d").to_string();
+    let recent_from = through - chrono::TimeDelta::days(RECENT_DAYS);
+
+    let mut highs = fetch_archive_span(agent, endpoints, lat, lon, BASELINE.0, BASELINE.1)?;
+    highs.extend(fetch_archive_span(
+        agent,
+        endpoints,
+        lat,
+        lon,
+        &day(recent_from),
+        &day(through),
+    )?);
+    Ok(highs)
+}
+
+fn fetch_archive_span(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+    start: &str,
+    end: &str,
+) -> Result<Vec<(NaiveDate, f64)>> {
+    let mut response = agent
+        .get(&endpoints.archive)
+        .query("latitude", lat.to_string())
+        .query("longitude", lon.to_string())
+        .query("start_date", start)
+        .query("end_date", end)
+        .query("daily", "temperature_2m_max")
+        .query("timezone", "auto")
+        .call()
+        .with_context(|| service_at("archive service", &endpoints.archive))?;
+
+    let dto: ArchiveDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("archive service", &endpoints.archive))?;
+    Ok(dto.into_highs())
 }
 
 /// The model whose runs are asked for. ECMWF's ensemble covers the globe and
@@ -652,6 +723,7 @@ pub(crate) mod tests {
             geocode: base.clone(),
             air_quality: base.clone(),
             ensemble: base.clone(),
+            archive: base.clone(),
             geoip: base,
         };
         (endpoints, hits, log)
@@ -858,6 +930,52 @@ pub(crate) mod tests {
         assert_eq!(value_of(&ensemble, "longitude"), Some("-77.41054"));
     }
 
+    /// Two requests: the thirty baseline years, and the month up to the
+    /// day given. The years between are not asked for.
+    #[test]
+    fn the_archive_is_asked_for_the_baseline_and_the_recent_days() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            r#"{"daily": {"time": ["1991-01-01", "1991-01-02"],
+                          "temperature_2m_max": [2.5, null]}}"#,
+        );
+        let through = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+
+        let highs = fetch_history_with(&test_agent(), &endpoints, 39.414_27, -77.410_54, through)
+            .expect("a history");
+
+        // The loopback server gives both requests the same day.
+        let first = (NaiveDate::from_ymd_opt(1991, 1, 1).unwrap(), 2.5);
+        assert_eq!(highs, [first, first]);
+        assert_eq!(log.lock().unwrap().len(), 2);
+
+        let baseline = request_with(&log, "start_date", "1991-01-01");
+        assert_eq!(value_of(&baseline, "end_date"), Some("2020-12-31"));
+        assert_eq!(value_of(&baseline, "daily"), Some("temperature_2m_max"));
+        assert_eq!(value_of(&baseline, "timezone"), Some("auto"));
+        assert_eq!(value_of(&baseline, "latitude"), Some("39.41427"));
+
+        let recent = request_with(&log, "end_date", "2026-11-10");
+        assert_eq!(value_of(&recent, "start_date"), Some("2026-10-11"));
+        assert_eq!(value_of(&recent, "daily"), Some("temperature_2m_max"));
+    }
+
+    #[test]
+    fn an_archive_failure_names_its_host() {
+        let endpoints = serving("503 Service Unavailable", "text/plain", "down");
+        let through = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+
+        let error = fetch_history_with(&test_agent(), &endpoints, 39.4, -77.4, through)
+            .expect_err("a 503 is not a history");
+
+        let shown = format!("{error:#}");
+        assert!(
+            shown.contains(&endpoints.archive) && shown.contains("503"),
+            "{shown}"
+        );
+    }
+
     /// `virga now` has nowhere to draw a band, and a status bar polling it
     /// should not pay for the largest of the three responses.
     #[test]
@@ -1047,8 +1165,10 @@ pub(crate) mod tests {
             // `to_string` is the outermost message alone, and with the host in
             // that layer it is the status that would go missing. This pins
             // why the worker has to print the chain rather than the message.
+            // Looked for by its words and not its number: the loopback
+            // port is in the outermost message and is sometimes 5503x.
             assert!(
-                !error.to_string().contains("503"),
+                !error.to_string().contains("http status"),
                 "{name}: the status is in the chain, not the outermost message"
             );
         }
@@ -1448,6 +1568,30 @@ mod live {
             covered > 15,
             "expected most of the window covered, got {covered}"
         );
+    }
+
+    /// Both archive requests against the real service, ending yesterday as
+    /// the app's do, at a northern test point: a summer warmer than its
+    /// winter, and recent days for the forecast to be compared with.
+    #[test]
+    #[ignore]
+    fn real_history_reduces_to_seasonal_normals() {
+        use crate::weather::climate::Normals;
+        let through = chrono::Utc::now().date_naive() - chrono::TimeDelta::days(1);
+        let history = fetch_history(52.52, 13.41, through).expect("history");
+        let normals = Normals::from_history(&history, &[]);
+
+        let july = normals.for_date("2026-07-15").expect("a July row");
+        let january = normals.for_date("2026-01-15").expect("a January row");
+        println!(
+            "days: {}  july {july:?}  january {january:?}",
+            history.len()
+        );
+
+        assert!(july.mean_c > january.mean_c + 10.0);
+        assert!(july.low_c < july.mean_c && july.mean_c < july.high_c);
+        let week_ago = through - chrono::TimeDelta::days(7);
+        assert!(history.iter().filter(|(date, _)| *date >= week_ago).count() >= 3);
     }
 
     /// The detection provider is not Open-Meteo and is not covered by anything

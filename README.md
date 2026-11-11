@@ -77,6 +77,9 @@ The weathergram is the default; the choice lasts for the session.
   with a bar per quarter hour beside it.
 - **Eight-day forecast** — rain chance, maximum wind, UV index, sunrise, and
   sunset.
+- **How unusual the day is** — the current pane compares the day's high
+  with thirty years of that place's history and says so in a sentence,
+  such as `unusually warm, 9°C above normal for mid-November`.
 - **Three weeks of context** — fourteen days of historical highs followed by
   the current forecast, so today does not sit alone.
 - **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
@@ -563,6 +566,16 @@ still publishes and only the tap update is skipped, with a warning.
   forecast's surface is in, so doubt that ends inside that row draws
   nothing, and how much doubt that hides depends on where in the row the
   surface sits.
+- "Normal" is the mean daily high for 1991 to 2020 over the fifteen days
+  around the date, from Open-Meteo's archive, which is a reanalysis and not
+  a weather station. It is a coarser model than the forecast, so the table
+  is shifted by the average difference between the two over the last days
+  both describe. With fewer than three such days the shift is zero, and a
+  hillside or a coast can then read a degree or two off. "Unusually" means
+  the high is outside the range nineteen days in twenty fell in. Only the
+  high is compared. Until the table arrives, with `VIRGA_CACHE=off`, or if
+  the archive request fails, the pane compares the day with the three weeks
+  on screen as it did before.
 - The ensemble is a coarser model than the forecast, so only how much its
   runs disagree is used, centred on the forecast's own temperature.
 - Forecast text is English only.
@@ -591,6 +604,17 @@ one more for a named city, and the location lookup only on a first run where
 nothing is remembered — or none, when the app's last forecast for the city
 is under an hour old.
 
+The first time the app loads a place it also asks Open-Meteo's archive once
+for that place's daily highs from 1991 to 2020, and in a second, small
+request for the last month. The first is by far the largest thing Virga
+asks for: Open-Meteo weighs a request by its span, and thirty years of one
+variable counts as several hundred calls against the daily allowance. Virga reduces the answer to a table of 366 rows and keeps it in
+`normals.json` in the state directory, for the eight places used most
+recently, so a place is asked about once and not once per launch. A request
+that fails is not repeated until the next launch. With
+`VIRGA_CACHE=off` there is nowhere to keep the table and the request is not
+made. `virga now` never makes it.
+
 Location detection is the one thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to
 [ipapi.co](https://ipapi.co), which resolves the connection's own source address
@@ -606,7 +630,9 @@ That request is not made at all once you have chosen a city, or with
 The last forecast fetched is written to `forecast.json` in the state
 directory, alongside the coordinates it describes and the time it was
 fetched, so the next launch can open on it. It is read by Virga alone and
-never sent anywhere. `VIRGA_CACHE=off` stops it being written or read.
+never sent anywhere. `VIRGA_CACHE=off` stops it being written or read, and
+does the same for `normals.json`, which holds coordinates and the table of
+normals for each of up to eight places and nothing else.
 
 Checking for a newer release makes one request to GitHub's release-redirect
 endpoint at github.com, carrying nothing Virga puts there: no version
@@ -637,7 +663,9 @@ Weather data by [Open-Meteo](https://open-meteo.com), licensed
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Air-quality data is
 served by Open-Meteo from the Copernicus Atmosphere Monitoring Service (CAMS),
 whose [Air Quality API](https://open-meteo.com/en/docs/air-quality-api)
-requires that both be credited.
+requires that both be credited. The daily highs behind the normals come from
+Open-Meteo's [Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api),
+which serves reanalysis from the Copernicus Climate Change Service and ECMWF.
 
 <details>
 <summary>Full CAMS citation</summary>

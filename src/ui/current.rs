@@ -4,10 +4,11 @@ use crate::ui::digits::{CELL_WIDTH, DIGIT_ROWS, big_digits};
 use crate::ui::pane::{bottom_titles, compass, detail_line};
 use crate::ui::{TITLE_GUTTER, UNKNOWN, status_mark, title_room, truncate};
 use crate::units::Unit;
+use crate::weather::climate::{DayNormal, Normals};
 use crate::weather::code::{aqi_label, description};
 use crate::weather::model::{DailyForecast, QuarterHour, Weather};
 use crate::weather::nowcast;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -72,7 +73,7 @@ fn pane_block(
     // detail column: it is a sentence, not a reading, and moving it there frees
     // an interior row. Nothing stops two titles on the same row overwriting
     // each other, so each border gets an explicit budget.
-    let summary = day.map_or_else(String::new, |d| comparison(weather, d, unit));
+    let summary = day.map_or_else(Vec::new, |d| comparisons(app.normals(), weather, d, unit));
     let nowcast = nowcast_titles(app, weather, showing_today);
 
     let aqi = air_quality_title(weather, day, showing_today);
@@ -93,7 +94,7 @@ fn pane_block(
         // the corner back the moment the window is dry.
         None => nowcast
             .iter()
-            .chain([&summary])
+            .chain(&summary)
             .find_map(|text| bottom_titles(text, &when, area.width).0)
             .map_or((None, when.clone()), |text| (Some(text), when.clone())),
     };
@@ -398,8 +399,63 @@ fn daylight_line(day: &DailyForecast) -> String {
         .map_or_else(|| UNKNOWN.to_string(), duration)
 }
 
-/// The part a table cannot give you: whether the day is remarkable for the
-/// period, not merely what its number is.
+/// How the day's high compares, wordiest first, for the border to take the
+/// longest that fits. Against the place's normals when they are here, and
+/// against the days on screen until then: a table that is still on its way,
+/// or was never asked for, must not leave the corner empty.
+fn comparisons(
+    normals: Option<&Normals>,
+    weather: &Weather,
+    day: &DailyForecast,
+    unit: Unit,
+) -> Vec<String> {
+    let against_normal = normals
+        .and_then(|normals| normals.for_date(&day.date))
+        .map(|normal| normal_comparisons(normal, day, unit));
+    against_normal.unwrap_or_else(|| vec![comparison(weather, day, unit)])
+}
+
+/// "Unusually" is earned by a high outside the range nineteen years in
+/// twenty fall in, not by a number of degrees: five degrees is a shrug in a
+/// continental spring and an event on a tropical coast.
+fn normal_comparisons(normal: DayNormal, day: &DailyForecast, unit: Unit) -> Vec<String> {
+    let delta = unit.temp(day.high_c) - unit.temp(normal.mean_c);
+    let season = part_of_month(&day.date);
+    let (above, below) = (day.high_c > normal.high_c, day.high_c < normal.low_c);
+
+    let short = if delta.abs() < 1.0 {
+        "about normal".to_string()
+    } else {
+        let degrees = format!(
+            "{:.0}{} {} normal",
+            delta.abs(),
+            unit.temp_symbol(),
+            if delta > 0.0 { "above" } else { "below" },
+        );
+        match (above, below) {
+            (true, _) => format!("unusually warm, {degrees}"),
+            (_, true) => format!("unusually cold, {degrees}"),
+            _ => degrees,
+        }
+    };
+    let long = season.map(|season| format!("{short} for {season}"));
+    long.into_iter().chain([short]).collect()
+}
+
+/// "mid-November", "late July". A third of a month is as fine as a fifteen-day window of
+/// history can honestly be named.
+fn part_of_month(date: &str) -> Option<String> {
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let part = match date.day() {
+        ..=10 => "early ",
+        11..=20 => "mid-",
+        _ => "late ",
+    };
+    Some(format!("{part}{}", date.format("%B")))
+}
+
+/// The fallback when there are no normals: whether the day is remarkable
+/// for the period on screen.
 fn comparison(weather: &Weather, day: &DailyForecast, unit: Unit) -> String {
     if weather.daily.is_empty() {
         return String::new();
@@ -522,6 +578,80 @@ mod tests {
         assert!(comparison(&w, &w.daily[20], Unit::Metric).contains("above"));
         assert!(comparison(&w, &w.daily[0], Unit::Metric).contains("below"));
         assert!(comparison(&w, &w.daily[10], Unit::Metric).contains("average"));
+    }
+
+    fn day_with_high(date: &str, high_c: f64) -> DailyForecast {
+        let mut day = Weather::fixture(1, 0).daily.remove(0);
+        day.date = date.to_string();
+        day.high_c = high_c;
+        day
+    }
+
+    /// Normals of 10°C with ordinary highs between 5 and 15.
+    fn against_normal(date: &str, high_c: f64, unit: Unit) -> Vec<String> {
+        let normals = Normals::flat(10.0, 5.0);
+        let weather = Weather::fixture(3, 1);
+        comparisons(Some(&normals), &weather, &day_with_high(date, high_c), unit)
+    }
+
+    #[test]
+    fn a_day_is_compared_with_its_normal_and_names_the_time_of_year() {
+        assert_eq!(
+            against_normal("2026-11-11", 13.0, Unit::Metric),
+            ["3°C above normal for mid-November", "3°C above normal"]
+        );
+        assert_eq!(
+            against_normal("2026-03-02", 8.0, Unit::Metric)[0],
+            "2°C below normal for early March"
+        );
+        assert_eq!(
+            against_normal("2026-07-31", 10.4, Unit::Metric),
+            ["about normal for late July", "about normal"]
+        );
+    }
+
+    /// The difference is a difference: 3°C is 5°F, not the 37°F a
+    /// conversion of the number itself would give.
+    #[test]
+    fn the_difference_from_normal_is_converted_as_a_difference() {
+        assert_eq!(
+            against_normal("2026-11-11", 13.0, Unit::Imperial)[1],
+            "5°F above normal"
+        );
+    }
+
+    #[test]
+    fn a_high_outside_the_ordinary_range_is_called_unusual() {
+        assert_eq!(
+            against_normal("2026-11-11", 19.0, Unit::Metric)[1],
+            "unusually warm, 9°C above normal"
+        );
+        assert_eq!(
+            against_normal("2026-11-11", 2.0, Unit::Metric)[1],
+            "unusually cold, 8°C below normal"
+        );
+        // The edge of the range is still inside it.
+        assert_eq!(
+            against_normal("2026-11-11", 15.0, Unit::Metric)[1],
+            "5°C above normal"
+        );
+    }
+
+    /// No table, or no row for the date, leaves the sentence the pane had
+    /// before there were normals at all.
+    #[test]
+    fn without_a_normal_the_day_is_compared_with_the_period() {
+        let weather = Weather::fixture(21, 10);
+        let day = &weather.daily[20];
+        let period = vec![comparison(&weather, day, Unit::Metric)];
+
+        assert_eq!(comparisons(None, &weather, day, Unit::Metric), period);
+        let normals = Normals::flat(10.0, 5.0);
+        let undated = day_with_high("not a date", 30.0);
+        assert_eq!(
+            comparisons(Some(&normals), &weather, &undated, Unit::Metric),
+            vec![comparison(&weather, &undated, Unit::Metric)]
+        );
     }
 
     #[test]
@@ -798,6 +928,40 @@ mod tests {
         let bottom = bottom_border(&app, &weather, 80);
         assert!(bottom.contains("average"), "{bottom:?}");
         assert!(!bottom.contains('▁'), "{bottom:?}");
+    }
+
+    /// The border takes the wordiest comparison it has room for, and the
+    /// nowcast still outranks it while something is about to fall.
+    #[test]
+    fn the_normal_comparison_sits_on_the_border_and_shortens_to_fit() {
+        let dry = Weather::fixture(22, 14).with_nowcast(&[0.0; 8]);
+        let mut app = app_on_today(&dry);
+        app.on_message(crate::events::Message::Normals {
+            location: app.location.clone(),
+            normals: Normals::flat(10.0, 50.0),
+            store_error: None,
+        });
+        let today = &dry.daily[14];
+        let [long, short] = &normal_comparisons(
+            Normals::flat(10.0, 50.0).for_date(&today.date).unwrap(),
+            today,
+            app.unit,
+        )[..] else {
+            panic!("a dated day has both wordings")
+        };
+
+        let wide = bottom_border(&app, &dry, 80);
+        assert!(wide.contains(long.as_str()), "{wide:?}");
+        assert!(!wide.contains("average"), "{wide:?}");
+
+        let narrow = bottom_border(&app, &dry, (short.len() + 14) as u16);
+        assert!(narrow.contains(short.as_str()), "{narrow:?}");
+        assert!(!narrow.contains(" for "), "{narrow:?}");
+
+        let wet = Weather::fixture(22, 14).with_nowcast(&SHOWER);
+        let raining = bottom_border(&app, &wet, 80);
+        assert!(raining.contains("Rain"), "{raining:?}");
+        assert!(!raining.contains("normal"), "{raining:?}");
     }
 
     /// The sentence is about the next two hours from now. Another day's

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod climate;
 pub mod code;
 pub mod dto;
 pub mod model;
