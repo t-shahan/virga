@@ -543,8 +543,10 @@ still publishes and only the tap update is skipped, with a warning.
   which is native model data over North America and central Europe and
   interpolated from the hourly forecast elsewhere. The response does not say
   which, so the sentence says "about" everywhere. Its minutes are counted
-  from the quarter hour the forecast was fetched in, and can run up to a
-  quarter hour ahead of the clock.
+  from the start of the quarter hour in progress, so they can overstate the
+  wait by up to a quarter hour. The sentence moves on as the app sits open,
+  and gives way to the comparison once the fetched two hours have passed;
+  `r` fetches the next two.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface. The
   hourly weathergram needs 36 columns and 19 rows above the key bar, and

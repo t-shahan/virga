@@ -25,10 +25,11 @@ refuse to publish a version this file does not describe.
   will see three or four. The readings ride the forecast request the app
   already makes. They come from Open-Meteo's 15-minute series, which is
   model data over North America and central Europe and interpolated from
-  the hourly forecast elsewhere, hence "about". A forecast shown from the
-  cache at launch leaves the sentence out until the fresh one lands, and a
-  `virga now` answered from the cache counts its minutes from the current
-  quarter hour.
+  the hourly forecast elsewhere, hence "about". The minutes are counted
+  from the clock at each read, so the sentence moves on while the app sits
+  open and a `virga now` answered from the cache counts from now. A
+  forecast shown from the cache at launch leaves the sentence out until
+  the fresh one lands.
 
 ## [0.7.1] - 2026-10-21
 

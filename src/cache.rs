@@ -11,7 +11,7 @@
 
 use crate::app::{ActiveLocation, CachedWeather};
 use crate::state;
-use crate::weather::model::Weather;
+use crate::weather::model::{STAMP, Weather};
 use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset, Local, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,6 @@ pub const MAX_AGE: TimeDelta = TimeDelta::hours(24);
 /// status bar polling by the minute would be answered from disk only in
 /// the minutes after a launch.
 pub const REPORT_MAX_AGE: TimeDelta = TimeDelta::hours(1);
-/// The shape of the series' timestamps, local to the location.
-const STAMP: &str = "%Y-%m-%dT%H:%M";
 
 /// The body behind the envelope. The version is read from the envelope
 /// alone, before this is attempted, so a newer body never reads as corrupt.
@@ -278,10 +276,11 @@ mod tests {
         assert_eq!(cached.weather.today_index, 1);
     }
 
-    /// A report answered from disk half an hour after the fetch counts its
+    /// The nowcast is stored as fetched and read against the clock, so a
+    /// report answered from disk half an hour after the fetch counts its
     /// minutes from now, not from the fetch.
     #[test]
-    fn a_cached_nowcast_loses_the_quarters_that_have_passed() {
+    fn a_cached_nowcast_counts_from_the_time_it_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let fetched = local(2026, 8, 2, 0, 5);
         let path = dir.path().join(FILE);
@@ -289,18 +288,15 @@ mod tests {
         let bytes = encode(&frederick(), &weather, fetched.with_timezone(&Utc)).unwrap();
         write(&path, &bytes).unwrap();
 
-        let cached = load(
-            &path,
-            &frederick(),
-            local(2026, 8, 2, 0, 35),
-            REPORT_MAX_AGE,
-        )
-        .unwrap()
-        .expect("a half hour old forecast answers the report");
+        let read_at = local(2026, 8, 2, 0, 35);
+        let cached = load(&path, &frederick(), read_at, REPORT_MAX_AGE)
+            .unwrap()
+            .expect("a half hour old forecast answers the report");
 
-        assert_eq!(cached.weather.nowcast.len(), 6);
+        let ahead = cached.weather.nowcast_at(read_at.with_timezone(&Utc));
+        assert_eq!(ahead.len(), 6);
         assert_eq!(
-            crate::weather::nowcast::outlook(&cached.weather.nowcast).map(|o| o.sentence()),
+            crate::weather::nowcast::outlook(&ahead).map(|o| o.sentence()),
             Some("Rain in about 30 min, lasting 30".to_string())
         );
     }

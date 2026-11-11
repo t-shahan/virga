@@ -122,21 +122,21 @@ fn pane_block(
 }
 
 /// The next two hours' sentence for the bottom border, longest wording
-/// first: with its strip, then alone. Empty when the window is dry, when
-/// another day is selected, and for a forecast read back from disk, whose
-/// minutes were counted from a launch that is over.
+/// first: with its strip, then alone. Counted from the app's clock, so it
+/// moves on while the app sits open and goes once the window has passed.
+/// Empty when the window is dry, when another day is selected, and for a
+/// forecast read back from disk, which the fetch in flight is about to
+/// replace.
 fn nowcast_titles(app: &App, weather: &Weather, showing_today: bool) -> Vec<String> {
     if !showing_today || app.shown.as_of.is_some() {
         return Vec::new();
     }
-    let Some(outlook) = nowcast::outlook(&weather.nowcast) else {
+    let ahead = weather.nowcast_at(app.now);
+    let Some(outlook) = nowcast::outlook(&ahead) else {
         return Vec::new();
     };
     let sentence = outlook.sentence();
-    vec![
-        format!("{sentence} {}", nowcast_strip(&weather.nowcast)),
-        sentence,
-    ]
+    vec![format!("{sentence} {}", nowcast_strip(&ahead)), sentence]
 }
 
 /// A quarter hour's fall as a bar. Light, moderate and heavy rain are
@@ -492,7 +492,8 @@ mod tests {
     use crate::theme::Theme;
 
     use crate::units::Unit;
-    use crate::weather::model::Weather;
+    use crate::weather::model::{Weather, fixture_time};
+    use chrono::TimeDelta;
 
     fn palette() -> Palette {
         Theme::default().palette()
@@ -726,10 +727,41 @@ mod tests {
 
     const SHOWER: [f64; 8] = [0.0, 0.0, 0.4, 0.7, 2.5, 0.0, 0.0, 0.0];
 
+    /// An app on today whose clock reads five past the hour the fixture's
+    /// quarters open on.
     fn app_on_today(weather: &Weather) -> crate::app::App {
         let mut app = crate::app::App::new();
         app.selected_day = weather.today_index;
+        app.now = fixture_time(&weather.hourly[weather.now_hour].time) + TimeDelta::minutes(5);
         app
+    }
+
+    /// The bug this guards: the sentence was counted at the fetch, so an
+    /// app left open went on saying "in about 30 min" after the rain had
+    /// come and gone.
+    #[test]
+    fn the_nowcast_moves_on_while_the_app_sits_open() {
+        let weather = Weather::fixture(22, 14).with_nowcast(&SHOWER);
+        let mut app = app_on_today(&weather);
+
+        app.now += TimeDelta::minutes(15);
+        let later = bottom_border(&app, &weather, 80);
+        assert!(
+            later.contains("Rain in about 15 min, lasting 45 ▁▃▅█▁▁▁─"),
+            "{later:?}"
+        );
+
+        app.now += TimeDelta::minutes(45);
+        let falling = bottom_border(&app, &weather, 80);
+        assert!(
+            falling.contains("Rain stopping in about 15 min █▁▁▁─"),
+            "{falling:?}"
+        );
+
+        app.now += TimeDelta::hours(2);
+        let over = bottom_border(&app, &weather, 80);
+        assert!(!over.contains("Rain"), "{over:?}");
+        assert!(over.contains("average"), "the corner goes back: {over:?}");
     }
 
     /// The strip gives way first, then the sentence gives the corner back to

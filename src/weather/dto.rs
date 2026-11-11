@@ -337,7 +337,7 @@ fn hourly_from(hour: &HourlyDto) -> Vec<HourlyForecast> {
         .collect()
 }
 
-fn quarters_from(block: &QuarterHourlyDto) -> Vec<QuarterHour> {
+fn nowcast_from(block: &QuarterHourlyDto) -> Vec<QuarterHour> {
     block
         .time
         .iter()
@@ -364,13 +364,6 @@ impl From<ForecastDto> for Weather {
             .time
             .clone()
             .unwrap_or_else(|| Local::now().format("%Y-%m-%dT%H:%M").to_string());
-        // The clock fallback above is good to a day, which places today and
-        // is no use for counting minutes. Without the response's own time
-        // there is no nowcast.
-        let nowcast = match (&dto.current.time, &dto.minutely_15) {
-            (Some(_), Some(block)) => quarters_from(block),
-            _ => Vec::new(),
-        };
 
         // Positioned after filtering, so a dropped row cannot shift either
         // index. `position_of` owns the matching, and the cache's relocation
@@ -388,12 +381,11 @@ impl From<ForecastDto> for Weather {
             today_index: 0,
             utc_offset_secs: dto.utc_offset_seconds,
             air_quality: None,
-            nowcast,
+            nowcast: dto.minutely_15.as_ref().map_or_else(Vec::new, nowcast_from),
         };
         let position = weather.position_of(&stamp);
         weather.today_index = position.today_index;
         weather.now_hour = position.now_hour;
-        weather.trim_nowcast(&stamp);
         weather
     }
 }
@@ -1022,6 +1014,7 @@ mod tests {
     /// `block`, so tests can vary just that.
     fn with_quarters(block: serde_json::Value) -> Weather {
         let json = serde_json::json!({
+            "utc_offset_seconds": 0,
             "current": {"time": "2026-08-09T02:30"},
             "daily": {
                 "time": ["2026-08-09"], "weather_code": [0],
@@ -1034,20 +1027,24 @@ mod tests {
             .into()
     }
 
-    /// Recorded from Tórshavn in drizzle: wet for five quarters, then dry.
+    /// Recorded from Tórshavn in drizzle, at 17:00 on a place on UTC: wet
+    /// for five quarters, then dry.
     #[test]
     fn a_recorded_nowcast_opens_on_the_quarter_in_progress() {
+        use crate::weather::model::fixture_time;
+
         let json = include_str!("../../tests/fixtures/forecast_nowcast.json");
         let weather: Weather = serde_json::from_str::<ForecastDto>(json)
             .expect("fixture should parse")
             .into();
+        let now = weather.nowcast_at(fixture_time("2026-11-11T17:04"));
 
-        assert_eq!(weather.nowcast.len(), 8);
-        assert_eq!(weather.nowcast[0].time, "2026-11-11T17:00");
-        assert_eq!(weather.nowcast[0].precip_mm, Some(0.1));
-        assert_eq!(weather.nowcast[5].precip_mm, Some(0.0));
+        assert_eq!(now.len(), 8);
+        assert_eq!(now[0].time, "2026-11-11T17:00");
+        assert_eq!(now[0].precip_mm, Some(0.1));
+        assert_eq!(now[5].precip_mm, Some(0.0));
         assert_eq!(
-            crate::weather::nowcast::outlook(&weather.nowcast).map(|o| o.sentence()),
+            crate::weather::nowcast::outlook(&now).map(|o| o.sentence()),
             Some("Rain stopping in about 75 min".to_string())
         );
     }
@@ -1102,29 +1099,15 @@ mod tests {
         assert_eq!(weather.nowcast[0].snow_cm, None);
     }
 
-    /// A block that opens before the response's own clock is trimmed to it,
-    /// and one that cannot be placed against a clock at all is dropped.
+    /// The block is kept as it came, capped. Lining it up with the clock is
+    /// `nowcast_at`'s job at each read, so nothing here depends on the
+    /// response saying what time it is.
     #[test]
-    fn the_nowcast_is_lined_up_with_the_responses_own_clock() {
-        let weather = with_quarters(serde_json::json!({
-            "time": ["2026-08-09T02:00", "2026-08-09T02:15", "2026-08-09T02:30", "2026-08-09T02:45"],
-            "precipitation": [0.9, 0.9, 0.0, 0.0],
-        }));
-        assert_eq!(weather.nowcast.len(), 2);
-        assert_eq!(weather.nowcast[0].time, "2026-08-09T02:30");
-
-        let json = serde_json::json!({
-            "current": {},
-            "daily": {
-                "time": ["2026-08-09"], "weather_code": [0],
-                "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]
-            },
-            "minutely_15": {"time": ["2026-08-09T02:30"], "precipitation": [0.4]},
-        });
-        let weather: Weather = serde_json::from_value::<ForecastDto>(json)
-            .expect("should parse")
-            .into();
-        assert!(weather.nowcast.is_empty(), "no clock to count minutes from");
+    fn the_nowcast_is_kept_as_fetched_and_capped() {
+        let times: Vec<String> = (0..40).map(|i| format!("2026-08-09T{i:02}:00")).collect();
+        let weather = with_quarters(serde_json::json!({"time": times}));
+        assert_eq!(weather.nowcast.len(), NOWCAST_QUARTERS);
+        assert_eq!(weather.nowcast[0].time, "2026-08-09T00:00");
     }
 
     /// The other direction: a reading the model carries has to be fed by a
