@@ -14,6 +14,19 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **How unusual is today.** The current pane's border now compares the
+  day's high with what that date is usually like there: `4°C above normal
+  for mid-November`, or `unusually cold, 8°C below normal` when the high is
+  outside the range nineteen years in twenty fell in. Normal is the 1991 to
+  2020 mean of the fifteen days around the date, from Open-Meteo's archive,
+  shifted to agree with the forecast's model over the recent days both
+  describe. The archive is asked once per place, a large request that
+  Open-Meteo counts as several hundred calls, and the result is kept in
+  `normals.json` beside the forecast cache for the eight most recent
+  places. Until the table arrives, with `VIRGA_CACHE=off`, or if the
+  request fails, the pane keeps the comparison with the days on screen,
+  and a failure is printed on exit.
+
 - **The weathergram shows how sure the forecast is.** Each load now also
   asks Open-Meteo's ensemble endpoint for ECMWF's 51 runs of the hourly
   temperature. Where they disagree, the silhouette carries a dimmed cap

@@ -2,7 +2,7 @@ use crate::weather::model::{
     AirQuality, AirQualityReport, Current, DailyForecast, HourlyForecast, Location,
     NOWCAST_QUARTERS, QuarterHour, SpreadReport, TempSpread, Weather,
 };
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -469,7 +469,7 @@ fn is_member(name: &str) -> bool {
 
 /// The value `fraction` of the way through `sorted`, interpolating between
 /// neighbours. `None` for an empty slice.
-fn quantile(sorted: &[f64], fraction: f64) -> Option<f64> {
+pub(super) fn quantile(sorted: &[f64], fraction: f64) -> Option<f64> {
     let last = sorted.len().checked_sub(1)?;
     let position = fraction.clamp(0.0, 1.0) * last as f64;
     let below = *sorted.get(position.floor() as usize)?;
@@ -520,6 +520,44 @@ impl From<EnsembleDto> for SpreadReport {
             })
             .collect();
         Self { by_hour }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArchiveDto {
+    #[serde(default)]
+    pub daily: Option<ArchiveDailyDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArchiveDailyDto {
+    #[serde(default)]
+    pub time: Vec<String>,
+    #[serde(default)]
+    pub temperature_2m_max: Vec<Option<f64>>,
+}
+
+/// A century of days. The request asks for under forty years; the cap is
+/// here because the answer's length is the server's word.
+const MAX_HISTORY_DAYS: usize = 366 * 100;
+
+impl ArchiveDto {
+    /// Each day the archive gave a high for. A null high or a date that
+    /// will not parse is a day fewer, which thirty years can spare.
+    pub fn into_highs(self) -> Vec<(NaiveDate, f64)> {
+        let Some(daily) = self.daily else {
+            return Vec::new();
+        };
+        daily
+            .time
+            .iter()
+            .take(MAX_HISTORY_DAYS)
+            .enumerate()
+            .filter_map(|(i, date)| {
+                let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+                Some((date, at(&daily.temperature_2m_max, i)?))
+            })
+            .collect()
     }
 }
 
@@ -1092,6 +1130,45 @@ mod tests {
             HOURLY_FIELDS,
             serde_json::json!({"time": ["2026-08-09T00:00"]}),
         );
+    }
+
+    #[test]
+    fn archive_highs_keep_their_dates_and_skip_what_cannot_be_read() {
+        let highs = |json: serde_json::Value| {
+            serde_json::from_value::<ArchiveDto>(json)
+                .expect("an archive answer should parse")
+                .into_highs()
+        };
+
+        let read = highs(serde_json::json!({"daily": {
+            "time": ["1991-01-01", "1991-01-02", "sometime", "1991-01-04", "1991-01-05"],
+            "temperature_2m_max": [1.5, null, 9.0, 4.5]
+        }}));
+        let day = |d| NaiveDate::from_ymd_opt(1991, 1, d).unwrap();
+        assert_eq!(read, [(day(1), 1.5), (day(4), 4.5)]);
+
+        for json in [
+            serde_json::json!({}),
+            serde_json::json!({"daily": null}),
+            serde_json::json!({"daily": {}}),
+            serde_json::json!({"daily": {"time": ["1991-01-01"]}}),
+            serde_json::json!({"daily": {"temperature_2m_max": [1.0]}}),
+        ] {
+            assert!(highs(json.clone()).is_empty(), "{json}");
+        }
+    }
+
+    #[test]
+    fn an_oversized_archive_is_capped() {
+        let days = MAX_HISTORY_DAYS + 50;
+        let json = serde_json::json!({"daily": {
+            "time": vec!["1991-01-01"; days],
+            "temperature_2m_max": vec![1.0; days]
+        }});
+        let highs = serde_json::from_value::<ArchiveDto>(json)
+            .unwrap()
+            .into_highs();
+        assert_eq!(highs.len(), MAX_HISTORY_DAYS);
     }
 
     fn spread_report(json: serde_json::Value) -> SpreadReport {

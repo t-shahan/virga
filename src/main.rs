@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 mod app;
 mod cache;
 mod cli;
+mod climate_store;
 mod events;
 mod input;
 mod interrupt;
@@ -948,10 +949,12 @@ fn run(
             Some((notice, latest))
         });
     }
+    let keeps_normals = cache_path.is_some();
     let workers = events::spawn_workers(message_tx, cache_path);
     let mut held_keys = input::HeldKeys::new(cfg!(windows));
 
     let mut app = opening.into_app();
+    app.keeps_normals = keeps_normals;
     let initial = app.startup_request();
     dispatch(&workers, &mut app, initial)?;
 
@@ -1624,7 +1627,10 @@ mod tests {
     /// zero refuses every request the way a full queue would.
     fn queues(bound: usize) -> (Workers, mpsc::Receiver<Request>) {
         let (tx, rx) = mpsc::sync_channel(bound);
-        (Workers::from_queues(tx.clone(), tx.clone(), tx), rx)
+        (
+            Workers::from_queues(tx.clone(), tx.clone(), tx.clone(), tx),
+            rx,
+        )
     }
 
     fn first_run() -> App {

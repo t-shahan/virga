@@ -1,14 +1,17 @@
 use crate::app::ActiveLocation;
 use crate::cache;
+use crate::climate_store;
 use crate::update::Release;
 use crate::weather::client::Forecast;
 use crate::weather::client::detect_location;
 use crate::weather::client::search_locations;
-use crate::weather::client::{Detail, fetch_forecast};
+use crate::weather::client::{Detail, fetch_forecast, fetch_history};
+use crate::weather::climate::Normals;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
-use chrono::Utc;
-use std::path::PathBuf;
+use anyhow::Result;
+use chrono::{NaiveDate, TimeDelta, Utc};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread;
@@ -48,6 +51,15 @@ pub enum Request {
     Search {
         id: RequestId,
         query: String,
+    },
+    /// What the days at a place are usually like. No id: the answer names
+    /// the place it is for, and the app keeps it only if that is still the
+    /// place on screen.
+    Normals {
+        location: ActiveLocation,
+        /// The forecast's own highs for the days just gone, which the
+        /// archive's are measured against.
+        recent: Vec<(NaiveDate, f64)>,
     },
 }
 
@@ -102,6 +114,17 @@ pub enum Message {
     CacheFailed {
         error: String,
     },
+    Normals {
+        location: ActiveLocation,
+        normals: Normals,
+        /// Why the table was not kept for the next launch, when it was not.
+        /// It is still a table, and still on screen.
+        store_error: Option<String>,
+    },
+    NormalsFailed {
+        location: ActiveLocation,
+        error: String,
+    },
 }
 
 /// One release probe on its own one-shot thread, never one of the request
@@ -141,6 +164,7 @@ pub struct Workers {
     fetch: SyncSender<Request>,
     detect: SyncSender<Request>,
     search: SyncSender<Request>,
+    normals: SyncSender<Request>,
 }
 
 impl Workers {
@@ -153,6 +177,7 @@ impl Workers {
             Request::Fetch { .. } => self.fetch.try_send(request),
             Request::Detect { .. } => self.detect.try_send(request),
             Request::Search { .. } => self.search.try_send(request),
+            Request::Normals { .. } => self.normals.try_send(request),
         }
     }
 }
@@ -166,11 +191,13 @@ impl Workers {
         fetch: SyncSender<Request>,
         detect: SyncSender<Request>,
         search: SyncSender<Request>,
+        normals: SyncSender<Request>,
     ) -> Self {
         Self {
             fetch,
             detect,
             search,
+            normals,
         }
     }
 }
@@ -178,7 +205,12 @@ impl Workers {
 /// `cache` is where a fetched forecast is kept for the next launch, or
 /// `None` to keep nothing.
 pub fn spawn_workers(messages: Sender<Message>, cache: Option<PathBuf>) -> Workers {
-    spawn_workers_with(messages, cache, serve)
+    // The normals live beside the forecast cache and answer to the same
+    // switch: with nowhere to keep a table, `App` never asks for one.
+    let normals = cache.as_deref().map(climate_store::path_beside);
+    spawn_workers_with(messages, cache, move |request| {
+        serve(request, normals.as_deref())
+    })
 }
 
 /// The workers with the network swapped out. `serve` answers each request;
@@ -202,10 +234,13 @@ fn spawn_workers_with(
         fetch: spawn(cache),
         detect: spawn(None),
         search: spawn(None),
+        // A queue of its own, so thirty years of history arriving slowly
+        // never stands between the user and a forecast or a search.
+        normals: spawn(None),
     }
 }
 
-fn serve(request: Request) -> Message {
+fn serve(request: Request, normals_store: Option<&Path>) -> Message {
     // `{:#}` for every error: `to_string` is only the outermost message,
     // which for a network failure is `http status: 503` with nothing saying
     // which host.
@@ -246,6 +281,66 @@ fn serve(request: Request) -> Message {
                 error: format!("{e:#}"),
             },
         },
+        Request::Normals { location, recent } => {
+            let (lat, lon) = (location.lat, location.lon);
+            normals_message(normals_store, location, &recent, |through| {
+                fetch_history(lat, lon, through)
+            })
+        }
+    }
+}
+
+/// How far behind today the archive is asked for when the forecast offered
+/// no past day to end on. The archive's newest day trails the calendar, and
+/// a date it has not reached is refused outright.
+const ARCHIVE_LAG: TimeDelta = TimeDelta::days(2);
+
+/// A place's normals: from the store when it has them, and otherwise from
+/// the archive, reduced and written down for next time. `fetch` is passed
+/// in so a test supplies the history and no socket opens.
+fn normals_message(
+    store: Option<&Path>,
+    location: ActiveLocation,
+    recent: &[(NaiveDate, f64)],
+    fetch: impl FnOnce(NaiveDate) -> Result<Vec<(NaiveDate, f64)>>,
+) -> Message {
+    // A store that cannot be read costs the request it would have saved.
+    // The save below replaces it, and says so if it cannot.
+    if let Some(Ok(Some(normals))) = store.map(|path| climate_store::load(path, &location)) {
+        return Message::Normals {
+            location,
+            normals,
+            store_error: None,
+        };
+    }
+    let through = recent
+        .iter()
+        .map(|(date, _)| *date)
+        .max()
+        .unwrap_or_else(|| Utc::now().date_naive() - ARCHIVE_LAG);
+    let history = match fetch(through) {
+        Ok(history) => history,
+        Err(error) => {
+            return Message::NormalsFailed {
+                location,
+                error: format!("{error:#}"),
+            };
+        }
+    };
+    let normals = Normals::from_history(&history, recent);
+    if normals.is_empty() {
+        return Message::NormalsFailed {
+            location,
+            error: "the archive had too little history for this place".to_string(),
+        };
+    }
+    let store_error = store
+        .and_then(|path| climate_store::save(path, &location, &normals).err())
+        .map(|error| format!("{error:#}"));
+    Message::Normals {
+        location,
+        normals,
+        store_error,
     }
 }
 
@@ -297,6 +392,88 @@ mod tests {
 
     const PATIENCE: Duration = Duration::from_secs(5);
 
+    fn frederick() -> ActiveLocation {
+        ActiveLocation {
+            label: "Frederick, Maryland, United States".to_string(),
+            lat: 39.414_27,
+            lon: -77.410_54,
+        }
+    }
+
+    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    /// Thirty years at a steady 10°C.
+    fn steady_history() -> Vec<(NaiveDate, f64)> {
+        day(1991, 1, 1)
+            .iter_days()
+            .take_while(|date| date < &day(2021, 1, 1))
+            .map(|date| (date, 10.0))
+            .collect()
+    }
+
+    /// The first ask goes to the archive, ending on the newest day the
+    /// forecast described, and writes the table down. The second is
+    /// answered from the file without the archive being asked at all.
+    #[test]
+    fn normals_are_fetched_once_and_then_read_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("normals.json");
+        let recent = [(day(2026, 11, 9), 5.0), (day(2026, 11, 10), 6.0)];
+
+        let first = normals_message(Some(&store), frederick(), &recent, |through| {
+            assert_eq!(through, day(2026, 11, 10));
+            Ok(steady_history())
+        });
+        let Message::Normals {
+            normals,
+            store_error,
+            ..
+        } = first
+        else {
+            panic!("the archive answered")
+        };
+        assert_eq!(store_error, None);
+        assert_eq!(normals.for_date("2026-06-01").map(|n| n.mean_c), Some(10.0));
+
+        let second = normals_message(Some(&store), frederick(), &recent, |_| {
+            panic!("the store has this place")
+        });
+        let Message::Normals { normals: kept, .. } = second else {
+            panic!("the store answered")
+        };
+        assert_eq!(kept, normals);
+    }
+
+    #[test]
+    fn an_archive_failure_or_an_empty_history_is_a_reason_not_a_table() {
+        let failed = normals_message(None, frederick(), &[], |_| Err(anyhow::anyhow!("503")));
+        assert!(matches!(failed, Message::NormalsFailed { error, .. } if error.contains("503")));
+
+        let thin = normals_message(None, frederick(), &[], |_| Ok(Vec::new()));
+        assert!(
+            matches!(thin, Message::NormalsFailed { error, .. } if error.contains("too little"))
+        );
+    }
+
+    /// A table that could not be written down is still a table: it reaches
+    /// the app, with the reason beside it.
+    #[test]
+    fn a_store_that_cannot_be_written_still_yields_the_normals() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: readable as neither.
+        let store = dir.path().join("normals.json");
+        std::fs::create_dir(&store).unwrap();
+
+        let message = normals_message(Some(&store), frederick(), &[], |_| Ok(steady_history()));
+
+        let Message::Normals { store_error, .. } = message else {
+            panic!("the archive answered")
+        };
+        assert!(store_error.is_some());
+    }
+
     /// Workers whose fetches block until `release` is signalled, once per
     /// fetch, and whose other requests answer at once. A blocking channel
     /// rather than a slow server: the stall is under the test's control
@@ -321,6 +498,10 @@ mod tests {
             Request::Search { id, .. } => Message::Located {
                 id,
                 locations: Vec::new(),
+            },
+            Request::Normals { location, .. } => Message::NormalsFailed {
+                location,
+                error: "unused".to_string(),
             },
         });
         (workers, release)
@@ -428,6 +609,10 @@ mod tests {
                     error: "unused".to_string(),
                 }
             }
+            Request::Normals { location, .. } => Message::NormalsFailed {
+                location,
+                error: "unused".to_string(),
+            },
         });
         workers.try_send(search(1)).expect("room for a search");
         assert!(matches!(

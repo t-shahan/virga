@@ -1,4 +1,5 @@
 use crate::weather::dto::AqiDto;
+use crate::weather::dto::ArchiveDto;
 use crate::weather::dto::ENSEMBLE_FIELD;
 use crate::weather::dto::EnsembleDto;
 use crate::weather::dto::ForecastDto;
@@ -11,6 +12,7 @@ use crate::weather::model::NOWCAST_QUARTERS;
 use crate::weather::model::SpreadReport;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
 use std::cmp::Reverse;
 use std::fmt;
@@ -105,6 +107,7 @@ pub struct Endpoints {
     pub geocode: String,
     pub air_quality: String,
     pub ensemble: String,
+    pub archive: String,
     /// The one host here that is not Open-Meteo. HTTPS and no API key, because
     /// the request's only identifying content is the connection's own source
     /// address and it should not cross the network in the clear.
@@ -118,6 +121,7 @@ impl Default for Endpoints {
             geocode: "https://geocoding-api.open-meteo.com/v1/search".to_string(),
             air_quality: "https://air-quality-api.open-meteo.com/v1/air-quality".to_string(),
             ensemble: "https://ensemble-api.open-meteo.com/v1/ensemble".to_string(),
+            archive: "https://archive-api.open-meteo.com/v1/archive".to_string(),
             geoip: "https://ipapi.co/json/".to_string(),
         }
     }
@@ -306,6 +310,44 @@ fn search_locations_with(
     // bottom.
     locations.sort_by_key(|location| Reverse(location.population.unwrap_or(0)));
     Ok(locations)
+}
+
+/// The first day of the baseline the normals are taken from. The request
+/// runs from here to `through` in one go, because the days just gone are
+/// what the archive's model is compared with the forecast's over.
+const HISTORY_START: &str = "1991-01-01";
+
+/// The archive's daily highs for a place, from 1991 through `through`.
+///
+/// Thirty-odd years in one response is about a quarter of a megabyte, and
+/// Open-Meteo weighs a request by the weeks it covers, so this one counts
+/// for several hundred calls of the free tier's 10,000 a day. The caller
+/// keeps what it learns on disk and asks once per place.
+pub fn fetch_history(lat: f64, lon: f64, through: NaiveDate) -> Result<Vec<(NaiveDate, f64)>> {
+    fetch_history_with(agent(), &Endpoints::default(), lat, lon, through)
+}
+
+fn fetch_history_with(
+    agent: &Agent,
+    endpoints: &Endpoints,
+    lat: f64,
+    lon: f64,
+    through: NaiveDate,
+) -> Result<Vec<(NaiveDate, f64)>> {
+    let mut response = agent
+        .get(&endpoints.archive)
+        .query("latitude", lat.to_string())
+        .query("longitude", lon.to_string())
+        .query("start_date", HISTORY_START)
+        .query("end_date", through.format("%Y-%m-%d").to_string())
+        .query("daily", "temperature_2m_max")
+        .query("timezone", "auto")
+        .call()
+        .with_context(|| service_at("archive service", &endpoints.archive))?;
+
+    let dto: ArchiveDto = read_bounded_json(&mut response)
+        .with_context(|| reply_from("archive service", &endpoints.archive))?;
+    Ok(dto.into_highs())
 }
 
 /// The model whose runs are asked for. ECMWF's ensemble covers the globe and
@@ -652,6 +694,7 @@ pub(crate) mod tests {
             geocode: base.clone(),
             air_quality: base.clone(),
             ensemble: base.clone(),
+            archive: base.clone(),
             geoip: base,
         };
         (endpoints, hits, log)
@@ -856,6 +899,42 @@ pub(crate) mod tests {
         assert_eq!(value_of(&ensemble, "timezone"), Some("auto"));
         assert_eq!(value_of(&ensemble, "latitude"), Some("39.41427"));
         assert_eq!(value_of(&ensemble, "longitude"), Some("-77.41054"));
+    }
+
+    #[test]
+    fn the_archive_request_runs_from_the_baseline_to_the_day_given() {
+        let (endpoints, log) = serving_recorded(
+            "200 OK",
+            "application/json",
+            r#"{"daily": {"time": ["1991-01-01", "1991-01-02"],
+                          "temperature_2m_max": [2.5, null]}}"#,
+        );
+        let through = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+
+        let highs = fetch_history_with(&test_agent(), &endpoints, 39.414_27, -77.410_54, through)
+            .expect("a history");
+
+        assert_eq!(highs, [(NaiveDate::from_ymd_opt(1991, 1, 1).unwrap(), 2.5)]);
+        let request = request_with(&log, "start_date", "1991-01-01");
+        assert_eq!(value_of(&request, "end_date"), Some("2026-11-10"));
+        assert_eq!(value_of(&request, "daily"), Some("temperature_2m_max"));
+        assert_eq!(value_of(&request, "timezone"), Some("auto"));
+        assert_eq!(value_of(&request, "latitude"), Some("39.41427"));
+    }
+
+    #[test]
+    fn an_archive_failure_names_its_host() {
+        let endpoints = serving("503 Service Unavailable", "text/plain", "down");
+        let through = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+
+        let error = fetch_history_with(&test_agent(), &endpoints, 39.4, -77.4, through)
+            .expect_err("a 503 is not a history");
+
+        let shown = format!("{error:#}");
+        assert!(
+            shown.contains(&endpoints.archive) && shown.contains("503"),
+            "{shown}"
+        );
     }
 
     /// `virga now` has nowhere to draw a band, and a status bar polling it
@@ -1454,6 +1533,27 @@ mod live {
     /// in CI, so a field rename at their end would show up as everyone quietly
     /// launching in New York. An operational smoke test, not a contract — it
     /// prints what it resolved so a human can see whether it is plausible.
+    /// The archive's whole span reduces to a table with a summer warmer
+    /// than its winter, at a northern test point.
+    #[test]
+    #[ignore]
+    fn real_history_reduces_to_seasonal_normals() {
+        use crate::weather::climate::Normals;
+        let through = chrono::Utc::now().date_naive() - chrono::TimeDelta::days(3);
+        let history = fetch_history(52.52, 13.41, through).expect("history");
+        let normals = Normals::from_history(&history, &[]);
+
+        let july = normals.for_date("2026-07-15").expect("a July row");
+        let january = normals.for_date("2026-01-15").expect("a January row");
+        println!(
+            "days: {}  july {july:?}  january {january:?}",
+            history.len()
+        );
+
+        assert!(july.mean_c > january.mean_c + 10.0);
+        assert!(july.low_c < july.mean_c && july.mean_c < july.high_c);
+    }
+
     #[test]
     #[ignore]
     fn real_detection_names_somewhere_plausible() {

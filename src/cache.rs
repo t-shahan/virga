@@ -173,19 +173,7 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
             envelope.version
         );
     }
-    let parent = path.parent().context("cache path has no parent")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary cache in {}", parent.display()))?;
-    use std::io::Write as _;
-    temporary.write_all(bytes)?;
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+    state::replace_atomically(path, bytes)
 }
 
 #[cfg(test)]

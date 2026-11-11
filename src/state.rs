@@ -495,6 +495,25 @@ fn save_document(path: &Path, merged: Merged) -> Result<()> {
     Ok(())
 }
 
+/// Replace `path` with `bytes` so a reader sees the old file or the new one
+/// and never part of either: written beside it, synced, then renamed over.
+/// The caller holds `exclusive` if two writers could race.
+pub(crate) fn replace_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary file in {}", parent.display()))?;
+    use std::io::Write as _;
+    temporary.write_all(bytes)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
 pub fn path() -> Result<PathBuf> {
     let project = directories::ProjectDirs::from("com", "t-shahan", "virga")
         .context("the operating system has no user state directory")?;

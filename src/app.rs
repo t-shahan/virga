@@ -3,8 +3,9 @@ use crate::input::Action;
 use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use crate::update::Release;
+use crate::weather::climate::Normals;
 use crate::weather::model::{Location, Weather};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -208,6 +209,20 @@ impl Outcome {
     }
 }
 
+/// The forecast's highs for the days before today, by date. A date that
+/// will not parse is a day fewer to compare the archive against.
+fn recent_highs(weather: &Weather) -> Vec<(NaiveDate, f64)> {
+    weather
+        .daily
+        .iter()
+        .take(weather.today_index)
+        .filter_map(|day| {
+            let date = NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").ok()?;
+            Some((date, day.high_c))
+        })
+        .collect()
+}
+
 /// The warning for a forecast that arrived without its air quality, in one
 /// place because the TUI prints it on the way out and `virga now` prints it
 /// to stderr, and two copies of the sentence would drift apart.
@@ -257,6 +272,16 @@ pub struct App {
     /// from the theme so cycling changes the design, not the capability.
     pub color_depth: ColorDepth,
     pub tick: usize,
+    /// The normals for a place, and the place. Read through `normals`,
+    /// which hands them over only while that place is the one on screen.
+    climate: Option<(ActiveLocation, Normals)>,
+    /// The place normals have been asked for and not yet answered, so a
+    /// refresh does not queue the same thirty years twice.
+    pending_normals: Option<ActiveLocation>,
+    /// Whether there is anywhere to keep a table. Without it every launch
+    /// would ask the archive again, which is too much to ask of it, so the
+    /// app goes without and shows the comparison it always has.
+    pub keeps_normals: bool,
     /// The time, as of the draw loop's last pass. The app holds it rather
     /// than drawing code asking the system, so a frame is a function of the
     /// app and a test can say what time it is.
@@ -387,6 +412,9 @@ impl App {
             theme: Theme::default(),
             color_depth: ColorDepth::Ansi16,
             tick: 0,
+            climate: None,
+            pending_normals: None,
+            keeps_normals: false,
             now: Utc::now(),
             selected: 0,
             selected_day,
@@ -548,12 +576,13 @@ impl App {
                 self.selected_hour = 0;
                 self.location = location;
                 self.location_source = source;
+                let request = self.normals_request(&weather);
                 self.weather = Fetch::Ready(weather);
                 self.shown = Shown::default();
                 Outcome {
                     remember: self.remembered(),
+                    request,
                     warning: load_warning(air_quality_error.as_deref(), spread_error.as_deref()),
-                    ..Outcome::nothing()
                 }
             }
             // `pending` deliberately survives a failure, so retrying aims at
@@ -566,6 +595,31 @@ impl App {
             }
             // The forecast reached the screen; only the copy for next launch
             // was lost. Worth a line on the way out, not a frame.
+            Message::Normals {
+                location,
+                normals,
+                store_error,
+            } => {
+                self.pending_normals
+                    .take_if(|asked| asked.same_place(&location));
+                self.climate = Some((location, normals));
+                Outcome {
+                    warning: store_error.map(|error| {
+                        format!("virga: could not keep the normals for the next launch: {error}")
+                    }),
+                    ..Outcome::nothing()
+                }
+            }
+            Message::NormalsFailed { location, error } => {
+                self.pending_normals
+                    .take_if(|asked| asked.same_place(&location));
+                Outcome {
+                    warning: Some(format!(
+                        "virga: no normals to compare the forecast with: {error}"
+                    )),
+                    ..Outcome::nothing()
+                }
+            }
             Message::CacheFailed { error } => Outcome {
                 warning: Some(format!(
                     "virga: could not keep the forecast for the next launch: {error}"
@@ -653,6 +707,32 @@ impl App {
     /// fetching weather for somewhere it already knows.
     pub fn is_locating(&self) -> bool {
         self.pending_detect.is_some()
+    }
+
+    /// The normals for the place on screen. A table that arrived for a city
+    /// the user has since left stays unread until they return to it.
+    pub fn normals(&self) -> Option<&Normals> {
+        self.climate
+            .as_ref()
+            .filter(|(place, _)| place.same_place(&self.location))
+            .map(|(_, normals)| normals)
+    }
+
+    /// The ask for this place's normals, the first time a forecast for it
+    /// loads. Called after `location` is the forecast's own.
+    fn normals_request(&mut self, weather: &Weather) -> Option<Request> {
+        let asked = self
+            .pending_normals
+            .as_ref()
+            .is_some_and(|place| place.same_place(&self.location));
+        if !self.keeps_normals || asked || self.normals().is_some() {
+            return None;
+        }
+        self.pending_normals = Some(self.location.clone());
+        Some(Request::Normals {
+            location: self.location.clone(),
+            recent: recent_highs(weather),
+        })
     }
 
     /// The active location, when it is one worth writing down. The compiled-in
@@ -753,6 +833,12 @@ impl App {
                     self.pending_search = None;
                     self.results = Fetch::Failed("too many requests at once".to_string());
                 }
+            }
+            // Nothing on screen waits for normals, so a dropped ask only has
+            // to stop counting as asked: the next load asks again.
+            Request::Normals { location, .. } => {
+                self.pending_normals
+                    .take_if(|asked| asked.same_place(&location));
             }
         }
         None
@@ -2129,6 +2215,7 @@ mod tests {
     fn id_of(request: &Request) -> RequestId {
         match request {
             Request::Fetch { id, .. } | Request::Search { id, .. } | Request::Detect { id } => *id,
+            Request::Normals { .. } => panic!("normals are asked for by place, not by id"),
         }
     }
 
@@ -2305,6 +2392,99 @@ mod tests {
         let warning = outcome.warning.expect("the reason reaches the user");
         assert!(warning.contains("air quality"), "{warning:?}");
         assert!(warning.contains("http status: 503"), "{warning:?}");
+    }
+
+    fn loaded_into(app: &mut App) -> Outcome {
+        let Request::Fetch { id, location } = app.startup_request() else {
+            panic!("not a fetch")
+        };
+        app.on_message(Message::Loaded {
+            id,
+            location,
+            weather: Weather::fixture(5, 2),
+            air_quality_error: None,
+            spread_error: None,
+        })
+    }
+
+    /// The first forecast for a place asks for its normals, carrying the
+    /// forecast's past highs, and a refresh while that ask is out or after
+    /// it is answered does not ask again.
+    #[test]
+    fn a_places_normals_are_asked_for_once() {
+        let mut app = App::new();
+        app.keeps_normals = true;
+
+        let Some(Request::Normals { location, recent }) = loaded_into(&mut app).request else {
+            panic!("the first load asks for normals")
+        };
+        assert!(location.same_place(&app.location));
+        let day = |d| NaiveDate::from_ymd_opt(2026, 8, d).unwrap();
+        assert_eq!(recent, [(day(1), 20.0), (day(2), 21.0)]);
+
+        app.refresh();
+        assert!(loaded_into(&mut app).request.is_none(), "already asked");
+
+        app.on_message(Message::Normals {
+            location,
+            normals: Normals::flat(20.0, 5.0),
+            store_error: None,
+        });
+        assert!(app.normals().is_some());
+        app.refresh();
+        assert!(loaded_into(&mut app).request.is_none(), "already answered");
+    }
+
+    #[test]
+    fn nowhere_to_keep_normals_means_none_are_asked_for() {
+        let mut app = App::new();
+        assert!(loaded_into(&mut app).request.is_none());
+    }
+
+    /// A failure is said on the way out and forgotten, so the next load
+    /// tries again; and a table for a city the user has left is not shown
+    /// against the one they are in.
+    #[test]
+    fn failed_normals_are_retried_and_foreign_ones_are_not_shown() {
+        let mut app = App::new();
+        app.keeps_normals = true;
+        let here = app.location.clone();
+        loaded_into(&mut app);
+
+        let outcome = app.on_message(Message::NormalsFailed {
+            location: here.clone(),
+            error: "http status: 503".to_string(),
+        });
+        let warning = outcome.warning.expect("the reason reaches the user");
+        assert!(
+            warning.contains("normals") && warning.contains("503"),
+            "{warning}"
+        );
+        app.refresh();
+        assert!(matches!(
+            loaded_into(&mut app).request,
+            Some(Request::Normals { .. })
+        ));
+
+        let elsewhere = ActiveLocation {
+            label: "Elsewhere".to_string(),
+            lat: 1.0,
+            lon: 2.0,
+        };
+        app.on_message(Message::Normals {
+            location: elsewhere,
+            normals: Normals::flat(20.0, 5.0),
+            store_error: None,
+        });
+        assert!(app.normals().is_none());
+
+        let kept = app.on_message(Message::Normals {
+            location: here,
+            normals: Normals::flat(20.0, 5.0),
+            store_error: Some("disk full".to_string()),
+        });
+        assert!(app.normals().is_some(), "unsaved is still usable");
+        assert!(kept.warning.is_some_and(|w| w.contains("disk full")));
     }
 
     /// Both supplementary requests can fail on one load, and the single
