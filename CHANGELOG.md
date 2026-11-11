@@ -14,6 +14,19 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **The weathergram shows how sure the forecast is.** Each load now also
+  asks Open-Meteo's ensemble endpoint for ECMWF's 51 runs of the hourly
+  temperature. Where they disagree, the silhouette carries a dimmed cap
+  above the forecast, up to the level nine runs in ten stay under, so a
+  settled tomorrow keeps a crisp edge and an unsettled day six grows a
+  haze. Beside the track, `▲ 7–13°C` gives the range most runs put the
+  selected hour in. The range is the runs' disagreement centred on the
+  forecast's own figure, because the ensemble is a coarser model and can
+  sit degrees off the forecast over hills or a coast. This is a third
+  request per weather load. `virga now` does not make it. If it fails, the
+  forecast loads without the band and the reason is printed on exit, as
+  for air quality.
+
 - **Rain in the next two hours, in a sentence.** When rain or snow is due
   inside two hours, the bottom border of the current pane says when:
   `Rain in about 30 min, lasting 45`, `Rain stopping in about 15 min`, or

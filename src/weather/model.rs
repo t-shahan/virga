@@ -98,9 +98,34 @@ pub struct HourlyForecast {
     pub wind_kph: Option<f64>,
     pub gust_kph: Option<f64>,
     pub wind_dir_deg: Option<f64>,
+    /// How far the ensemble's runs disagree about this hour's temperature.
+    /// Defaulted so a cache written before the field existed still parses.
+    #[serde(default)]
+    pub spread: Option<TempSpread>,
+}
+
+/// The middle 80% of an ensemble's runs for one hour, as distances from
+/// their own median, in Celsius degrees and never negative.
+///
+/// Distances rather than temperatures because the ensemble is a coarser
+/// model than the one the forecast comes from, and over hills or a coast
+/// its runs can sit degrees away from the forecast as a body. How much they
+/// disagree with each other survives that; where they sit does not. The
+/// band is therefore drawn around the forecast's own temperature.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TempSpread {
+    pub below_c: f64,
+    pub above_c: f64,
 }
 
 impl HourlyForecast {
+    /// The range most runs put this hour's temperature in, around the
+    /// forecast's own figure. `None` without both a temperature and a spread.
+    pub fn likely_range_c(&self) -> Option<(f64, f64)> {
+        let (temp, spread) = (self.temp_c?, self.spread?);
+        Some((temp - spread.below_c, temp + spread.above_c))
+    }
+
     /// Whether anything is forecast to fall. The trigger is the amount rather
     /// than the chance: a 20% hour with no forecast accumulation is not rain,
     /// which is the confusion the daily pane already had to fix once.
@@ -285,6 +310,13 @@ pub struct AirQualityReport {
     pub daily_max: HashMap<String, u16>,
 }
 
+/// Each hour an ensemble request covered, by its timestamp, which is the
+/// forecast's own because both ask for the location's local time.
+#[derive(Default)]
+pub struct SpreadReport {
+    pub by_hour: HashMap<String, TempSpread>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AirQuality {
     pub us_aqi: u16,
@@ -339,6 +371,7 @@ impl Weather {
                     wind_kph: Some(8.0 + (i % 10) as f64),
                     gust_kph: Some(15.0 + (i % 12) as f64),
                     wind_dir_deg: Some(((i * 45) % 360) as f64),
+                    spread: None,
                 })
                 .collect(),
             now_hour: PAST_HOURS,
@@ -497,6 +530,35 @@ mod tests {
         let weather = Weather::fixture(9, 1).with_nowcast(&[0.0; 40]);
         let now = fixture_time("2026-08-02T00:00");
         assert_eq!(weather.nowcast_at(now).len(), NOWCAST_QUARTERS);
+    }
+
+    /// A cache written before the ensemble was asked for has hours with no
+    /// `spread` key, and they still have to read.
+    #[test]
+    fn an_hour_cached_without_a_spread_still_parses() {
+        let mut json = serde_json::to_value(&Weather::fixture(2, 0).hourly[0]).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("spread")
+            .expect("the field is written");
+
+        let hour: HourlyForecast = serde_json::from_value(json).expect("an older hour");
+        assert_eq!(hour.spread, None);
+        assert_eq!(hour.likely_range_c(), None);
+    }
+
+    #[test]
+    fn the_likely_range_sits_around_the_forecasts_own_temperature() {
+        let mut hour = Weather::fixture(2, 0).hourly[0].clone();
+        hour.temp_c = Some(10.0);
+        hour.spread = Some(TempSpread {
+            below_c: 1.5,
+            above_c: 4.0,
+        });
+        assert_eq!(hour.likely_range_c(), Some((8.5, 14.0)));
+
+        hour.temp_c = None;
+        assert_eq!(hour.likely_range_c(), None, "nothing to centre it on");
     }
 
     fn place(country: Option<&str>, country_code: Option<&str>) -> Location {

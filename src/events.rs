@@ -3,8 +3,8 @@ use crate::cache;
 use crate::update::Release;
 use crate::weather::client::Forecast;
 use crate::weather::client::detect_location;
-use crate::weather::client::fetch_forecast;
 use crate::weather::client::search_locations;
+use crate::weather::client::{Detail, fetch_forecast};
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
 use chrono::Utc;
@@ -63,6 +63,7 @@ pub enum Message {
         /// rather than a gap in coverage. The forecast is still a forecast,
         /// so this is a line on the way out and never a screen.
         air_quality_error: Option<String>,
+        spread_error: Option<String>,
     },
     LoadFailed {
         id: RequestId,
@@ -209,21 +210,25 @@ fn serve(request: Request) -> Message {
     // which for a network failure is `http status: 503` with nothing saying
     // which host.
     match request {
-        Request::Fetch { id, location } => match fetch_forecast(location.lat, location.lon) {
-            Ok(Forecast {
-                weather,
-                air_quality_error,
-            }) => Message::Loaded {
-                id,
-                location,
-                weather,
-                air_quality_error,
-            },
-            Err(e) => Message::LoadFailed {
-                id,
-                error: format!("{e:#}"),
-            },
-        },
+        Request::Fetch { id, location } => {
+            match fetch_forecast(location.lat, location.lon, Detail::Full) {
+                Ok(Forecast {
+                    weather,
+                    air_quality_error,
+                    spread_error,
+                }) => Message::Loaded {
+                    id,
+                    location,
+                    weather,
+                    air_quality_error,
+                    spread_error,
+                },
+                Err(e) => Message::LoadFailed {
+                    id,
+                    error: format!("{e:#}"),
+                },
+            }
+        }
         Request::Detect { id } => match detect_location() {
             Ok(found) => Message::Detected {
                 id,

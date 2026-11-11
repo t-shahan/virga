@@ -360,6 +360,7 @@ pub(super) fn dry_hours(count: usize) -> Vec<HourlyForecast> {
             wind_kph: Some(10.0),
             gust_kph: Some(18.0),
             wind_dir_deg: Some(225.0),
+            spread: None,
         })
         .collect()
 }
