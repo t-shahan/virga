@@ -25,6 +25,8 @@ mod events;
 mod input;
 mod interrupt;
 mod now;
+mod outline;
+mod radar_view;
 mod state;
 mod theme;
 mod ui;
@@ -1018,6 +1020,9 @@ fn run(
         if app.observe_clock(Utc::now()) {
             dirty = true;
         }
+        if app.advance_radar(Instant::now()) {
+            dirty = true;
+        }
 
         // Only the spinner and the search cursor change on their own. With
         // neither on screen there is nothing to redraw until input or a worker
@@ -1026,7 +1031,8 @@ fn run(
         let animating = matches!(app.weather, Fetch::Loading)
             || app.is_refreshing()
             || matches!(app.results, Fetch::Loading)
-            || matches!(app.screen, Screen::Search);
+            || matches!(app.screen, Screen::Search)
+            || app.is_awaiting_radar();
 
         if dirty || animating {
             app.tick = app.tick.wrapping_add(1);
@@ -1628,7 +1634,7 @@ mod tests {
     fn queues(bound: usize) -> (Workers, mpsc::Receiver<Request>) {
         let (tx, rx) = mpsc::sync_channel(bound);
         (
-            Workers::from_queues(tx.clone(), tx.clone(), tx.clone(), tx),
+            Workers::from_queues(tx.clone(), tx.clone(), tx.clone(), tx.clone(), tx),
             rx,
         )
     }

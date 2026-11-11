@@ -43,6 +43,7 @@ serde_json = "1.0.151"
 directories = "6.0.0"
 tempfile = "3.27.0"
 ureq = { version = "3.3.0", features = ["json"] }
+png = "0.18"
 
 # Already in the graph through crossterm, which uses it for SIGWINCH, so this
 # adds no crate; without its defaults, because the channel and iterator

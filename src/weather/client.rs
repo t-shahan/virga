@@ -64,7 +64,7 @@ const MAX_REDIRECTS: u32 = 2;
 /// re-paid a full TCP + TLS handshake. Measured against Open-Meteo that was
 /// ~360ms of the ~480ms round trip. Sharing one agent lets repeat requests to
 /// the same host reuse the connection.
-fn agent() -> &'static Agent {
+pub(super) fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| bounded_agent(TIMEOUT_GLOBAL, TIMEOUT_CONNECT, true))
 }
@@ -108,6 +108,11 @@ pub struct Endpoints {
     pub air_quality: String,
     pub ensemble: String,
     pub archive: String,
+    /// RainViewer's list of the radar frames it holds, and the host their
+    /// images come from. The list names a host of its own, which is not
+    /// used: a reply does not get to choose where the next request goes.
+    pub radar_index: String,
+    pub radar_frames: String,
     /// The one host here that is not Open-Meteo. HTTPS and no API key, because
     /// the request's only identifying content is the connection's own source
     /// address and it should not cross the network in the clear.
@@ -122,6 +127,8 @@ impl Default for Endpoints {
             air_quality: "https://air-quality-api.open-meteo.com/v1/air-quality".to_string(),
             ensemble: "https://ensemble-api.open-meteo.com/v1/ensemble".to_string(),
             archive: "https://archive-api.open-meteo.com/v1/archive".to_string(),
+            radar_index: "https://api.rainviewer.com/public/weather-maps.json".to_string(),
+            radar_frames: "https://tilecache.rainviewer.com".to_string(),
             geoip: "https://ipapi.co/json/".to_string(),
         }
     }
@@ -137,11 +144,11 @@ pub fn detect_location() -> Result<Location> {
 /// place they are printed already opens with one (`could not fetch the
 /// weather:`, `could not work out where you are:`), and `fetch the forecast
 /// from ...` under `could not fetch` read the same thing twice.
-fn service_at(service: &str, url: &str) -> String {
+pub(super) fn service_at(service: &str, url: &str) -> String {
     format!("the {service} at {url}")
 }
 
-fn reply_from(service: &str, url: &str) -> String {
+pub(super) fn reply_from(service: &str, url: &str) -> String {
     format!("the reply from the {service} at {url}")
 }
 
@@ -452,6 +459,11 @@ fn fetch_air_quality_with(
 /// happens before a padded `String` field is allocated; serde_json documents
 /// the buffered path as the faster one anyway.
 fn read_bounded_json<T: DeserializeOwned>(response: &mut Response<Body>) -> Result<T> {
+    Ok(serde_json::from_slice(&read_bounded(response)?)?)
+}
+
+/// The body itself, under the same bound, for a reply that is not JSON.
+pub(super) fn read_bounded(response: &mut Response<Body>) -> Result<Vec<u8>> {
     let reader = response
         .body_mut()
         .with_config()
@@ -468,7 +480,7 @@ fn read_bounded_json<T: DeserializeOwned>(response: &mut Response<Body>) -> Resu
     }
     outcome?;
 
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
 }
 
 /// ureq reports its wire limit as an `io::Error` wrapping its own error, and
@@ -690,7 +702,7 @@ pub(crate) mod tests {
 
     /// The raw bytes every connection gets, whatever it asked for, with a
     /// count of the connections it answered and the request line of each.
-    fn serving_response(response: Vec<u8>) -> (Endpoints, Arc<AtomicUsize>, RequestLog) {
+    pub(crate) fn serving_response(response: Vec<u8>) -> (Endpoints, Arc<AtomicUsize>, RequestLog) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
 
@@ -724,6 +736,8 @@ pub(crate) mod tests {
             air_quality: base.clone(),
             ensemble: base.clone(),
             archive: base.clone(),
+            radar_index: base.clone(),
+            radar_frames: base.trim_end_matches('/').to_string(),
             geoip: base,
         };
         (endpoints, hits, log)
@@ -815,7 +829,7 @@ pub(crate) mod tests {
 
     /// Short bounds: these servers answer at once, so a test that hangs is a
     /// bug in the test, and should say so in a moment rather than in 15s.
-    fn test_agent() -> Agent {
+    pub(crate) fn test_agent() -> Agent {
         bounded_agent(Duration::from_secs(5), Duration::from_secs(2), false)
     }
 

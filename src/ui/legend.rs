@@ -58,6 +58,7 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("←→↑↓", "day"),
             ("n", "now"),
             ("p", "hourly"),
+            ("m", "radar"),
             ("r", "refresh"),
             ("u", "units"),
             ("l", "location"),
@@ -77,6 +78,25 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("r", "refresh"),
             ("u", "units"),
             ("l", "location"),
+            ("t", &theme_label(app)),
+        ])
+        .into_iter()
+        .chain(help)
+        .collect(),
+        Screen::Radar => owned(vec![
+            ("q", "quit"),
+            ("b", "back"),
+            (",", "hide"),
+            ("←→", "frame"),
+            (
+                "space",
+                if app.playback.is_playing() {
+                    "pause"
+                } else {
+                    "play"
+                },
+            ),
+            ("r", "refresh"),
             ("t", &theme_label(app)),
         ])
         .into_iter()
@@ -103,7 +123,9 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
 fn hint(app: &App) -> Vec<(&'static str, String)> {
     let mut pairs = match app.screen {
         Screen::Weather => owned(vec![("q", "quit"), ("?", "keybinds")]),
-        Screen::Hourly => owned(vec![("q", "quit"), ("b", "back"), ("?", "keybinds")]),
+        Screen::Hourly | Screen::Radar => {
+            owned(vec![("q", "quit"), ("b", "back"), ("?", "keybinds")])
+        }
         Screen::Search => return bindings(app),
     };
     if app.theme_readout_visible() {

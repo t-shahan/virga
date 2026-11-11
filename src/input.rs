@@ -21,6 +21,12 @@ pub enum Action {
     CycleTheme,
     OpenSearch,
     OpenHourly,
+    OpenRadar,
+    /// One frame back or on in the radar loop, which also stops it.
+    PrevFrame,
+    NextFrame,
+    /// Stop or restart the radar loop.
+    TogglePlayback,
     PrevDay,
     NextDay,
     Today,
@@ -54,7 +60,9 @@ impl Action {
     fn repeatable(self) -> bool {
         matches!(
             self,
-            Action::PrevDay
+            Action::PrevFrame
+                | Action::NextFrame
+                | Action::PrevDay
                 | Action::NextDay
                 | Action::PrevHour
                 | Action::NextHour
@@ -171,6 +179,8 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Char('t') => Some(Action::CycleTheme),
             KeyCode::Char('l') => Some(Action::OpenSearch),
             KeyCode::Char('p') => Some(Action::OpenHourly),
+            // `r` was taken by refresh long before there was a radar.
+            KeyCode::Char('m') => Some(Action::OpenRadar),
             KeyCode::Left => Some(Action::PrevDay),
             KeyCode::Right => Some(Action::NextDay),
             // The forecast table lists the days as a column running downward,
@@ -206,6 +216,19 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Down => Some(Action::NextHourDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
             KeyCode::Char('v') => Some(Action::ToggleHourlyView),
+            KeyCode::Char('?') => help_key(key_hint_style),
+            KeyCode::Char(',') => Some(Action::ToggleKeyHints),
+            _ => None,
+        },
+        Screen::Radar => match key.code {
+            KeyCode::Char('q') => Some(Action::Quit),
+            // `m` closes as well as opens, as `p` does for the hourly screen.
+            KeyCode::Char('b' | 'm') | KeyCode::Enter | KeyCode::Esc => Some(Action::Back),
+            KeyCode::Char('r') => Some(Action::Refresh),
+            KeyCode::Char('t') => Some(Action::CycleTheme),
+            KeyCode::Left => Some(Action::PrevFrame),
+            KeyCode::Right => Some(Action::NextFrame),
+            KeyCode::Char(' ') => Some(Action::TogglePlayback),
             KeyCode::Char('?') => help_key(key_hint_style),
             KeyCode::Char(',') => Some(Action::ToggleKeyHints),
             _ => None,
@@ -260,6 +283,60 @@ mod tests {
     /// `super::action_for` directly.
     fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
         super::action_for(key, screen, KeyHintStyle::Hint, false)
+    }
+
+    #[test]
+    fn the_radar_opens_with_m_and_closes_the_way_it_opened() {
+        assert_eq!(
+            action_for(press(KeyCode::Char('m')), Screen::Weather),
+            Some(Action::OpenRadar)
+        );
+        for code in [
+            KeyCode::Char('m'),
+            KeyCode::Char('b'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+        ] {
+            assert_eq!(
+                action_for(press(code), Screen::Radar),
+                Some(Action::Back),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            action_for(press(KeyCode::Char('m')), Screen::Hourly),
+            None,
+            "only the weather screen opens it"
+        );
+    }
+
+    /// The arrows scrub and may be held; space and `r` act once per press,
+    /// since a held `r` would queue a radar fetch per repeat.
+    #[test]
+    fn the_radar_loop_is_scrubbed_with_the_arrows_and_paused_with_space() {
+        assert_eq!(
+            action_for(press(KeyCode::Left), Screen::Radar),
+            Some(Action::PrevFrame)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Right), Screen::Radar),
+            Some(Action::NextFrame)
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char(' ')), Screen::Radar),
+            Some(Action::TogglePlayback)
+        );
+        assert_eq!(
+            action_for(of_kind(KeyCode::Right, KeyEventKind::Repeat), Screen::Radar),
+            Some(Action::NextFrame)
+        );
+        for code in [KeyCode::Char(' '), KeyCode::Char('r')] {
+            assert_eq!(
+                action_for(of_kind(code, KeyEventKind::Repeat), Screen::Radar),
+                None,
+                "{code:?}"
+            );
+        }
     }
 
     /// The card's footer promises any key closes it. That has to include
@@ -413,7 +490,12 @@ mod tests {
         key
     }
 
-    const SCREENS: [Screen; 3] = [Screen::Weather, Screen::Hourly, Screen::Search];
+    const SCREENS: [Screen; 4] = [
+        Screen::Weather,
+        Screen::Hourly,
+        Screen::Radar,
+        Screen::Search,
+    ];
 
     /// The Windows backend reports a release for every press. Acting on both
     /// types every character twice and fires every action twice.

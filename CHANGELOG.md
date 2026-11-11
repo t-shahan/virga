@@ -14,6 +14,20 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **A radar screen.** `m` on the weather screen opens the last two hours of
+  radar around the city as a looping map, drawn in braille over coastlines,
+  borders and lakes. Colour and dot density both carry how hard it is
+  falling, the coast stays visible through rain as a gap, and `◉` marks the
+  city. `space` pauses, `←` and `→` step a frame, `r` refetches, and the
+  border shows the frame's local time and its place in the loop. The frames
+  come from RainViewer: fourteen requests when the screen is opened, with
+  the location rounded to a tenth of a degree, and none at launch. The
+  outline is Natural Earth data built into the binary, about 200 KB, so the
+  map needs no request of its own. RainViewer's free terms cover personal
+  and educational use. A failure is shown in the pane with the way to
+  retry, frames that did not arrive are counted on the border, and frames
+  are reused for ten minutes before reopening the screen fetches again.
+
 - **How unusual is today.** The current pane's border now compares the
   day's high with what that date is usually like there: `4°C above normal
   for mid-November`, or `unusually cold, 8°C below normal` when the high is

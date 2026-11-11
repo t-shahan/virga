@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Build src/outline.bin, the coastlines and borders under the radar.
+
+Reads Natural Earth's 1:50m GeoJSON, which is in the public domain, and
+writes the compact form `src/outline.rs` reads. Run it only to change the
+source data or the format; the output is checked in, so a build needs
+neither Python nor the network.
+
+    scripts/build-outline.py DIR
+
+DIR holds ne_50m_coastline.geojson, ne_50m_admin_0_boundary_lines_land.geojson
+and ne_50m_lakes.geojson from
+https://github.com/nvkelso/natural-earth-vector/tree/master/geojson
+
+Format, little-endian, one record per line until the file ends:
+
+    u16      points in the line, at least 2
+    i16 i16  the first point's longitude and latitude, in steps of STEP degrees
+    i8 i8    each later point, as its difference from the one before
+
+A step too long for an i8 is broken into shorter ones, and a line too long
+for a u16 into several that share an end point.
+"""
+
+import json
+import struct
+import sys
+from pathlib import Path
+
+STEP = 0.02
+SOURCES = [
+    "ne_50m_coastline",
+    "ne_50m_admin_0_boundary_lines_land",
+    "ne_50m_lakes",
+]
+MAX_POINTS = 65535
+
+
+def lines_of(path):
+    for feature in json.loads(path.read_text())["features"]:
+        geometry = feature["geometry"]
+        kind, coordinates = geometry["type"], geometry["coordinates"]
+        if kind == "LineString":
+            yield coordinates
+        elif kind in ("MultiLineString", "Polygon"):
+            yield from coordinates
+        elif kind == "MultiPolygon":
+            for polygon in coordinates:
+                yield from polygon
+
+
+def quantised(line):
+    points = []
+    for lon, lat, *_ in line:
+        point = (round(lon / STEP), round(lat / STEP))
+        if not points:
+            points.append(point)
+            continue
+        # Walk to the point in steps an i8 can hold.
+        while points[-1] != point:
+            last = points[-1]
+            dx = max(-127, min(127, point[0] - last[0]))
+            dy = max(-127, min(127, point[1] - last[1]))
+            points.append((last[0] + dx, last[1] + dy))
+    return points
+
+
+def records(points):
+    for start in range(0, len(points) - 1, MAX_POINTS - 1):
+        piece = points[start : start + MAX_POINTS]
+        if len(piece) < 2:
+            continue
+        yield struct.pack("<Hhh", len(piece), *piece[0]) + b"".join(
+            struct.pack("<bb", b[0] - a[0], b[1] - a[1])
+            for a, b in zip(piece, piece[1:])
+        )
+
+
+def main():
+    source = Path(sys.argv[1])
+    out = Path(__file__).resolve().parent.parent / "src" / "outline.bin"
+    data = b"".join(
+        record
+        for name in SOURCES
+        for line in lines_of(source / f"{name}.geojson")
+        for record in records(quantised(line))
+    )
+    out.write_bytes(data)
+    print(f"{out}: {len(data)} bytes")
+
+
+if __name__ == "__main__":
+    main()

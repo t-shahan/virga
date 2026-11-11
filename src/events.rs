@@ -1,6 +1,7 @@
 use crate::app::ActiveLocation;
 use crate::cache;
 use crate::climate_store;
+use crate::radar_view::RadarScene;
 use crate::update::Release;
 use crate::weather::client::Forecast;
 use crate::weather::client::detect_location;
@@ -9,6 +10,7 @@ use crate::weather::client::{Detail, fetch_forecast, fetch_history};
 use crate::weather::climate::Normals;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
+use crate::weather::radar::fetch_radar;
 use anyhow::Result;
 use chrono::{NaiveDate, TimeDelta, Utc};
 use std::path::{Path, PathBuf};
@@ -60,6 +62,11 @@ pub enum Request {
         /// The forecast's own highs for the days just gone, which the
         /// archive's are measured against.
         recent: Vec<(NaiveDate, f64)>,
+    },
+    /// The last two hours of radar around a place. Named by place, like
+    /// the normals: the answer is kept only if it is still wanted there.
+    Radar {
+        location: ActiveLocation,
     },
 }
 
@@ -125,6 +132,13 @@ pub enum Message {
     NormalsFailed {
         error: String,
     },
+    Radar {
+        scene: RadarScene,
+    },
+    RadarFailed {
+        location: ActiveLocation,
+        error: String,
+    },
 }
 
 /// One release probe on its own one-shot thread, never one of the request
@@ -165,6 +179,7 @@ pub struct Workers {
     detect: SyncSender<Request>,
     search: SyncSender<Request>,
     normals: SyncSender<Request>,
+    radar: SyncSender<Request>,
 }
 
 impl Workers {
@@ -178,6 +193,7 @@ impl Workers {
             Request::Detect { .. } => self.detect.try_send(request),
             Request::Search { .. } => self.search.try_send(request),
             Request::Normals { .. } => self.normals.try_send(request),
+            Request::Radar { .. } => self.radar.try_send(request),
         }
     }
 }
@@ -192,12 +208,14 @@ impl Workers {
         detect: SyncSender<Request>,
         search: SyncSender<Request>,
         normals: SyncSender<Request>,
+        radar: SyncSender<Request>,
     ) -> Self {
         Self {
             fetch,
             detect,
             search,
             normals,
+            radar,
         }
     }
 }
@@ -237,6 +255,9 @@ fn spawn_workers_with(
         // A queue of its own, so thirty years of history arriving slowly
         // never stands between the user and a forecast or a search.
         normals: spawn(None),
+        // Fourteen requests to another service. On the fetch queue a slow
+        // radar would hold up the next forecast.
+        radar: spawn(None),
     }
 }
 
@@ -287,6 +308,15 @@ fn serve(request: Request, normals_store: Option<&Path>) -> Message {
                 fetch_history(lat, lon, through)
             })
         }
+        Request::Radar { location } => match fetch_radar(location.lat, location.lon) {
+            Ok(radar) => Message::Radar {
+                scene: RadarScene::new(location, radar),
+            },
+            Err(error) => Message::RadarFailed {
+                location,
+                error: format!("{error:#}"),
+            },
+        },
     }
 }
 
@@ -528,7 +558,7 @@ mod tests {
                 id,
                 locations: Vec::new(),
             },
-            Request::Normals { .. } => Message::NormalsFailed {
+            Request::Normals { .. } | Request::Radar { .. } => Message::NormalsFailed {
                 error: "unused".to_string(),
             },
         });
@@ -637,7 +667,7 @@ mod tests {
                     error: "unused".to_string(),
                 }
             }
-            Request::Normals { .. } => Message::NormalsFailed {
+            Request::Normals { .. } | Request::Radar { .. } => Message::NormalsFailed {
                 error: "unused".to_string(),
             },
         });
