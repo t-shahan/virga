@@ -22,6 +22,7 @@ mod pane;
 mod precip_chart;
 mod precip_week;
 mod precipitation;
+mod radar;
 mod search;
 mod weathergram;
 
@@ -32,6 +33,7 @@ use forecast::{forecast_area_render, forecast_skeleton_render};
 use help::help_render;
 use hourly::hourly_render;
 use legend::{keybind_legend_render, legend_rows};
+use radar::radar_render;
 use search::search_render;
 
 /// Shown wherever the API reported no value for a reading.
@@ -210,6 +212,7 @@ fn render_with(frame: &mut Frame, app: &App, palette: Palette) -> bool {
             Fetch::Failed(msg) => popup_render(frame, page_area, palette, "Error", msg),
             Fetch::Idle => {}
         },
+        Screen::Radar => radar_render(frame, app, palette, content),
         Screen::Search => search_render(frame, app, palette, area),
     }
     // Centred like the key bar below it: the two share the bottom of the

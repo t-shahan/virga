@@ -84,6 +84,9 @@ The weathergram is the default; the choice lasts for the session.
   the current forecast, so today does not sit alone.
 - **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
   an adaptive horizon, and an optional weekly precipitation strip.
+- **Radar** — `m` opens the last two hours of rain as a looping map in
+  braille, over coastlines and borders that are built into the binary, with
+  the loop scrubbable frame by frame.
 - **Forecast confidence** — a dimmed cap on the temperature silhouette shows
   how far an ensemble's runs disagree, hour by hour, and the selected hour
   states its likely range.
@@ -220,9 +223,11 @@ directory:
 | `↑` `↓` | Back / forward a day — on the hourly screen too, keeping the time of day |
 | `n` / `Home` | Jump back to now |
 | `p` | Hourly weathergram — `p` again, `b`, `Enter` or `Esc` to go back |
+| `m` | Radar: the last two hours, looping — `m` again, `b`, `Enter` or `Esc` to go back |
+| `space` | On the radar screen, pause or restart the loop; `←` `→` step a frame and pause it |
 | `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
-| `r` | Refetch the current location |
+| `r` | Refetch the current location — on the radar screen, refetch the radar |
 | `u` | Toggle metric / imperial |
 | `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
 | `?` | Every key for the current screen, on a card — any key closes it |
@@ -319,6 +324,10 @@ flowchart LR
   networking.
 - [`src/weather/client.rs`](src/weather/client.rs) owns the weather,
   air-quality, and geocoding HTTP requests.
+- [`src/weather/radar.rs`](src/weather/radar.rs) fetches RainViewer's radar
+  pictures and reduces each to a grid of intensity levels, so no pixel
+  colour reaches the UI. [`src/outline.rs`](src/outline.rs) reads the
+  embedded coastlines drawn under them.
 - [`src/weather/dto.rs`](src/weather/dto.rs) isolates Open-Meteo's wire formats
   and converts them into the stable domain data in
   [`src/weather/model.rs`](src/weather/model.rs).
@@ -519,6 +528,11 @@ least one of the terminals named under [Limitations](#limitations):
 - The hourly weathergram's `┬` under the current hour and `▲` under the
   selected hour sit beneath their columns at the one-, two-, and three-cell
   hour widths, and the classic chart's `┬` and `═` match.
+- On the radar screen (`m`), the coastline around a coastal city is where a
+  map says it is, the `◉` sits on the city, the loop advances about twice a
+  second and rests on the newest frame, and braille cells line up with no
+  gaps between rows. A font without the braille block shows boxes, which is
+  a font problem and worth noting which font.
 - The `▲`, `┬`, `═`, and box-drawing borders are East Asian ambiguous-width
   glyphs. In a terminal that draws those two cells wide, such as one set to
   an East Asian locale, the hourly views' markers still sit under their
@@ -576,6 +590,19 @@ still publishes and only the tap update is skipped, with a warning.
   high is compared. Until the table arrives, with `VIRGA_CACHE=off`, or if
   the archive request fails, the pane compares the day with the three weeks
   on screen as it did before.
+- The radar is a picture from RainViewer, read back into five bands of
+  intensity by its colours, so it shows where and roughly how hard, and no
+  rainfall rate. It covers the last two hours only; RainViewer no longer
+  serves a forecast. Where no radar station reaches, which is most ocean
+  and much of Africa and Asia, the map is empty, and an empty map cannot
+  tell "dry" from "not covered". The faint scattered dots are echoes below
+  the palette's first solid colour and are often not rain reaching the
+  ground. The view is fixed at about 380 km across at mid-latitudes and
+  does not zoom or pan. The outline is Natural Earth's 1:50m data: fine
+  for a coast, too coarse for a harbour, and without rivers, roads or
+  place names. Each frame's time is on the forecast place's clock. The
+  screen needs a font with the braille block, and is the one screen where a
+  terminal without colour loses information that density only partly keeps.
 - The ensemble is a coarser model than the forecast, so only how much its
   runs disagree is used, centred on the forecast's own temperature.
 - Forecast text is English only.
@@ -614,7 +641,17 @@ recently, so a place is asked about once and not once per launch. With
 `VIRGA_CACHE=off` there is nowhere to keep the table and the request is not
 made. `virga now` never makes it.
 
-Location detection is the one thing that does not go to Open-Meteo. On a launch
+Opening the radar screen makes fourteen requests to
+[RainViewer](https://www.rainviewer.com): one for the list of frames and one
+for each of the thirteen pictures. They are made when you press `m` or
+refresh the radar, never at launch. Each picture request carries the
+location rounded to a tenth of a degree, about eleven kilometres, which is
+all a 380 km picture needs. RainViewer's free API needs no key and its
+[terms](https://www.rainviewer.com/api.html) allow personal and educational
+use only, so a commercial deployment of Virga would need its own
+arrangement with them. Nothing from RainViewer is written to disk.
+
+Location detection is the other thing that does not go to Open-Meteo. On a launch
 where you have not chosen a city, Virga makes a single request to
 [ipapi.co](https://ipapi.co), which resolves the connection's own source address
 to a city. Nothing else is sent — no query string, no identifier, no
@@ -665,6 +702,12 @@ whose [Air Quality API](https://open-meteo.com/en/docs/air-quality-api)
 requires that both be credited. The daily highs behind the normals come from
 Open-Meteo's [Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api),
 which serves reanalysis from the Copernicus Climate Change Service and ECMWF.
+
+Radar data by [RainViewer](https://www.rainviewer.com), credited on the radar
+screen's border as its terms require. The coastlines, borders and lakes under
+it are made with [Natural Earth](https://www.naturalearthdata.com), which is
+in the public domain; `scripts/build-outline.py` packs them into
+`src/outline.bin`.
 
 <details>
 <summary>Full CAMS citation</summary>

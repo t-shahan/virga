@@ -54,9 +54,9 @@ the violation is a general quality problem rather than a specific bug.
 
 ### Security
 
-Virga parses JSON it did not write, from Open-Meteo and from ipapi.co, reads
-a redirect header from GitHub to learn the newest release, and writes files
-into the user's state directory. Review must check:
+Virga parses JSON it did not write, from Open-Meteo, ipapi.co and RainViewer,
+decodes PNGs from RainViewer, reads a redirect header from GitHub to learn
+the newest release, and writes files into the user's state directory. Review must check:
 
 - Every outbound HTTP call sets a timeout. A hung socket freezes the interface.
 - Responses are size-bounded before being read into memory.
