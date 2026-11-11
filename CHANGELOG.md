@@ -12,6 +12,8 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.8.0]
+
 ### Added
 
 - **A radar screen.** `m` on the weather screen opens the last two hours of
@@ -650,7 +652,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/t-shahan/virga/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/t-shahan/virga/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/t-shahan/virga/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/t-shahan/virga/compare/v0.6.0...v0.6.1
