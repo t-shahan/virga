@@ -285,10 +285,6 @@ mod tests {
         super::action_for(key, screen, KeyHintStyle::Hint, false)
     }
 
-    /// The card's footer promises any key closes it. That has to include
-    /// keys the screen has no binding for — Tab, a digit, a function key —
-    /// which would otherwise resolve to `None` and never reach the app,
-    /// leaving the card sitting there against its own word.
     #[test]
     fn the_radar_opens_with_m_and_closes_the_way_it_opened() {
         assert_eq!(
@@ -343,6 +339,10 @@ mod tests {
         }
     }
 
+    /// The card's footer promises any key closes it. That has to include
+    /// keys the screen has no binding for — Tab, a digit, a function key —
+    /// which would otherwise resolve to `None` and never reach the app,
+    /// leaving the card sitting there against its own word.
     #[test]
     fn with_the_reference_open_an_unbound_press_still_closes_it() {
         for code in [KeyCode::Tab, KeyCode::Char('5'), KeyCode::F(5)] {

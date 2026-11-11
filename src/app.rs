@@ -6,7 +6,7 @@ use crate::units::Unit;
 use crate::update::Release;
 use crate::weather::climate::Normals;
 use crate::weather::model::{Location, Weather};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -211,6 +211,16 @@ impl Outcome {
     }
 }
 
+/// How long frames in hand are shown again without asking. RainViewer adds
+/// a frame every ten minutes, so older than this the loop no longer ends
+/// at the present, and reopening the screen hours later would replay a
+/// morning as "the last two hours".
+const RADAR_FRESH: TimeDelta = TimeDelta::minutes(10);
+
+/// Tables held at once. A session rarely visits more places than the store
+/// keeps, and one that does only loses the comparison for the oldest.
+const MAX_CLIMATES: usize = 8;
+
 /// The forecast's highs for the days before today, by date. A date that
 /// will not parse is a day fewer to compare the archive against.
 fn recent_highs(weather: &Weather) -> Vec<(NaiveDate, f64)> {
@@ -278,14 +288,20 @@ pub struct App {
     /// until the answer, so one press cannot queue two.
     pub radar: Fetch<RadarScene>,
     pub playback: Playback,
-    /// The normals for a place, and the place. Read through `normals`,
-    /// which hands them over only while that place is the one on screen.
-    climate: Option<(ActiveLocation, Normals)>,
-    /// The place normals have been asked for and not yet answered, so a
-    /// refresh does not queue the same thirty years twice.
-    pending_normals: Option<ActiveLocation>,
     /// The place the radar was last asked for.
     radar_asked: Option<ActiveLocation>,
+    /// When the frames in hand arrived, by the app's clock.
+    radar_arrived: Option<DateTime<Utc>>,
+    /// The normals that have arrived this session, each with its place.
+    /// Read through `normals`, which hands over the one for the place on
+    /// screen. More than one, so an answer for a city the user has just
+    /// left does not push out the table for the one they went back to.
+    climates: Vec<(ActiveLocation, Normals)>,
+    /// Every place normals have been asked for this session, answered or
+    /// not. A place is asked about once: the request is the heaviest thing
+    /// the app sends, and a refresh must not repeat it because the first
+    /// one failed, timed out, or found too little history.
+    normals_asked: Vec<ActiveLocation>,
     /// Whether there is anywhere to keep a table. Without it every launch
     /// would ask the archive again, which is too much to ask of it, so the
     /// app goes without and shows the comparison it always has.
@@ -422,9 +438,10 @@ impl App {
             tick: 0,
             radar: Fetch::Idle,
             playback: Playback::default(),
-            climate: None,
-            pending_normals: None,
             radar_asked: None,
+            radar_arrived: None,
+            climates: Vec::new(),
+            normals_asked: Vec::new(),
             keeps_normals: false,
             now: Utc::now(),
             selected: 0,
@@ -609,30 +626,18 @@ impl App {
                 }
                 self.fetch_failed(error)
             }
-            // The forecast reached the screen; only the copy for next launch
-            // was lost. Worth a line on the way out, not a frame.
             Message::Normals {
                 location,
                 normals,
                 store_error,
             } => {
-                self.pending_normals
-                    .take_if(|asked| asked.same_place(&location));
-                self.climate = Some((location, normals));
+                self.climates
+                    .retain(|(place, _)| !place.same_place(&location));
+                self.climates.push((location, normals));
+                let surplus = self.climates.len().saturating_sub(MAX_CLIMATES);
+                self.climates.drain(..surplus);
                 Outcome {
-                    warning: store_error.map(|error| {
-                        format!("virga: could not keep the normals for the next launch: {error}")
-                    }),
-                    ..Outcome::nothing()
-                }
-            }
-            Message::NormalsFailed { location, error } => {
-                self.pending_normals
-                    .take_if(|asked| asked.same_place(&location));
-                Outcome {
-                    warning: Some(format!(
-                        "virga: no normals to compare the forecast with: {error}"
-                    )),
+                    warning: store_error.map(|error| format!("virga: {error}")),
                     ..Outcome::nothing()
                 }
             }
@@ -641,6 +646,7 @@ impl App {
             Message::Radar { scene } => {
                 if self.is_awaiting_radar_for(&scene.location) {
                     self.radar = Fetch::Ready(scene);
+                    self.radar_arrived = Some(self.now);
                     self.playback = Playback::default();
                 }
                 Outcome::nothing()
@@ -653,6 +659,16 @@ impl App {
                 }
                 Outcome::nothing()
             }
+            // The place stays asked-for, so nothing repeats the request
+            // until the next launch.
+            Message::NormalsFailed { error } => Outcome {
+                warning: Some(format!(
+                    "virga: no normals to compare the forecast with: {error}"
+                )),
+                ..Outcome::nothing()
+            },
+            // The forecast reached the screen; only the copy for next launch
+            // was lost. Worth a line on the way out, not a frame.
             Message::CacheFailed { error } => Outcome {
                 warning: Some(format!(
                     "virga: could not keep the forecast for the next launch: {error}"
@@ -743,7 +759,7 @@ impl App {
     }
 
     /// Opens the radar screen, asking for frames unless the ones in hand
-    /// are for this place. Waits for a forecast, as the hourly screen does:
+    /// are for this place and still current. Waits for a forecast, as the hourly screen does:
     /// until one loads, `location` may still be the fallback city, and the
     /// radar over somewhere the user is not would be worse than no radar.
     fn open_radar(&mut self) -> Option<Request> {
@@ -751,8 +767,11 @@ impl App {
             return None;
         }
         self.screen = Screen::Radar;
+        let is_current = self
+            .radar_arrived
+            .is_some_and(|arrived| self.now - arrived < RADAR_FRESH);
         match &self.radar {
-            Fetch::Ready(scene) if scene.location.same_place(&self.location) => {
+            Fetch::Ready(scene) if is_current && scene.location.same_place(&self.location) => {
                 self.playback = Playback::default();
                 None
             }
@@ -811,26 +830,25 @@ impl App {
         }
     }
 
-    /// The normals for the place on screen. A table that arrived for a city
-    /// the user has since left stays unread until they return to it.
+    /// The normals for the place on screen, if they have arrived.
     pub fn normals(&self) -> Option<&Normals> {
-        self.climate
-            .as_ref()
-            .filter(|(place, _)| place.same_place(&self.location))
+        self.climates
+            .iter()
+            .find(|(place, _)| place.same_place(&self.location))
             .map(|(_, normals)| normals)
     }
 
     /// The ask for this place's normals, the first time a forecast for it
     /// loads. Called after `location` is the forecast's own.
     fn normals_request(&mut self, weather: &Weather) -> Option<Request> {
-        let asked = self
-            .pending_normals
-            .as_ref()
-            .is_some_and(|place| place.same_place(&self.location));
-        if !self.keeps_normals || asked || self.normals().is_some() {
+        let is_asked = self
+            .normals_asked
+            .iter()
+            .any(|place| place.same_place(&self.location));
+        if !self.keeps_normals || is_asked {
             return None;
         }
-        self.pending_normals = Some(self.location.clone());
+        self.normals_asked.push(self.location.clone());
         Some(Request::Normals {
             location: self.location.clone(),
             recent: recent_highs(weather),
@@ -941,11 +959,11 @@ impl App {
                     self.radar = Fetch::Failed("too many requests at once".to_string());
                 }
             }
-            // Nothing on screen waits for normals, so a dropped ask only has
-            // to stop counting as asked: the next load asks again.
+            // Nothing on screen waits for normals. A request that was never
+            // sent has not been asked, so the next load may ask it.
             Request::Normals { location, .. } => {
-                self.pending_normals
-                    .take_if(|asked| asked.same_place(&location));
+                self.normals_asked
+                    .retain(|asked| !asked.same_place(&location));
             }
         }
         None
@@ -2611,6 +2629,31 @@ mod tests {
         assert!(!app.is_fetching(), "the forecast was not refetched");
     }
 
+    /// Frames from this morning are not "the last two hours" this
+    /// afternoon: reopening the screen once they have aged asks again.
+    #[test]
+    fn frames_that_have_aged_are_fetched_again_on_reopening() {
+        let mut app = App::new();
+        loaded(&mut app);
+        app.on_action(Action::OpenRadar);
+        let here = app.location.clone();
+        app.on_message(Message::Radar {
+            scene: scene_for(&here, 5),
+        });
+        app.on_action(Action::Back);
+
+        app.now += TimeDelta::minutes(9);
+        assert!(app.on_action(Action::OpenRadar).is_none(), "still current");
+        app.on_action(Action::Back);
+
+        app.now += TimeDelta::minutes(2);
+        assert!(matches!(
+            app.on_action(Action::OpenRadar),
+            Some(Request::Radar { .. })
+        ));
+        assert!(app.is_awaiting_radar());
+    }
+
     /// Frames for a city the user has since left are not shown over the
     /// new one, and an answer nobody is waiting for is dropped.
     #[test]
@@ -2724,18 +2767,26 @@ mod tests {
         assert!(loaded_into(&mut app).request.is_none());
     }
 
-    /// A failure is said on the way out and forgotten, so the next load
-    /// tries again; and a table for a city the user has left is not shown
-    /// against the one they are in.
+    fn elsewhere() -> ActiveLocation {
+        ActiveLocation {
+            label: "Elsewhere".to_string(),
+            lat: 1.0,
+            lon: 2.0,
+        }
+    }
+
+    /// A failure is said on the way out and the place is not asked about
+    /// again this session: the request is too heavy to repeat on every
+    /// refresh. A request that never left is another matter.
     #[test]
-    fn failed_normals_are_retried_and_foreign_ones_are_not_shown() {
+    fn failed_normals_are_reported_and_not_asked_for_again() {
         let mut app = App::new();
         app.keeps_normals = true;
-        let here = app.location.clone();
-        loaded_into(&mut app);
+        let Some(request) = loaded_into(&mut app).request else {
+            panic!("the first load asks")
+        };
 
         let outcome = app.on_message(Message::NormalsFailed {
-            location: here.clone(),
             error: "http status: 503".to_string(),
         });
         let warning = outcome.warning.expect("the reason reaches the user");
@@ -2744,30 +2795,70 @@ mod tests {
             "{warning}"
         );
         app.refresh();
+        assert!(loaded_into(&mut app).request.is_none());
+
+        app.on_dispatch_dropped(request);
+        app.refresh();
         assert!(matches!(
             loaded_into(&mut app).request,
             Some(Request::Normals { .. })
         ));
+    }
 
-        let elsewhere = ActiveLocation {
-            label: "Elsewhere".to_string(),
-            lat: 1.0,
-            lon: 2.0,
-        };
+    /// A table for a city the user is not in is not shown against the one
+    /// they are, and does not push that one's table out either: at A with
+    /// its table, B's answer arriving late leaves A's where it was.
+    #[test]
+    fn a_late_table_for_another_place_does_not_displace_this_ones() {
+        let mut app = App::new();
+        app.keeps_normals = true;
+        let here = app.location.clone();
+        loaded_into(&mut app);
+
         app.on_message(Message::Normals {
-            location: elsewhere,
-            normals: Normals::flat(20.0, 5.0),
+            location: elsewhere(),
+            normals: Normals::flat(30.0, 5.0),
             store_error: None,
         });
-        assert!(app.normals().is_none());
+        assert!(
+            app.normals().is_none(),
+            "another place's table is not this one's"
+        );
 
         let kept = app.on_message(Message::Normals {
             location: here,
             normals: Normals::flat(20.0, 5.0),
-            store_error: Some("disk full".to_string()),
+            store_error: Some("could not keep the normals: disk full".to_string()),
         });
-        assert!(app.normals().is_some(), "unsaved is still usable");
         assert!(kept.warning.is_some_and(|w| w.contains("disk full")));
+
+        app.on_message(Message::Normals {
+            location: elsewhere(),
+            normals: Normals::flat(31.0, 5.0),
+            store_error: None,
+        });
+        assert_eq!(app.normals(), Some(&Normals::flat(20.0, 5.0)));
+
+        app.location = elsewhere();
+        assert_eq!(app.normals(), Some(&Normals::flat(31.0, 5.0)));
+    }
+
+    #[test]
+    fn only_the_newest_tables_are_held() {
+        let mut app = App::new();
+        for i in 0..=MAX_CLIMATES {
+            app.on_message(Message::Normals {
+                location: ActiveLocation {
+                    label: format!("Place {i}"),
+                    lat: i as f64,
+                    lon: 0.0,
+                },
+                normals: Normals::flat(i as f64, 1.0),
+                store_error: None,
+            });
+        }
+        assert_eq!(app.climates.len(), MAX_CLIMATES);
+        assert!(app.climates.iter().all(|(place, _)| place.lat != 0.0));
     }
 
     /// Both supplementary requests can fail on one load, and the single

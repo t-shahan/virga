@@ -533,10 +533,11 @@ least one of the terminals named under [Limitations](#limitations):
   second and rests on the newest frame, and braille cells line up with no
   gaps between rows. A font without the braille block shows boxes, which is
   a font problem and worth noting which font.
-- The `▲`, `┬`, `═`, and box-drawing borders are East Asian ambiguous-width
-  glyphs. In a terminal that draws those two cells wide, such as one set to
-  an East Asian locale, the hourly views' markers still sit under their
-  columns and the week strip's rows still share one axis.
+- The `▲`, `┬`, `═`, `◉`, and box-drawing borders are East Asian
+  ambiguous-width glyphs. In a terminal that draws those two cells wide,
+  such as one set to an East Asian locale, the hourly views' markers still
+  sit under their columns, the week strip's rows still share one axis, and
+  the radar's `◉` does not push its row of the map sideways.
 
 ### Cutting a release
 
@@ -595,7 +596,9 @@ still publishes and only the tap update is skipped, with a warning.
   rainfall rate. It covers the last two hours only; RainViewer no longer
   serves a forecast. Where no radar station reaches, which is most ocean
   and much of Africa and Asia, the map is empty, and an empty map cannot
-  tell "dry" from "not covered". The faint scattered dots are echoes below
+  tell "dry" from "not covered". If frames fail to arrive the loop is shown
+  without them and the border counts them. Frames are reused for ten
+  minutes; after that, reopening the screen fetches again. The faint scattered dots are echoes below
   the palette's first solid colour and are often not rain reaching the
   ground. The view is fixed at about 380 km across at mid-latitudes and
   does not zoom or pan. The outline is Natural Earth's 1:50m data: fine
@@ -632,12 +635,13 @@ nothing is remembered — or none, when the app's last forecast for the city
 is under an hour old.
 
 The first time the app loads a place it also asks Open-Meteo's archive once
-for that place's daily highs since 1991. This is by far the largest thing
-Virga asks for: Open-Meteo weighs a request by its span, and thirty-six
-years of one variable counts as several hundred calls against the daily
-allowance. Virga reduces the answer to a table of 366 rows and keeps it in
-`normals.json` in the state directory, for the eight places looked at most
-recently, so a place is asked about once and not once per launch. With
+for that place's daily highs from 1991 to 2020, and in a second, small
+request for the last month. The first is by far the largest thing Virga
+asks for: Open-Meteo weighs a request by its span, and thirty years of one
+variable counts as several hundred calls against the daily allowance. Virga reduces the answer to a table of 366 rows and keeps it in
+`normals.json` in the state directory, for the eight places used most
+recently, so a place is asked about once and not once per launch. A request
+that fails is not repeated until the next launch. With
 `VIRGA_CACHE=off` there is nowhere to keep the table and the request is not
 made. `virga now` never makes it.
 

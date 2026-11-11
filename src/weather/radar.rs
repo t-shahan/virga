@@ -35,9 +35,11 @@ const MAX_FRAMES: usize = 16;
 /// address. The marker is still drawn at the place itself.
 const CENTER_STEP: f64 = 0.1;
 
-/// RainViewer's only free palette. The colours it paints are read back by
-/// `Level::of`, so this and that function change together.
-const COLOR_SCHEME: u8 = 0;
+/// "Universal Blue" in RainViewer's numbering, the palette `Level::of`
+/// reads back, so this and that function change together. The service
+/// currently paints that palette whatever number is sent; naming it means
+/// a service that starts honouring the number again changes nothing here.
+const COLOR_SCHEME: u8 = 2;
 
 /// How hard it is falling, in the bands the palette makes distinguishable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,6 +151,9 @@ pub struct Radar {
     center_lat: f64,
     center_lon: f64,
     pub frames: Vec<Frame>,
+    /// Frames the service listed that did not arrive. The loop is shown
+    /// without them, and says so: two frames are not two hours.
+    pub missing: usize,
 }
 
 impl Radar {
@@ -187,6 +192,7 @@ impl Radar {
             center_lat,
             center_lon,
             frames,
+            missing: 0,
         }
     }
 }
@@ -299,6 +305,7 @@ pub(crate) fn fetch_radar_with(
     Ok(Radar {
         center_lat,
         center_lon,
+        missing: listed.len() - frames.len(),
         frames,
     })
 }
@@ -309,10 +316,14 @@ pub(crate) fn fetch_radar_with(
 /// down would otherwise be waited on once per frame.
 const FORGIVEN_FRAMES: usize = 1;
 
+/// Frames `0..count`, oldest first, asked for newest first. When the
+/// attempt is cut short, what is in hand is then the present and the
+/// recent past, which is what the screen is for, and not the far end of
+/// two hours ago.
 fn gather(count: usize, mut fetch: impl FnMut(usize) -> Result<Frame>) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut failures = Vec::new();
-    for index in 0..count {
+    for index in (0..count).rev() {
         match fetch(index) {
             Ok(frame) => frames.push(frame),
             Err(error) => failures.push(error),
@@ -321,6 +332,7 @@ fn gather(count: usize, mut fetch: impl FnMut(usize) -> Result<Frame>) -> Result
             break;
         }
     }
+    frames.reverse();
     match failures.into_iter().next() {
         Some(first) if frames.is_empty() => Err(first),
         _ => Ok(frames),
@@ -473,17 +485,21 @@ mod tests {
             [0, 2, 3, 4]
         );
 
-        let mut asked = 0;
+        let mut asked = Vec::new();
         let two_gaps = gather(13, |i| {
-            asked += 1;
-            if i == 1 || i == 3 {
+            asked.push(i);
+            if i == 11 || i == 9 {
                 bail!("timed out")
             }
             dry(i as i64)
         })
         .unwrap();
-        assert_eq!(two_gaps.len(), 2, "what had arrived is kept");
-        assert_eq!(asked, 4, "and the rest are not waited for");
+        assert_eq!(asked, [12, 11, 10, 9], "newest first, and no further");
+        assert_eq!(
+            two_gaps.iter().map(|f| f.time).collect::<Vec<_>>(),
+            [10, 12],
+            "the newest are what is kept, oldest first"
+        );
     }
 
     #[test]
@@ -495,8 +511,31 @@ mod tests {
         })
         .unwrap_err();
 
-        assert_eq!(failed.to_string(), "failure 0");
+        assert_eq!(failed.to_string(), "failure 12");
         assert_eq!(asked, FORGIVEN_FRAMES + 1);
+    }
+
+    /// A PNG of the right size and the wrong kind, as a service that
+    /// changed its palette to greyscale would send.
+    #[test]
+    fn a_frame_that_is_not_colour_is_refused() {
+        let mut grey = Vec::new();
+        {
+            let side = FRAME_SIDE as u32;
+            let mut encoder = png::Encoder::new(&mut grey, side, side);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&vec![128; FRAME_SIDE * FRAME_SIDE])
+                .unwrap();
+        }
+
+        let refused = Frame::decode(0, &grey).unwrap_err();
+        assert!(
+            refused.to_string().contains("not 8-bit colour"),
+            "{refused:#}"
+        );
     }
 
     /// The centre of the picture is the centre pixel, east is right and
@@ -587,7 +626,7 @@ mod tests {
         // The list, then two frames: the second failure ends the attempt.
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
         let asked = log.lock().unwrap().join("\n");
-        assert!(asked.contains("/256/6/52.5/13.4/0/0_0.png"), "{asked}");
+        assert!(asked.contains("/256/6/52.5/13.4/2/0_0.png"), "{asked}");
         assert!(
             !asked.contains("13.405"),
             "the exact place is not sent: {asked}"
@@ -617,5 +656,21 @@ mod tests {
         println!("frames: {}", radar.frames.len());
         assert!(radar.frames.len() >= 10);
         assert!(radar.frames.windows(2).all(|p| p[0].time < p[1].time));
+
+        // Somewhere on a frame this size there is nearly always an echo,
+        // and the palette puts far more of it in the blues than the reds.
+        // All of it reading as heavy would mean the colours had changed.
+        let count = |wanted: fn(Level) -> bool| {
+            radar
+                .frames
+                .iter()
+                .flat_map(|f| (0..FRAME_SIDE * FRAME_SIDE).map(move |i| (f, i)))
+                .filter(|(f, i)| wanted(f.level_at(i % FRAME_SIDE, i / FRAME_SIDE)))
+                .count()
+        };
+        let blues = count(|level| matches!(level, Level::Light | Level::Moderate));
+        let reds = count(|level| matches!(level, Level::Heavy | Level::Intense));
+        println!("light or moderate: {blues}  heavy or intense: {reds}");
+        assert!(reds == 0 || blues > reds);
     }
 }

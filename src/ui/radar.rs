@@ -72,12 +72,15 @@ fn notice_render(
 fn scene_render(frame: &mut Frame, app: &App, scene: &RadarScene, palette: Palette, area: Rect) {
     let frames = &scene.radar.frames;
     let index = app.playback.frame(frames.len());
-    let heading = if scene.has_rain {
-        "Radar"
-    } else {
-        "Radar · nothing falling in range"
+    // Missing frames first: with most of the loop absent, "nothing
+    // falling" would be a claim about hours nobody has seen.
+    let heading = match (scene.radar.missing, scene.has_rain) {
+        (0, true) => "Radar".to_string(),
+        (0, false) => "Radar · nothing falling in range".to_string(),
+        (1, _) => "Radar · 1 frame missing".to_string(),
+        (missing, _) => format!("Radar · {missing} frames missing"),
     };
-    let mut block = pane(&scene.location.label, heading, palette, area.width);
+    let mut block = pane(&scene.location.label, &heading, palette, area.width);
 
     let offset = match &app.weather {
         Fetch::Ready(weather) => weather.utc_offset_secs,
@@ -659,6 +662,67 @@ mod tests {
             bar.contains("[b] back") && bar.contains("[q] quit"),
             "{bar:?}"
         );
+    }
+
+    /// A loop cut short says how short, in place of any claim about rain.
+    #[test]
+    fn missing_frames_are_counted_on_the_border() {
+        let dry = frame_at(0, Level::None, |_, _| false);
+        let mut app = app_showing(copenhagen(), vec![dry]);
+        let Fetch::Ready(scene) = &mut app.radar else {
+            panic!("a scene")
+        };
+        scene.radar.missing = 11;
+
+        let top = row(&drawn(&app, 80, 20), 0);
+        assert!(top.contains("Radar · 11 frames missing"), "{top:?}");
+        assert!(!top.contains("nothing falling"), "{top:?}");
+
+        let Fetch::Ready(scene) = &mut app.radar else {
+            panic!("a scene")
+        };
+        scene.radar.missing = 1;
+        let top = row(&drawn(&app, 80, 20), 0);
+        assert!(top.contains("Radar · 1 frame missing"), "{top:?}");
+    }
+
+    /// The spinner and a long error at the app's floor, in a pane with no
+    /// interior, and in one a single cell across.
+    #[test]
+    fn the_notices_draw_at_awkward_sizes_without_panicking() {
+        let mut app = app_showing(copenhagen(), Vec::new());
+        for state in [
+            Fetch::Loading,
+            Fetch::Idle,
+            Fetch::Failed("the radar service at https://example.invalid: ".repeat(8)),
+        ] {
+            app.radar = state;
+            for (width, height) in [(34, 12), (34, 3), (3, 3), (2, 2), (1, 1), (200, 4)] {
+                let buffer = drawn(&app, width, height);
+                assert_eq!(buffer.area.height, height);
+            }
+        }
+    }
+
+    /// The key card over the radar lists the radar's own keys.
+    #[test]
+    fn the_key_card_names_the_radars_bindings() {
+        let dry = frame_at(0, Level::None, |_, _| false);
+        let mut app = app_showing(at_sea(), vec![dry]);
+        app.help_visible = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::ui::render(frame, &app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = (0..24).map(|y| row(&buffer, y) + "\n").collect();
+
+        for binding in ["[space] pause", "[←→] frame", "[r] refresh", "[b] back"] {
+            assert!(text.contains(binding), "{binding} in\n{text}");
+        }
+        assert!(!text.contains("hourly"), "{text}");
     }
 
     #[test]

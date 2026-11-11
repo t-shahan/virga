@@ -124,12 +124,12 @@ pub enum Message {
     Normals {
         location: ActiveLocation,
         normals: Normals,
-        /// Why the table was not kept for the next launch, when it was not.
-        /// It is still a table, and still on screen.
+        /// What went wrong with the file the table is kept in, as a whole
+        /// sentence: it could not be written, or could not be read and was
+        /// replaced. Either way this is still a table, and still on screen.
         store_error: Option<String>,
     },
     NormalsFailed {
-        location: ActiveLocation,
         error: String,
     },
     Radar {
@@ -321,8 +321,9 @@ fn serve(request: Request, normals_store: Option<&Path>) -> Message {
 }
 
 /// How far behind today the archive is asked for when the forecast offered
-/// no past day to end on. The archive's newest day trails the calendar, and
-/// a date it has not reached is refused outright.
+/// no past day to end on. The forecast asks for fourteen, so this is for a
+/// reply that came without them. The archive answers for yesterday; a day
+/// further back leaves room for a place whose yesterday has not ended.
 const ARCHIVE_LAG: TimeDelta = TimeDelta::days(2);
 
 /// A place's normals: from the store when it has them, and otherwise from
@@ -334,15 +335,21 @@ fn normals_message(
     recent: &[(NaiveDate, f64)],
     fetch: impl FnOnce(NaiveDate) -> Result<Vec<(NaiveDate, f64)>>,
 ) -> Message {
-    // A store that cannot be read costs the request it would have saved.
-    // The save below replaces it, and says so if it cannot.
-    if let Some(Ok(Some(normals))) = store.map(|path| climate_store::load(path, &location)) {
-        return Message::Normals {
-            location,
-            normals,
-            store_error: None,
-        };
-    }
+    // A store that cannot be read costs the request it would have saved,
+    // and the save below replaces it. Both are said on the way out.
+    let unread = match store.map(|path| climate_store::load(path, &location)) {
+        Some(Ok(Some(normals))) => {
+            return Message::Normals {
+                location,
+                normals,
+                store_error: None,
+            };
+        }
+        Some(Err(error)) => Some(format!(
+            "could not read the kept normals, so they were fetched again: {error:#}"
+        )),
+        Some(Ok(None)) | None => None,
+    };
     let through = recent
         .iter()
         .map(|(date, _)| *date)
@@ -352,7 +359,6 @@ fn normals_message(
         Ok(history) => history,
         Err(error) => {
             return Message::NormalsFailed {
-                location,
                 error: format!("{error:#}"),
             };
         }
@@ -360,13 +366,13 @@ fn normals_message(
     let normals = Normals::from_history(&history, recent);
     if normals.is_empty() {
         return Message::NormalsFailed {
-            location,
             error: "the archive had too little history for this place".to_string(),
         };
     }
-    let store_error = store
+    let unsaved = store
         .and_then(|path| climate_store::save(path, &location, &normals).err())
-        .map(|error| format!("{error:#}"));
+        .map(|error| format!("could not keep the normals for the next launch: {error:#}"));
+    let store_error = unsaved.or(unread);
     Message::Normals {
         location,
         normals,
@@ -479,11 +485,34 @@ mod tests {
     #[test]
     fn an_archive_failure_or_an_empty_history_is_a_reason_not_a_table() {
         let failed = normals_message(None, frederick(), &[], |_| Err(anyhow::anyhow!("503")));
-        assert!(matches!(failed, Message::NormalsFailed { error, .. } if error.contains("503")));
+        assert!(matches!(failed, Message::NormalsFailed { error } if error.contains("503")));
 
         let thin = normals_message(None, frederick(), &[], |_| Ok(Vec::new()));
+        assert!(matches!(thin, Message::NormalsFailed { error } if error.contains("too little")));
+    }
+
+    /// A file that is there and will not parse is not passed over in
+    /// silence: the table is fetched again, the file replaced, and the
+    /// reason carried to the user.
+    #[test]
+    fn an_unreadable_store_is_replaced_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("normals.json");
+        std::fs::write(&store, "not json").unwrap();
+
+        let message = normals_message(Some(&store), frederick(), &[], |_| Ok(steady_history()));
+
+        let Message::Normals { store_error, .. } = message else {
+            panic!("the archive answered")
+        };
+        let reason = store_error.expect("the unreadable file is reported");
         assert!(
-            matches!(thin, Message::NormalsFailed { error, .. } if error.contains("too little"))
+            reason.contains("could not read the kept normals"),
+            "{reason}"
+        );
+        assert!(
+            climate_store::load(&store, &frederick()).unwrap().is_some(),
+            "and replaced"
         );
     }
 
@@ -501,7 +530,7 @@ mod tests {
         let Message::Normals { store_error, .. } = message else {
             panic!("the archive answered")
         };
-        assert!(store_error.is_some());
+        assert!(store_error.is_some_and(|reason| reason.contains("could not keep")));
     }
 
     /// Workers whose fetches block until `release` is signalled, once per
@@ -529,12 +558,9 @@ mod tests {
                 id,
                 locations: Vec::new(),
             },
-            Request::Normals { location, .. } | Request::Radar { location } => {
-                Message::NormalsFailed {
-                    location,
-                    error: "unused".to_string(),
-                }
-            }
+            Request::Normals { .. } | Request::Radar { .. } => Message::NormalsFailed {
+                error: "unused".to_string(),
+            },
         });
         (workers, release)
     }
@@ -641,12 +667,9 @@ mod tests {
                     error: "unused".to_string(),
                 }
             }
-            Request::Normals { location, .. } | Request::Radar { location } => {
-                Message::NormalsFailed {
-                    location,
-                    error: "unused".to_string(),
-                }
-            }
+            Request::Normals { .. } | Request::Radar { .. } => Message::NormalsFailed {
+                error: "unused".to_string(),
+            },
         });
         workers.try_send(search(1)).expect("room for a search");
         assert!(matches!(

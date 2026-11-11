@@ -25,7 +25,8 @@ refuse to publish a version this file does not describe.
   outline is Natural Earth data built into the binary, about 200 KB, so the
   map needs no request of its own. RainViewer's free terms cover personal
   and educational use. A failure is shown in the pane with the way to
-  retry.
+  retry, frames that did not arrive are counted on the border, and frames
+  are reused for ten minutes before reopening the screen fetches again.
 
 - **How unusual is today.** The current pane's border now compares the
   day's high with what that date is usually like there: `4°C above normal
@@ -35,8 +36,8 @@ refuse to publish a version this file does not describe.
   shifted to agree with the forecast's model over the recent days both
   describe. The archive is asked once per place, a large request that
   Open-Meteo counts as several hundred calls, and the result is kept in
-  `normals.json` beside the forecast cache for the eight most recent
-  places. Until the table arrives, with `VIRGA_CACHE=off`, or if the
+  `normals.json` beside the forecast cache for the eight places used most
+  recently. Until the table arrives, with `VIRGA_CACHE=off`, or if the
   request fails, the pane keeps the comparison with the days on screen,
   and a failure is printed on exit.
 
