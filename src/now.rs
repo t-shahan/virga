@@ -11,6 +11,7 @@ use crate::app::{ActiveLocation, Remembered};
 use crate::units::Unit;
 use crate::weather::code;
 use crate::weather::model::Weather;
+use crate::weather::nowcast;
 use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
 
 /// How long a detection that went unanswered keeps the next report from
@@ -85,6 +86,9 @@ pub(crate) fn report(
     let mut lines = vec![headline(label, weather, now)];
     lines.extend(conditions(weather, unit));
     lines.extend(outlook(weather, unit));
+    // Last, so the lines a script already takes by position stay put on
+    // the days this one appears.
+    lines.extend(nowcast::outlook(&weather.nowcast).map(|outlook| outlook.sentence()));
     lines.join("\n")
 }
 
@@ -542,6 +546,23 @@ mod tests {
         );
     }
 
+    /// The nowcast is a reading like any other: there when something is
+    /// due to fall, and absent, not "dry", when nothing is.
+    #[test]
+    fn the_nowcast_is_the_last_line_and_only_when_something_falls() {
+        let wet = Weather::fixture(5, 2).with_nowcast(&[0.0, 0.0, 0.4, 0.6, 0.2, 0.0, 0.0, 0.0]);
+        let text = report("Berlin, Germany", &wet, Unit::Metric, here());
+        assert_eq!(text.lines().count(), 4);
+        assert_eq!(
+            text.lines().last(),
+            Some("Rain in about 30 min, lasting 45")
+        );
+
+        let dry = Weather::fixture(5, 2).with_nowcast(&[0.0; 8]);
+        let text = report("Berlin, Germany", &dry, Unit::Metric, here());
+        assert_eq!(text.lines().count(), 3);
+    }
+
     /// The one unconditional promise: whatever the response was missing, the
     /// report names the place it describes.
     #[test]
@@ -559,6 +580,7 @@ mod tests {
             hourly: Vec::new(),
             now_hour: 0,
             air_quality: None,
+            nowcast: Vec::new(),
         };
 
         assert_eq!(

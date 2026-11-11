@@ -5,7 +5,8 @@ use crate::ui::pane::{bottom_titles, compass, detail_line};
 use crate::ui::{TITLE_GUTTER, UNKNOWN, status_mark, title_room, truncate};
 use crate::units::Unit;
 use crate::weather::code::{aqi_label, description};
-use crate::weather::model::{DailyForecast, Weather};
+use crate::weather::model::{DailyForecast, QuarterHour, Weather};
+use crate::weather::nowcast;
 use chrono::NaiveDate;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -72,6 +73,7 @@ fn pane_block(
     // an interior row. Nothing stops two titles on the same row overwriting
     // each other, so each border gets an explicit budget.
     let summary = day.map_or_else(String::new, |d| comparison(weather, d, unit));
+    let nowcast = nowcast_titles(app, weather, showing_today);
 
     let aqi = air_quality_title(weather, day, showing_today);
     let (city, condition, aqi) = top_titles(
@@ -87,7 +89,13 @@ fn pane_block(
     let (summary, when) = match &mark {
         Some(mark) if mark.alone => (Some(mark.text.clone()), String::new()),
         Some(mark) => bottom_titles(&mark.text, &when, area.width),
-        None => bottom_titles(&summary, &when, area.width),
+        // What is about to fall outranks how the day compares, and gives
+        // the corner back the moment the window is dry.
+        None => nowcast
+            .iter()
+            .chain([&summary])
+            .find_map(|text| bottom_titles(text, &when, area.width).0)
+            .map_or((None, when.clone()), |text| (Some(text), when.clone())),
     };
 
     let mut block =
@@ -111,6 +119,45 @@ fn pane_block(
         block = block.title_bottom(Line::from(summary).fg(color).left_aligned());
     }
     block
+}
+
+/// The next two hours' sentence for the bottom border, longest wording
+/// first: with its strip, then alone. Empty when the window is dry, when
+/// another day is selected, and for a forecast read back from disk, whose
+/// minutes were counted from a launch that is over.
+fn nowcast_titles(app: &App, weather: &Weather, showing_today: bool) -> Vec<String> {
+    if !showing_today || app.shown.as_of.is_some() {
+        return Vec::new();
+    }
+    let Some(outlook) = nowcast::outlook(&weather.nowcast) else {
+        return Vec::new();
+    };
+    let sentence = outlook.sentence();
+    vec![
+        format!("{sentence} {}", nowcast_strip(&weather.nowcast)),
+        sentence,
+    ]
+}
+
+/// A quarter hour's fall as a bar. Light, moderate and heavy rain are
+/// conventionally split at 2.5 and 7.6 mm an hour; these are those rates
+/// over fifteen minutes.
+const MODERATE_MM: f64 = 0.625;
+const HEAVY_MM: f64 = 1.9;
+
+/// One cell per quarter hour, by height, so the strip reads without colour.
+/// It stops at a missing amount, where the sentence stops too.
+fn nowcast_strip(quarters: &[QuarterHour]) -> String {
+    quarters
+        .iter()
+        .map_while(|quarter| quarter.precip_mm)
+        .map(|mm| match mm {
+            mm if mm <= 0.0 => '▁',
+            mm if mm < MODERATE_MM => '▃',
+            mm if mm < HEAVY_MM => '▅',
+            _ => '█',
+        })
+        .collect()
 }
 
 fn condition_of(
@@ -664,6 +711,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn bottom_border(app: &crate::app::App, weather: &Weather, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut t = Terminal::new(TestBackend::new(width, 9)).unwrap();
+        t.draw(|f| current_area_render(f, app, weather, palette(), f.area()))
+            .unwrap();
+        let buf = t.backend().buffer();
+        (0..width).map(|x| buf[(x, 8)].symbol()).collect()
+    }
+
+    const SHOWER: [f64; 8] = [0.0, 0.0, 0.4, 0.7, 2.5, 0.0, 0.0, 0.0];
+
+    fn app_on_today(weather: &Weather) -> crate::app::App {
+        let mut app = crate::app::App::new();
+        app.selected_day = weather.today_index;
+        app
+    }
+
+    /// The strip gives way first, then the sentence gives the corner back to
+    /// the comparison, and the day on the right outlasts all of them.
+    #[test]
+    fn the_nowcast_takes_the_comparisons_corner_and_degrades_by_width() {
+        let weather = Weather::fixture(22, 14).with_nowcast(&SHOWER);
+        let app = app_on_today(&weather);
+
+        let wide = bottom_border(&app, &weather, 80);
+        assert!(
+            wide.contains("Rain in about 30 min, lasting 45 ▁▁▃▅█▁▁▁"),
+            "{wide:?}"
+        );
+        assert!(!wide.contains("average"), "{wide:?}");
+
+        // Room for 44 characters of title: the sentence and "Today", no strip.
+        let snug = bottom_border(&app, &weather, 48);
+        assert!(snug.contains("lasting 45─"), "{snug:?}");
+        assert!(!snug.contains('▃'), "{snug:?}");
+
+        for width in [34u16, 40] {
+            let narrow = bottom_border(&app, &weather, width);
+            assert!(!narrow.contains("Rain"), "width {width}: {narrow:?}");
+            assert!(narrow.contains("Today"), "width {width}: {narrow:?}");
+        }
+    }
+
+    #[test]
+    fn a_dry_window_leaves_the_comparison_where_it_was() {
+        let weather = Weather::fixture(22, 14).with_nowcast(&[0.0; 8]);
+        let app = app_on_today(&weather);
+
+        let bottom = bottom_border(&app, &weather, 80);
+        assert!(bottom.contains("average"), "{bottom:?}");
+        assert!(!bottom.contains('▁'), "{bottom:?}");
+    }
+
+    /// The sentence is about the next two hours from now. Another day's
+    /// summary has no use for it, and a forecast read back from disk counted
+    /// its minutes from a launch that is over.
+    #[test]
+    fn the_nowcast_is_only_shown_for_today_on_a_live_forecast() {
+        let weather = Weather::fixture(22, 14).with_nowcast(&SHOWER);
+
+        let mut another_day = app_on_today(&weather);
+        another_day.selected_day = 16;
+        let bottom = bottom_border(&another_day, &weather, 80);
+        assert!(!bottom.contains("Rain"), "{bottom:?}");
+
+        let mut cached = app_on_today(&weather);
+        cached.shown.as_of = Some("17:52".to_string());
+        for width in [40u16, 80] {
+            let bottom = bottom_border(&cached, &weather, width);
+            assert!(!bottom.contains("Rain"), "width {width}: {bottom:?}");
+        }
+    }
+
+    #[test]
+    fn the_strip_stops_at_a_missing_amount() {
+        let mut weather = Weather::fixture(22, 14).with_nowcast(&[0.0, 0.3, 0.3, 0.0]);
+        weather.nowcast[2].precip_mm = None;
+        assert_eq!(nowcast_strip(&weather.nowcast), "▁▃");
     }
 
     /// Today's figure is a reading taken now; another day's is the worst hour

@@ -278,6 +278,55 @@ mod tests {
         assert_eq!(cached.weather.today_index, 1);
     }
 
+    /// A report answered from disk half an hour after the fetch counts its
+    /// minutes from now, not from the fetch.
+    #[test]
+    fn a_cached_nowcast_loses_the_quarters_that_have_passed() {
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = local(2026, 8, 2, 0, 5);
+        let path = dir.path().join(FILE);
+        let weather = forecast(fetched).with_nowcast(&[0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0]);
+        let bytes = encode(&frederick(), &weather, fetched.with_timezone(&Utc)).unwrap();
+        write(&path, &bytes).unwrap();
+
+        let cached = load(
+            &path,
+            &frederick(),
+            local(2026, 8, 2, 0, 35),
+            REPORT_MAX_AGE,
+        )
+        .unwrap()
+        .expect("a half hour old forecast answers the report");
+
+        assert_eq!(cached.weather.nowcast.len(), 6);
+        assert_eq!(
+            crate::weather::nowcast::outlook(&cached.weather.nowcast).map(|o| o.sentence()),
+            Some("Rain in about 30 min, lasting 30".to_string())
+        );
+    }
+
+    /// A cache written before the nowcast existed has no such field, and
+    /// still opens the app.
+    #[test]
+    fn a_cache_without_a_nowcast_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = local(2026, 8, 2, 12, 0);
+        let path = written(dir.path(), fetched);
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        document["weather"]
+            .as_object_mut()
+            .unwrap()
+            .remove("nowcast")
+            .expect("the field is written");
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let cached = load(&path, &frederick(), fetched, MAX_AGE)
+            .unwrap()
+            .unwrap();
+        assert!(cached.weather.nowcast.is_empty());
+    }
+
     #[test]
     fn a_fetch_before_midnight_says_yesterday() {
         let dir = tempfile::tempdir().unwrap();
