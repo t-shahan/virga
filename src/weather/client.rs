@@ -5,6 +5,7 @@ use crate::weather::dto::GeocodeDto;
 use crate::weather::dto::GeocodeResultDto;
 use crate::weather::model::AirQualityReport;
 use crate::weather::model::Location;
+use crate::weather::model::NOWCAST_QUARTERS;
 use crate::weather::model::Weather;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -31,6 +32,7 @@ const TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
 /// either side would otherwise deserialize to an empty series with no error.
 pub(super) const DAILY_FIELDS: &str = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_hours,wind_gusts_10m_max,wind_direction_10m_dominant,daylight_duration";
 pub(super) const HOURLY_FIELDS: &str = "precipitation,precipitation_probability,snowfall,weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m";
+pub(super) const NOWCAST_FIELDS: &str = "precipitation,snowfall";
 
 /// Detection sits in front of the first frame of weather, so its budget is
 /// tighter than the forecast's. A provider having a bad day should cost a
@@ -226,6 +228,10 @@ fn fetch_daily_with(agent: &Agent, endpoints: &Endpoints, lat: f64, lon: f64) ->
         // an already-warm pooled connection beats a second round trip with its
         // own loading state and its own failure mode.
         .query("hourly", HOURLY_FIELDS)
+        // Without the count the block covers every quarter hour of all 22
+        // days. With it the series opens on the quarter in progress.
+        .query("minutely_15", NOWCAST_FIELDS)
+        .query("forecast_minutely_15", NOWCAST_QUARTERS.to_string())
         .query("timezone", "auto")
         .query("forecast_days", "8")
         .query("past_days", "14")
@@ -412,6 +418,12 @@ pub(crate) mod tests {
             value_of(&forecast, "hourly"),
             Some(HOURLY_FIELDS),
             "the hourly fields the screens read must be the ones asked for"
+        );
+        assert_eq!(value_of(&forecast, "minutely_15"), Some(NOWCAST_FIELDS));
+        assert_eq!(
+            value_of(&forecast, "forecast_minutely_15"),
+            Some("8"),
+            "two hours, or the block runs to all 22 days"
         );
         for field in [
             "weather_code",

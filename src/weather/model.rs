@@ -1,5 +1,13 @@
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// The shape of every timestamp in a forecast response, local to the place.
+pub(crate) const STAMP: &str = "%Y-%m-%dT%H:%M";
+const QUARTER: TimeDelta = TimeDelta::minutes(15);
+/// Two hours. The request asks for exactly this many, and the cap is here
+/// because the answer's length is the server's word.
+pub const NOWCAST_QUARTERS: usize = 8;
 
 pub struct Location {
     pub name: String,
@@ -107,6 +115,18 @@ impl HourlyForecast {
     }
 }
 
+/// A quarter hour of the next two, from the provider's 15-minute series.
+/// Native model data over North America and central Europe and interpolated
+/// from the hourly series elsewhere; the response does not say which, so
+/// nothing built on this may claim more precision than "about".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuarterHour {
+    /// When the quarter starts, local to the location, like every hour's.
+    pub time: String,
+    pub precip_mm: Option<f64>,
+    pub snow_cm: Option<f64>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Weather {
     pub current: Current,
@@ -128,6 +148,12 @@ pub struct Weather {
     #[serde(default)]
     pub utc_offset_secs: Option<i32>,
     pub air_quality: Option<AirQuality>,
+    /// The provider's next two hours in quarter-hour steps, as fetched.
+    /// Never read directly: it describes the minutes after the fetch, and
+    /// `nowcast_at` is what turns it into the minutes after now.
+    /// Defaulted so a cache written before the field existed still parses.
+    #[serde(default)]
+    pub nowcast: Vec<QuarterHour>,
 }
 
 impl Weather {
@@ -181,6 +207,53 @@ impl Weather {
         self.now_hour = position.now_hour;
         true
     }
+
+    /// The quarter hour in progress at `now` and the ones after it, in
+    /// step and with nothing missing between them, so a position in the
+    /// result is a number of minutes from `now`.
+    ///
+    /// Asked for at every read and never stored, because the answer ages:
+    /// a sentence counted at the fetch still said "rain in about 30 min"
+    /// two hours into an open session. Empty without the response's UTC
+    /// offset, which is the only thing that says what time it is there.
+    pub fn nowcast_at(&self, now: DateTime<Utc>) -> Vec<QuarterHour> {
+        let Some(offset) = self.utc_offset_secs.and_then(FixedOffset::east_opt) else {
+            return Vec::new();
+        };
+        let stamp = now.with_timezone(&offset).format(STAMP).to_string();
+        aligned_quarters(&self.nowcast, &stamp)
+    }
+}
+
+pub(crate) fn parse_stamp(stamp: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(stamp, STAMP).ok()
+}
+
+/// The part of `quarters` that opens on the quarter hour holding `stamp`
+/// and runs on in 15-minute steps. Quarters that have ended are dropped,
+/// and a series that opens later than `stamp`, skips a step, or carries a
+/// time that will not parse ends where that happens: "rain in about 30 min"
+/// counted from the wrong quarter is worse than no sentence.
+fn aligned_quarters(quarters: &[QuarterHour], stamp: &str) -> Vec<QuarterHour> {
+    let Some(now) = parse_stamp(stamp) else {
+        return Vec::new();
+    };
+    let mut expected = None;
+    quarters
+        .iter()
+        .skip_while(|quarter| parse_stamp(&quarter.time).is_none_or(|start| start + QUARTER <= now))
+        .take_while(|quarter| {
+            let start = parse_stamp(&quarter.time);
+            let in_step = match expected {
+                None => start.is_some_and(|start| start <= now),
+                Some(_) => start == expected,
+            };
+            expected = start.map(|start| start + QUARTER);
+            in_step
+        })
+        .take(NOWCAST_QUARTERS)
+        .cloned()
+        .collect()
 }
 
 /// Where `key` sits in an ordered series, and whether it was actually there.
@@ -271,7 +344,26 @@ impl Weather {
             now_hour: PAST_HOURS,
             utc_offset_secs: None,
             air_quality: None,
+            nowcast: Vec::new(),
         }
+    }
+
+    /// The fixture with a nowcast opening at its current hour, one quarter
+    /// per entry of `precip_mm`, at a place on UTC so `fixture_time` is
+    /// both its clock and the world's.
+    pub fn with_nowcast(mut self, precip_mm: &[f64]) -> Self {
+        self.utc_offset_secs.get_or_insert(0);
+        let start = parse_stamp(&self.hourly[self.now_hour].time).expect("a fixture stamp");
+        self.nowcast = precip_mm
+            .iter()
+            .zip(0..)
+            .map(|(&mm, i)| QuarterHour {
+                time: (start + QUARTER * i).format(STAMP).to_string(),
+                precip_mm: Some(mm),
+                snow_cm: Some(0.0),
+            })
+            .collect();
+        self
     }
 }
 
@@ -281,6 +373,12 @@ impl Weather {
 const PAST_HOURS: usize = 24;
 #[cfg(test)]
 const FORECAST_HOURS: usize = 192;
+
+/// A UTC instant from a stamp in the fixture's own format.
+#[cfg(test)]
+pub fn fixture_time(stamp: &str) -> DateTime<Utc> {
+    parse_stamp(stamp).expect("a fixture stamp").and_utc()
+}
 
 #[cfg(test)]
 fn hour_stamp(i: usize) -> String {
@@ -325,6 +423,80 @@ mod tests {
     fn relocate_needs_both_the_day_and_the_hour() {
         let mut weather = Weather::fixture(2, 0);
         assert!(!weather.relocate("2026-08-05T00:00"));
+    }
+
+    fn starts(quarters: &[QuarterHour]) -> Vec<&str> {
+        quarters.iter().map(|q| &q.time[11..]).collect()
+    }
+
+    /// The fixture's now is 2026-08-02T00:00, so its quarters open there.
+    #[test]
+    fn the_nowcast_drops_the_quarters_that_have_ended() {
+        let weather = Weather::fixture(9, 1).with_nowcast(&[0.0; 8]);
+
+        let running = weather.nowcast_at(fixture_time("2026-08-02T00:14"));
+        assert_eq!(running.len(), 8, "the first quarter is still running");
+
+        let later = weather.nowcast_at(fixture_time("2026-08-02T00:50"));
+        assert_eq!(
+            starts(&later),
+            ["00:45", "01:00", "01:15", "01:30", "01:45"]
+        );
+
+        let over = weather.nowcast_at(fixture_time("2026-08-02T02:00"));
+        assert!(over.is_empty(), "the window has passed");
+        assert_eq!(weather.nowcast.len(), 8, "reading it changes nothing");
+    }
+
+    /// A position in the series is read as minutes from now, which holds
+    /// only while the series opens on the running quarter and never skips.
+    #[test]
+    fn a_nowcast_that_cannot_be_lined_up_with_the_clock_is_cut_short() {
+        let fresh = || Weather::fixture(9, 1).with_nowcast(&[0.0; 8]);
+        let midnight = fixture_time("2026-08-02T00:00");
+
+        let ahead = fresh().nowcast_at(fixture_time("2026-08-01T23:00"));
+        assert!(ahead.is_empty(), "opens in the future");
+
+        let mut gapped = fresh();
+        gapped.nowcast.remove(3);
+        assert_eq!(
+            starts(&gapped.nowcast_at(midnight)),
+            ["00:00", "00:15", "00:30"],
+            "stops at the gap"
+        );
+
+        let mut garbled = fresh();
+        garbled.nowcast[2].time = "soon".to_string();
+        assert_eq!(starts(&garbled.nowcast_at(midnight)), ["00:00", "00:15"]);
+
+        assert!(aligned_quarters(&fresh().nowcast, "not a time").is_empty());
+    }
+
+    /// The clock that counts is the place's, not the machine's or UTC's:
+    /// 23:35 UTC is 01:05 at a place an hour and a half ahead.
+    #[test]
+    fn the_nowcast_is_read_on_the_places_own_clock() {
+        let mut weather = Weather::fixture(9, 1).with_nowcast(&[0.0; 8]);
+        weather.utc_offset_secs = Some(5400);
+
+        let there = weather.nowcast_at(fixture_time("2026-08-01T23:35"));
+        assert_eq!(starts(&there), ["01:00", "01:15", "01:30", "01:45"]);
+
+        weather.utc_offset_secs = None;
+        assert!(
+            weather
+                .nowcast_at(fixture_time("2026-08-02T00:00"))
+                .is_empty(),
+            "no offset, no way to say what time it is there"
+        );
+    }
+
+    #[test]
+    fn an_oversized_nowcast_is_capped() {
+        let weather = Weather::fixture(9, 1).with_nowcast(&[0.0; 40]);
+        let now = fixture_time("2026-08-02T00:00");
+        assert_eq!(weather.nowcast_at(now).len(), NOWCAST_QUARTERS);
     }
 
     fn place(country: Option<&str>, country_code: Option<&str>) -> Location {

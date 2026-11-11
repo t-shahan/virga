@@ -11,6 +11,7 @@ use crate::app::{ActiveLocation, Remembered};
 use crate::units::Unit;
 use crate::weather::code;
 use crate::weather::model::Weather;
+use crate::weather::nowcast;
 use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
 
 /// How long a detection that went unanswered keeps the next report from
@@ -85,6 +86,10 @@ pub(crate) fn report(
     let mut lines = vec![headline(label, weather, now)];
     lines.extend(conditions(weather, unit));
     lines.extend(outlook(weather, unit));
+    // Last, so the lines a script already takes by position stay put on
+    // the days this one appears.
+    let ahead = weather.nowcast_at(now.to_utc());
+    lines.extend(nowcast::outlook(&ahead).map(|outlook| outlook.sentence()));
     lines.join("\n")
 }
 
@@ -542,6 +547,39 @@ mod tests {
         );
     }
 
+    /// The nowcast is a reading like any other: there when something is
+    /// due to fall, and absent, not "dry", when nothing is.
+    #[test]
+    fn the_nowcast_is_the_last_line_and_only_when_something_falls() {
+        // The fixture's quarters open at 2026-08-02T00:00 on a place on UTC.
+        let at = |stamp: &str| -> DateTime<FixedOffset> { stamp.parse().expect("a stamp") };
+        let report_at = |weather: &Weather, stamp: &str| {
+            report("Berlin, Germany", weather, Unit::Metric, at(stamp))
+        };
+        let wet = Weather::fixture(5, 2).with_nowcast(&[0.0, 0.0, 0.4, 0.6, 0.2, 0.0, 0.0, 0.0]);
+
+        let text = report_at(&wet, "2026-08-02T00:05:00Z");
+        assert_eq!(text.lines().count(), 4);
+        assert_eq!(
+            text.lines().last(),
+            Some("Rain in about 30 min, lasting 45")
+        );
+
+        // The same forecast read twenty minutes on, from a machine two hours
+        // east of the place: the count is from now, on the place's clock.
+        let later = report_at(&wet, "2026-08-02T02:25:00+02:00");
+        assert_eq!(
+            later.lines().last(),
+            Some("Rain in about 15 min, lasting 45")
+        );
+
+        // Once the window has passed, the line is gone.
+        assert_eq!(report_at(&wet, "2026-08-02T03:00:00Z").lines().count(), 3);
+
+        let dry = Weather::fixture(5, 2).with_nowcast(&[0.0; 8]);
+        assert_eq!(report_at(&dry, "2026-08-02T00:05:00Z").lines().count(), 3);
+    }
+
     /// The one unconditional promise: whatever the response was missing, the
     /// report names the place it describes.
     #[test]
@@ -559,6 +597,7 @@ mod tests {
             hourly: Vec::new(),
             now_hour: 0,
             air_quality: None,
+            nowcast: Vec::new(),
         };
 
         assert_eq!(

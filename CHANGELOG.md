@@ -12,6 +12,25 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **Rain in the next two hours, in a sentence.** When rain or snow is due
+  inside two hours, the bottom border of the current pane says when:
+  `Rain in about 30 min, lasting 45`, `Rain stopping in about 15 min`, or
+  `Snow through the next two hours`, with a bar per quarter hour beside it
+  where the border has room. It takes the corner the comparison with the
+  period's average usually holds, and gives it back when the two hours are
+  dry. `virga now` prints the same sentence as a fourth line, and prints no
+  fourth line for a dry window, so a script that counts the report's lines
+  will see three or four. The readings ride the forecast request the app
+  already makes. They come from Open-Meteo's 15-minute series, which is
+  model data over North America and central Europe and interpolated from
+  the hourly forecast elsewhere, hence "about". The minutes are counted
+  from the clock at each read, so the sentence moves on while the app sits
+  open and a `virga now` answered from the cache counts from now. A
+  forecast shown from the cache at launch leaves the sentence out until
+  the fresh one lands.
+
 ## [0.7.1] - 2026-10-21
 
 ### Fixed

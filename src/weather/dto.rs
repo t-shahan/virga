@@ -1,5 +1,6 @@
 use crate::weather::model::{
-    AirQuality, AirQualityReport, Current, DailyForecast, HourlyForecast, Location, Weather,
+    AirQuality, AirQualityReport, Current, DailyForecast, HourlyForecast, Location,
+    NOWCAST_QUARTERS, QuarterHour, Weather,
 };
 use chrono::Local;
 use serde::Deserialize;
@@ -216,6 +217,20 @@ pub struct ForecastDto {
     /// Optional so a request that never asked for an hourly block — or a
     /// fixture recorded before it did — still parses.
     pub hourly: Option<HourlyDto>,
+    /// Lenient where `hourly` is not: the nowcast is one sentence, and a
+    /// block of the wrong shape should cost that sentence, not the forecast.
+    #[serde(default, deserialize_with = "lenient")]
+    pub minutely_15: Option<QuarterHourlyDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuarterHourlyDto {
+    #[serde(default)]
+    pub time: Vec<String>,
+    #[serde(default)]
+    pub precipitation: Vec<Option<f64>>,
+    #[serde(default)]
+    pub snowfall: Vec<Option<f64>>,
 }
 
 /// Same rules as `DailyDto`: every measurement optional, so one null hour
@@ -322,6 +337,20 @@ fn hourly_from(hour: &HourlyDto) -> Vec<HourlyForecast> {
         .collect()
 }
 
+fn nowcast_from(block: &QuarterHourlyDto) -> Vec<QuarterHour> {
+    block
+        .time
+        .iter()
+        .take(NOWCAST_QUARTERS)
+        .enumerate()
+        .map(|(i, time)| QuarterHour {
+            time: time.clone(),
+            precip_mm: at(&block.precipitation, i),
+            snow_cm: at(&block.snowfall, i),
+        })
+        .collect()
+}
+
 impl From<ForecastDto> for Weather {
     fn from(dto: ForecastDto) -> Self {
         // `current.time` is local to the forecast location, so it identifies
@@ -352,6 +381,7 @@ impl From<ForecastDto> for Weather {
             today_index: 0,
             utc_offset_secs: dto.utc_offset_seconds,
             air_quality: None,
+            nowcast: dto.minutely_15.as_ref().map_or_else(Vec::new, nowcast_from),
         };
         let position = weather.position_of(&stamp);
         weather.today_index = position.today_index;
@@ -409,7 +439,7 @@ pub struct AqiCurrentDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::weather::client::{DAILY_FIELDS, HOURLY_FIELDS};
+    use crate::weather::client::{DAILY_FIELDS, HOURLY_FIELDS, NOWCAST_FIELDS};
 
     /// Real icon_seamless response; its final day has a null temperature_2m_max.
     /// Before daily measurements were Option, this failed to deserialize at all
@@ -970,6 +1000,114 @@ mod tests {
             HOURLY_FIELDS,
             serde_json::json!({"time": ["2026-08-09T00:00"]}),
         );
+    }
+
+    #[test]
+    fn every_requested_nowcast_field_is_read_by_the_dto() {
+        each_field_is_read_by::<QuarterHourlyDto>(
+            NOWCAST_FIELDS,
+            serde_json::json!({"time": ["2026-08-09T00:00"]}),
+        );
+    }
+
+    /// A forecast whose `current.time` is 02:30 and whose 15-minute block is
+    /// `block`, so tests can vary just that.
+    fn with_quarters(block: serde_json::Value) -> Weather {
+        let json = serde_json::json!({
+            "utc_offset_seconds": 0,
+            "current": {"time": "2026-08-09T02:30"},
+            "daily": {
+                "time": ["2026-08-09"], "weather_code": [0],
+                "temperature_2m_max": [30.0], "temperature_2m_min": [20.0]
+            },
+            "minutely_15": block,
+        });
+        serde_json::from_value::<ForecastDto>(json)
+            .expect("the forecast should parse whatever the block is")
+            .into()
+    }
+
+    /// Recorded from Tórshavn in drizzle, at 17:00 on a place on UTC: wet
+    /// for five quarters, then dry.
+    #[test]
+    fn a_recorded_nowcast_opens_on_the_quarter_in_progress() {
+        use crate::weather::model::fixture_time;
+
+        let json = include_str!("../../tests/fixtures/forecast_nowcast.json");
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json)
+            .expect("fixture should parse")
+            .into();
+        let now = weather.nowcast_at(fixture_time("2026-11-11T17:04"));
+
+        assert_eq!(now.len(), 8);
+        assert_eq!(now[0].time, "2026-11-11T17:00");
+        assert_eq!(now[0].precip_mm, Some(0.1));
+        assert_eq!(now[5].precip_mm, Some(0.0));
+        assert_eq!(
+            crate::weather::nowcast::outlook(&now).map(|o| o.sentence()),
+            Some("Rain stopping in about 75 min".to_string())
+        );
+    }
+
+    #[test]
+    fn every_nowcast_reading_is_fed_by_a_requested_field() {
+        let mut block = serde_json::json!({"time": ["2026-08-09T02:30"]});
+        for field in NOWCAST_FIELDS.split(',') {
+            block[field] = serde_json::json!([1]);
+        }
+        let weather = with_quarters(block);
+
+        assert!(weather.nowcast[0].precip_mm.is_some());
+        assert!(weather.nowcast[0].snow_cm.is_some());
+    }
+
+    /// The block is one sentence's worth of the forecast. Whatever is wrong
+    /// with it, the forecast around it still loads.
+    #[test]
+    fn a_missing_or_malformed_nowcast_costs_only_the_nowcast() {
+        for block in [
+            serde_json::json!(null),
+            serde_json::json!("unavailable"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({"time": "2026-08-09T02:30"}),
+            serde_json::json!({"time": ["2026-08-09T02:30"], "precipitation": "wet"}),
+            serde_json::json!({"precipitation": [0.4]}),
+        ] {
+            let weather = with_quarters(block.clone());
+            assert!(weather.nowcast.is_empty(), "{block}");
+            assert_eq!(weather.daily.len(), 1, "{block}");
+        }
+        let json = include_str!("../../tests/fixtures/forecast.json");
+        let weather: Weather = serde_json::from_str::<ForecastDto>(json)
+            .expect("a response recorded before the block was asked for")
+            .into();
+        assert!(weather.nowcast.is_empty());
+    }
+
+    /// Null amounts and short arrays keep their quarters and blank the
+    /// reading, as the hourly series does.
+    #[test]
+    fn a_null_or_absent_amount_blanks_the_reading_not_the_quarter() {
+        let weather = with_quarters(serde_json::json!({
+            "time": ["2026-08-09T02:30", "2026-08-09T02:45", "2026-08-09T03:00"],
+            "precipitation": [0.2, null],
+        }));
+
+        assert_eq!(weather.nowcast.len(), 3);
+        assert_eq!(weather.nowcast[1].precip_mm, None);
+        assert_eq!(weather.nowcast[2].precip_mm, None);
+        assert_eq!(weather.nowcast[0].snow_cm, None);
+    }
+
+    /// The block is kept as it came, capped. Lining it up with the clock is
+    /// `nowcast_at`'s job at each read, so nothing here depends on the
+    /// response saying what time it is.
+    #[test]
+    fn the_nowcast_is_kept_as_fetched_and_capped() {
+        let times: Vec<String> = (0..40).map(|i| format!("2026-08-09T{i:02}:00")).collect();
+        let weather = with_quarters(serde_json::json!({"time": times}));
+        assert_eq!(weather.nowcast.len(), NOWCAST_QUARTERS);
+        assert_eq!(weather.nowcast[0].time, "2026-08-09T00:00");
     }
 
     /// The other direction: a reading the model carries has to be fed by a

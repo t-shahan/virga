@@ -4,6 +4,7 @@ use crate::theme::{ColorDepth, Theme};
 use crate::units::Unit;
 use crate::update::Release;
 use crate::weather::model::{Location, Weather};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -241,6 +242,10 @@ pub struct App {
     /// from the theme so cycling changes the design, not the capability.
     pub color_depth: ColorDepth,
     pub tick: usize,
+    /// The time, as of the draw loop's last pass. The app holds it rather
+    /// than drawing code asking the system, so a frame is a function of the
+    /// app and a test can say what time it is.
+    pub now: DateTime<Utc>,
     pub selected: usize,
     /// Index into `Weather::daily` of the day being inspected. Distinct from
     /// `selected`, which tracks the search results list.
@@ -367,6 +372,7 @@ impl App {
             theme: Theme::default(),
             color_depth: ColorDepth::Ansi16,
             tick: 0,
+            now: Utc::now(),
             selected: 0,
             selected_day,
             selected_hour: 0,
@@ -648,6 +654,18 @@ impl App {
     /// Whether the key bar should still name the palette beside `t`.
     pub fn theme_readout_visible(&self) -> bool {
         self.theme_readout_until.is_some()
+    }
+
+    /// Take the time from the caller, and report whether a quarter hour
+    /// turned over since the last one given. The nowcast counts in quarter
+    /// hours and an idle app draws nothing, so that turn is the one moment
+    /// the clock alone makes the frame on screen wrong.
+    pub fn observe_clock(&mut self, now: DateTime<Utc>) -> bool {
+        const QUARTER_SECS: i64 = 15 * 60;
+        let quarter = |time: DateTime<Utc>| time.timestamp().div_euclid(QUARTER_SECS);
+        let turned = quarter(now) != quarter(self.now);
+        self.now = now;
+        turned
     }
 
     /// Drop the readout if its moment has passed, reporting whether it did.
@@ -1216,6 +1234,23 @@ mod tests {
     /// on every pass. Reporting a change when there was none would put the app
     /// back to redrawing on a timer, which is the thing the idle path exists to
     /// avoid.
+    /// An idle app draws nothing, so the turn of a quarter hour has to ask
+    /// for the frame that moves the nowcast on, once and not on every pass.
+    #[test]
+    fn the_clock_asks_for_a_redraw_when_a_quarter_hour_turns() {
+        let at = |stamp: &str| -> DateTime<Utc> { stamp.parse().expect("a stamp") };
+        let mut app = App::new();
+        app.now = at("2026-08-02T00:05:00Z");
+
+        assert!(!app.observe_clock(at("2026-08-02T00:14:59Z")));
+        assert!(app.observe_clock(at("2026-08-02T00:15:00Z")));
+        assert_eq!(app.now, at("2026-08-02T00:15:00Z"));
+        assert!(!app.observe_clock(at("2026-08-02T00:15:01Z")));
+        // A clock set back is a different quarter too, and the frame is as
+        // wrong after it as after one that moved on.
+        assert!(app.observe_clock(at("2026-08-01T23:50:00Z")));
+    }
+
     #[test]
     fn an_expired_readout_stops_asking_for_redraws() {
         let mut app = app_with(22, 14);

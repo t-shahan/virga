@@ -5,6 +5,7 @@
 
 use crate::theme::Palette;
 use crate::ui::{TITLE_GUTTER, title_room};
+use crate::weather::model::parse_stamp;
 use chrono::NaiveDateTime;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -49,7 +50,7 @@ pub(super) fn compass(degrees: f64) -> &'static str {
 }
 
 fn parse_hour(time: &str) -> Option<NaiveDateTime> {
-    NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M").ok()
+    parse_stamp(time)
 }
 
 /// `Mon 10 Aug, 4:00 PM`, or the raw stamp when it will not parse — a value

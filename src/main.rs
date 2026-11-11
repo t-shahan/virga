@@ -1006,6 +1006,9 @@ fn run(
         if app.expire_theme_readout(Instant::now()) {
             dirty = true;
         }
+        if app.observe_clock(Utc::now()) {
+            dirty = true;
+        }
 
         // Only the spinner and the search cursor change on their own. With
         // neither on screen there is nothing to redraw until input or a worker

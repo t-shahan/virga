@@ -66,6 +66,9 @@ The weathergram is the default; the choice lasts for the session.
 
 - **Current conditions** — temperature, feels-like, wind with gusts and
   direction, precipitation, daylight length, and US air quality index.
+- **The next two hours** — when rain or snow is due inside two hours, the
+  current pane's bottom border says when it starts and how long it lasts,
+  with a bar per quarter hour beside it.
 - **Eight-day forecast** — rain chance, maximum wind, UV index, sunrise, and
   sunset.
 - **Three weeks of context** — fourteen days of historical highs followed by
@@ -252,6 +255,11 @@ Today: 84°F / 63°F · rain 20% · UV 6 · sun 06:24–20:07
 A city whose clocks disagree with the machine's says what time it is there
 on the first line, as `· local time 21:30 (UTC+09:00)`; a city on the same
 clock says nothing about it.
+
+When rain or snow is due within two hours, a fourth line says so, in the
+words the app uses: `Rain in about 30 min, lasting 45`, `Rain stopping in
+about 15 min`, or `Snow through the next two hours`. A dry two hours prints
+nothing, so the report is three lines on most days and four on some.
 
 Plain lines on stdout, so a script or a status bar reads it as easily as a
 person does; a reading the provider did not report simply does not appear.
@@ -531,6 +539,14 @@ still publishes and only the tap update is skipped, with a warning.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
   NAT it lands near your provider rather than near you — `l` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
+- The two-hour precipitation sentence reads Open-Meteo's 15-minute series,
+  which is native model data over North America and central Europe and
+  interpolated from the hourly forecast elsewhere. The response does not say
+  which, so the sentence says "about" everywhere. Its minutes are counted
+  from the start of the quarter hour in progress, so they can overstate the
+  wait by up to a quarter hour. The sentence moves on as the app sits open,
+  and gives way to the comparison once the fetched two hours have passed;
+  `r` fetches the next two.
 - Forecast text is English only.
 - Terminals below 34×12 show a size warning instead of the interface. The
   hourly weathergram needs 36 columns and 19 rows above the key bar, and
