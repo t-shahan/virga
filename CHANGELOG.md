@@ -12,6 +12,14 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+### Added
+
+- **State and province lines on the radar.** The map under the rain now
+  draws the borders of states and provinces, fainter than coasts and
+  country borders, for the nine countries Natural Earth divides: the United
+  States, Canada, Australia, Brazil, Russia, China, India, Indonesia and
+  South Africa.
+
 ## [0.8.0] - 2026-11-11
 
 ### Added

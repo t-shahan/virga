@@ -170,6 +170,11 @@ impl Radar {
         (across + half, y - center_y + half)
     }
 
+    /// The Web Mercator zoom the frames were drawn at.
+    pub fn zoom(&self) -> u32 {
+        ZOOM
+    }
+
     /// The box of latitude and longitude that holds the frame, as
     /// `(south, west, north, east)`, for choosing which coastlines matter.
     /// East can exceed 180 and west fall below -180 beside the antimeridian.

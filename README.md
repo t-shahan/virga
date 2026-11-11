@@ -531,7 +531,9 @@ least one of the terminals named under [Limitations](#limitations):
 - On the radar screen (`m`), the coastline around a coastal city is where a
   map says it is, the `◉` sits on the city, the loop advances about twice a
   second and rests on the newest frame, and braille cells line up with no
-  gaps between rows. A font without the braille block shows boxes, which is
+  gaps between rows. In the United States or another country with state
+  lines, those lines are visibly fainter than the coast. A font without the
+  braille block shows boxes, which is
   a font problem and worth noting which font.
 - The `▲`, `┬`, `═`, `◉`, and box-drawing borders are East Asian
   ambiguous-width glyphs. In a terminal that draws those two cells wide,
@@ -603,7 +605,11 @@ still publishes and only the tap update is skipped, with a warning.
   ground. The view is fixed at about 380 km across at mid-latitudes and
   does not zoom or pan. The outline is Natural Earth's 1:50m data: fine
   for a coast, too coarse for a harbour, and without rivers, roads or
-  place names. Each frame's time is on the forecast place's clock. The
+  place names. State and province lines are drawn fainter than coasts and
+  country borders, for the nine countries Natural Earth divides at that scale:
+  the United States, Canada, Australia, Brazil, Russia, China, India,
+  Indonesia and South Africa. A cell has one colour, so where a state line meets a border
+  the cell takes the border's. Each frame's time is on the forecast place's clock. The
   screen needs a font with the braille block, and is the one screen where a
   terminal without colour loses information that density only partly keeps.
 - The ensemble is a coarser model than the forecast, so only how much its
