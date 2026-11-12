@@ -1,4 +1,4 @@
-use crate::app::{ActiveLocation, KeyHintStyle, LocationSource, Remembered};
+use crate::app::{ActiveLocation, LocationSource, Remembered};
 use crate::theme::Theme;
 use crate::update::Release;
 use anyhow::{Context, Result};
@@ -34,8 +34,10 @@ struct StateDocument {
     /// version: most documents predate it or never set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
-    /// The bar style `,` last chose, by name. Optional in every version, the
-    /// same way `theme` is: most documents predate it or never toggled it.
+    /// The key bar style a Virga before 0.9 kept here, by name. This one
+    /// has a single bar and never reads the field, but it is carried through
+    /// every save: the file is shared with whichever older binary is still
+    /// installed, and that binary's setting is not this one's to erase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_hints: Option<String>,
     /// When `virga now` last asked the network where the user is and got
@@ -76,15 +78,14 @@ fn integer_or_nothing<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Opti
 pub(crate) struct Persisted {
     pub remembered: Option<Remembered>,
     pub theme: Option<Theme>,
-    pub key_hint_style: Option<KeyHintStyle>,
     /// The last detection `virga now` made that went unanswered, if it is
     /// still on record. Cleared by the next location that is remembered.
     pub detection_failed_at: Option<DateTime<Utc>>,
     /// The release whose startup notice was last cleared, if any was.
     pub dismissed: Option<Release>,
     /// A complaint about part of the document that did not stop the rest
-    /// being used. Only an unknown theme or key hint style name, or a
-    /// dismissed release that is not a version string, produces one today.
+    /// being used. Only an unknown theme name, or a dismissed release that
+    /// is not a version string, produces one today.
     pub warning: Option<String>,
 }
 
@@ -147,24 +148,6 @@ fn theme_of(document: &StateDocument) -> (Option<Theme>, Option<String>) {
     }
 }
 
-/// The key hint style, if the document names one this binary knows. An
-/// unknown name is a warning and nothing else, the same as an unknown theme:
-/// it must not take the remembered location or theme down with it.
-fn key_hint_style_of(document: &StateDocument) -> (Option<KeyHintStyle>, Option<String>) {
-    let Some(name) = &document.key_hints else {
-        return (None, None);
-    };
-    match KeyHintStyle::from_name(name) {
-        Some(style) => (Some(style), None),
-        None => (
-            None,
-            Some(format!(
-                "virga: the state file names an unknown key hint style {name:?}; ignoring it."
-            )),
-        ),
-    }
-}
-
 /// The dismissed release, if the document names one that parses. One that
 /// does not — a hand-edit, a future tag grammar, or a value that is not
 /// even a string — is a warning and nothing else, and reads as nothing
@@ -217,7 +200,6 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
     let remembered = remembered_of(&document)?;
     let (theme, theme_warning) = theme_of(&document);
-    let (key_hint_style, key_hint_warning) = key_hint_style_of(&document);
     let (dismissed, dismissed_warning) = dismissed_of(&document);
     // An integer `chrono` cannot place on a calendar did not come from this
     // program either, and reads as no marker for the reason
@@ -229,10 +211,9 @@ pub(crate) fn load_from(path: &Path) -> Result<Persisted> {
     Ok(Persisted {
         remembered,
         theme,
-        key_hint_style,
         detection_failed_at,
         dismissed,
-        warning: theme_warning.or(key_hint_warning).or(dismissed_warning),
+        warning: theme_warning.or(dismissed_warning),
     })
 }
 
@@ -446,11 +427,20 @@ pub(crate) fn save_theme(path: &Path, theme: Theme) -> Result<()> {
     save_document(path, merged)
 }
 
-pub(crate) fn save_key_hint_style(path: &Path, style: KeyHintStyle) -> Result<()> {
+/// Writes the field the way a Virga before 0.9 did, for the tests that
+/// prove this one carries it.
+#[cfg(test)]
+fn save_key_hints(path: &Path, name: &str) -> Result<()> {
     let _held = exclusive(path)?;
     let mut merged = surviving(path)?;
-    merged.key_hints = Some(style.name().to_string());
+    merged.key_hints = Some(name.to_string());
     save_document(path, merged)
+}
+
+/// The key bar style on disk, as an older Virga would find it.
+#[cfg(test)]
+fn key_hints_in(path: &Path) -> Option<String> {
+    surviving_document(path).ok().flatten()?.key_hints
 }
 
 fn save_document(path: &Path, merged: Merged) -> Result<()> {
@@ -721,12 +711,12 @@ mod tests {
         let berlin = chosen("Berlin, Germany", 52.52437, 13.41053);
 
         save_location(&path, &berlin).unwrap();
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
 
         assert_eq!(raw_version(&path), 2);
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, Some(berlin));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
     }
 
     /// A key hint style chosen before any weather has ever loaded has no city
@@ -737,12 +727,12 @@ mod tests {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
 
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
 
         assert_eq!(raw_version(&path), 3);
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, None);
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
     }
 
     /// Three independent saves, none of which may erase either of the other
@@ -757,13 +747,13 @@ mod tests {
 
         save_location(&path, &berlin).unwrap();
         save_theme(&path, Theme::Nord).unwrap();
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_location(&path, &reykjavik).unwrap();
 
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, Some(reykjavik));
         assert_eq!(persisted.theme, Some(Theme::Nord));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
     }
 
     /// The sweep above saves the theme before any key hint style exists, so
@@ -774,12 +764,12 @@ mod tests {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
 
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_theme(&path, Theme::Nord).unwrap();
 
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.theme, Some(Theme::Nord));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
     }
 
     /// The dismissal rides in version 3 beside a theme — a notice can be
@@ -818,7 +808,7 @@ mod tests {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
 
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_dismissed(&path, &Release::parse("v0.7.0").unwrap()).unwrap();
 
         let body: serde_json::Value =
@@ -947,7 +937,7 @@ mod tests {
         );
 
         // Once anything else is there, the dismissal has a document to ride.
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
         assert_eq!(raw_version(&path), 3);
         assert_eq!(
@@ -966,16 +956,16 @@ mod tests {
         let path = test.path().join("state.json");
         let release = Release::parse("0.7.0").unwrap();
 
-        save_key_hint_style(&path, KeyHintStyle::Hint).unwrap();
+        save_key_hints(&path, "hint").unwrap();
         save_dismissed(&path, &release).unwrap();
         save_theme(&path, Theme::Nord).unwrap();
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_location(&path, &chosen("Berlin, Germany", 52.52437, 13.41053)).unwrap();
 
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.dismissed, Some(release));
         assert_eq!(persisted.theme, Some(Theme::Nord));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
         assert!(persisted.remembered.is_some());
     }
 
@@ -988,7 +978,7 @@ mod tests {
 
         save_location(&path, &berlin).unwrap();
         save_theme(&path, Theme::Nord).unwrap();
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_dismissed(&path, &Release::parse("0.7.0").unwrap()).unwrap();
         save_dismissed(&path, &Release::parse("0.8.0").unwrap()).unwrap();
 
@@ -997,7 +987,7 @@ mod tests {
         assert_eq!(persisted.dismissed, Some(Release::parse("0.8.0").unwrap()));
         assert_eq!(persisted.remembered, Some(berlin));
         assert_eq!(persisted.theme, Some(Theme::Nord));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
     }
 
     /// The failed-detection marker (#65) is a reason for a document to
@@ -1022,10 +1012,11 @@ mod tests {
         assert_eq!(persisted.detection_failed_at, None);
     }
 
-    /// An unknown key hint style name is a warning and nothing else, the same
-    /// as an unknown theme: it must not take the rest of the document with it.
+    /// Whatever an older Virga left in the field is carried and not
+    /// judged: this one has nothing to read it for, and so nothing to warn
+    /// about.
     #[test]
-    fn an_unknown_key_hint_style_name_warns_but_keeps_the_rest() {
+    fn a_key_hint_style_from_an_older_virga_is_kept_without_comment() {
         let test = tempfile::tempdir().unwrap();
         let path = test.path().join("state.json");
         write_raw(
@@ -1034,10 +1025,11 @@ mod tests {
         );
 
         let persisted = load_from(&path).unwrap();
-
         assert!(persisted.remembered.is_some());
-        assert_eq!(persisted.key_hint_style, None);
-        assert!(persisted.warning.unwrap().contains("compact"));
+        assert!(persisted.warning.is_none());
+
+        save_theme(&path, Theme::Nord).unwrap();
+        assert_eq!(key_hints_in(&path).as_deref(), Some("compact"));
     }
 
     /// The marker is a version 3 document's third reason to exist, and it
@@ -1073,12 +1065,12 @@ mod tests {
 
         save_detection_failure(&path, at).unwrap();
         save_theme(&path, Theme::Nord).unwrap();
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
 
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.detection_failed_at, Some(at));
         assert_eq!(persisted.theme, Some(Theme::Nord));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
     }
 
     /// And the marker keeps everything it found, in the version the rest
@@ -1141,15 +1133,11 @@ mod tests {
 
             // The reviewer's scenario for #119: a save over such a document
             // must merge into it, not treat it as corruption and start over.
-            save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+            save_key_hints(&path, "full").unwrap();
             let persisted = load_from(&path).unwrap();
             assert!(persisted.remembered.is_some(), "{marker}");
             assert_eq!(persisted.theme, Some(Theme::Nord), "{marker}");
-            assert_eq!(
-                persisted.key_hint_style,
-                Some(KeyHintStyle::Full),
-                "{marker}"
-            );
+            assert_eq!(key_hints_in(&path).as_deref(), Some("full"), "{marker}");
             assert_eq!(persisted.detection_failed_at, None, "{marker}");
         }
     }
@@ -1169,34 +1157,34 @@ mod tests {
 
         save_location(&path, &berlin).unwrap();
         save_theme(&path, Theme::Nord).unwrap();
-        save_key_hint_style(&path, KeyHintStyle::Full).unwrap();
+        save_key_hints(&path, "full").unwrap();
         save_detection_failure(&path, at).unwrap();
 
         save_theme(&path, Theme::Dracula).unwrap();
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, Some(berlin.clone()));
         assert_eq!(persisted.theme, Some(Theme::Dracula));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Full));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("full"));
         assert_eq!(persisted.detection_failed_at, Some(at));
 
-        save_key_hint_style(&path, KeyHintStyle::Hint).unwrap();
+        save_key_hints(&path, "hint").unwrap();
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, Some(berlin));
         assert_eq!(persisted.theme, Some(Theme::Dracula));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Hint));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("hint"));
         assert_eq!(persisted.detection_failed_at, Some(at));
 
         save_detection_failure(&path, later).unwrap();
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.theme, Some(Theme::Dracula));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Hint));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("hint"));
         assert_eq!(persisted.detection_failed_at, Some(later));
 
         save_location(&path, &reykjavik).unwrap();
         let persisted = load_from(&path).unwrap();
         assert_eq!(persisted.remembered, Some(reykjavik));
         assert_eq!(persisted.theme, Some(Theme::Dracula));
-        assert_eq!(persisted.key_hint_style, Some(KeyHintStyle::Hint));
+        assert_eq!(key_hints_in(&path).as_deref(), Some("hint"));
         assert_eq!(persisted.detection_failed_at, None);
     }
 

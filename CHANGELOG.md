@@ -15,7 +15,7 @@ refuse to publish a version this file does not describe.
 ### Added
 
 - **The radar zooms and pans.** `+` and `-` zoom from about 190 km across
-  out to the whole world, the arrow keys move the map, and `c` goes back to
+  out to the whole world, the arrow keys move the map, and `n` goes back to
   the city. The map redraws as the keys are pressed and the rain follows:
   the newest frame first, then the rest of the loop. The border gives the
   width of the view on the ground. Loops for the last eight views are kept
@@ -23,8 +23,23 @@ refuse to publish a version this file does not describe.
 
 ### Changed
 
-- **The radar loop is stepped with `[` and `]`.** The arrow keys, which
+- **A new set of keys.** `1`, `2` and `3` go to the forecast, the hourly
+  weathergram and the radar from any of them. `h` opens the hourly screen
+  and `m` the radar, and the same key again goes back. `/` searches for a
+  city. `n` or `Home` comes back to here and now on every screen: today,
+  the current hour, or the city on the radar. `r`, `u`, `t` and `/` now work
+  on the radar too.
+- **`Esc` goes back and never quits.** It used to quit from the forecast.
+  `q` and `Ctrl-C` quit.
+- **The radar loop is stepped with `,` and `.`.** The arrow keys, which
   stepped it before, now move the map.
+- **The key bar has one form, without brackets.** It names the screen's own
+  keys and drops them from the end as the terminal narrows, keeping
+  `esc back`, `? keys` and `q quit` at every width.
+- **The key card is grouped and stays until dismissed.** `?` lists every
+  key for the screen under Move, Show or Loop, Go to and App, in two columns
+  on a short terminal. `?` or `Esc` closes it. Any other key used to close
+  it, which made it easy to lose by accident.
 - **The radar map ends at the antimeridian.** RainViewer's pictures do not
   continue across it, so a place beside it now sits off centre in a frame
   that is all map.
@@ -34,6 +49,15 @@ refuse to publish a version this file does not describe.
   country borders, for the nine countries Natural Earth divides: the United
   States, Canada, Australia, Brazil, Russia, China, India, Indonesia and
   South Africa.
+
+### Removed
+
+- **The keys `p`, `l`, `b` and `c`, and `Enter` as a way back.** `h`, `/`,
+  `Esc` and `n` do their jobs.
+- **The full key bar and its `,` toggle.** The bar that named every key
+  wrapped to three rows on an ordinary terminal and the card does the job
+  better. A state file that remembers the setting still loads, and the
+  setting is left in it untouched.
 
 ## [0.8.0] - 2026-11-11
 

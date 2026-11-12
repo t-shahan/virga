@@ -5,7 +5,7 @@
 //! — more usefully — makes the whole of "which key does what" testable without
 //! a terminal.
 
-use crate::app::{KeyHintStyle, MapMove, Screen};
+use crate::app::{MapMove, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// Something the user asked for, named in the app's own terms.
@@ -42,9 +42,6 @@ pub enum Action {
     ToggleHourlyView,
     /// Open or close the key reference overlay.
     ToggleHelp,
-    /// Switch the bar between hinting at `?` and naming every binding
-    /// itself.
-    ToggleKeyHints,
     Insert(char),
     Backspace,
     Submit,
@@ -146,94 +143,66 @@ impl HeldKeys {
 /// double every keystroke and every request. A Windows repeat, which arrives
 /// as another press, is relabelled by `HeldKeys` before it gets here.
 ///
-/// With the key reference open, "means nothing there" stops existing for
-/// presses: the card promises any key closes it, and a key the screen has no
-/// binding for would otherwise never reach the app at all — the caller drops
-/// a `None` before `App::on_action` can swallow it. Releases and repeats
-/// stay filtered as ever; the press that comes with them already closed it.
-pub fn action_for(
-    key: KeyEvent,
-    screen: Screen,
-    key_hint_style: KeyHintStyle,
-    help_visible: bool,
-) -> Option<Action> {
+/// With the key reference open only the keys that close it mean anything.
+/// A key that acted on the screen behind the card would be acting on
+/// something the reader cannot see, and a card that any stray key closes
+/// is gone before it has been read.
+pub fn action_for(key: KeyEvent, screen: Screen, help_visible: bool) -> Option<Action> {
+    let action = if help_visible {
+        help_binding(key)
+    } else {
+        binding(key, screen)
+    }?;
     match key.kind {
-        KeyEventKind::Release => return None,
-        KeyEventKind::Repeat => {
-            let action = binding(key, screen, key_hint_style)?;
-            return action.repeatable().then_some(action);
-        }
-        KeyEventKind::Press => {}
+        KeyEventKind::Release => None,
+        KeyEventKind::Repeat => action.repeatable().then_some(action),
+        KeyEventKind::Press => Some(action),
     }
-    binding(key, screen, key_hint_style).or_else(|| help_visible.then_some(Action::ToggleHelp))
 }
 
-fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Option<Action> {
-    // Checked before the screen bindings so it works even where the plain key
-    // means something else — `c` is ordinary text on the search screen.
-    // `contains` rather than equality, because terminals do not all report the
-    // same modifier set alongside Control.
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+/// Checked before any screen's bindings so it works even where the plain
+/// key means something else: `c` is ordinary text on the search screen.
+/// `contains` and not equality, because terminals do not all report the same
+/// modifier set alongside Control.
+fn is_interrupt(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+}
+
+fn help_binding(key: KeyEvent) -> Option<Action> {
+    if is_interrupt(key) {
         return Some(Action::Quit);
     }
+    match key.code {
+        KeyCode::Char('?') | KeyCode::Esc => Some(Action::ToggleHelp),
+        _ => None,
+    }
+}
 
+fn binding(key: KeyEvent, screen: Screen) -> Option<Action> {
+    if is_interrupt(key) {
+        return Some(Action::Quit);
+    }
     match screen {
         Screen::Weather => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-            KeyCode::Char('r') => Some(Action::Refresh),
-            KeyCode::Char('u') => Some(Action::ToggleUnits),
-            KeyCode::Char('t') => Some(Action::CycleTheme),
-            KeyCode::Char('l') => Some(Action::OpenSearch),
-            KeyCode::Char('p') => Some(Action::OpenHourly),
-            // `r` was taken by refresh long before there was a radar.
-            KeyCode::Char('m') => Some(Action::OpenRadar),
-            KeyCode::Left => Some(Action::PrevDay),
-            KeyCode::Right => Some(Action::NextDay),
-            // The forecast table lists the days as a column running downward,
-            // so the vertical arrows travel it the way it reads: down advances,
-            // up goes back — the same convention the hourly screen settled on.
-            KeyCode::Up => Some(Action::PrevDay),
-            KeyCode::Down => Some(Action::NextDay),
+            KeyCode::Left | KeyCode::Up => Some(Action::PrevDay),
+            // The forecast table lists the days as a column running
+            // downward, so the vertical arrows travel it the way it reads.
+            KeyCode::Right | KeyCode::Down => Some(Action::NextDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Today),
-            KeyCode::Char('?') => help_key(key_hint_style),
-            KeyCode::Char(',') => Some(Action::ToggleKeyHints),
-            _ => None,
+            _ => shared(key.code, screen),
         },
         Screen::Hourly => match key.code {
-            KeyCode::Char('q') => Some(Action::Quit),
-            // `p` closes the screen as well as opening it, so the key that got
-            // you here is always a way back out.
-            KeyCode::Char('b' | 'p') | KeyCode::Enter | KeyCode::Esc => Some(Action::Back),
-            KeyCode::Char('r') => Some(Action::Refresh),
-            KeyCode::Char('u') => Some(Action::ToggleUnits),
-            KeyCode::Char('t') => Some(Action::CycleTheme),
-            KeyCode::Char('l') => Some(Action::OpenSearch),
             KeyCode::Left => Some(Action::PrevHour),
             KeyCode::Right => Some(Action::NextHour),
-            // Down advances and up goes back, as the list convention has it.
-            //
-            // These used to be the other way round, pairing the vertical arrows
-            // with the horizontal ones by direction of travel. That was
-            // defensible while the screen had nothing vertical on it to move
-            // through, but the week strip draws the days as a literal column
-            // running forward from today, and pressing down to travel up it
-            // reads as backwards however the reasoning goes.
+            // Down advances and up goes back, as a list has it: the week
+            // strip draws the days as a column running forward from today.
             KeyCode::Up => Some(Action::PrevHourDay),
             KeyCode::Down => Some(Action::NextHourDay),
             KeyCode::Char('n') | KeyCode::Home => Some(Action::Now),
             KeyCode::Char('v') => Some(Action::ToggleHourlyView),
-            KeyCode::Char('?') => help_key(key_hint_style),
-            KeyCode::Char(',') => Some(Action::ToggleKeyHints),
-            _ => None,
+            _ => shared(key.code, screen),
         },
         Screen::Radar => match key.code {
-            KeyCode::Char('q') => Some(Action::Quit),
-            // `m` closes as well as opens, as `p` does for the hourly screen.
-            KeyCode::Char('b' | 'm') | KeyCode::Enter | KeyCode::Esc => Some(Action::Back),
-            KeyCode::Char('r') => Some(Action::Refresh),
-            KeyCode::Char('t') => Some(Action::CycleTheme),
-            // The arrows move the map, as they would any map, which leaves
-            // the brackets for the loop.
             KeyCode::Left => Some(Action::MoveMap(MapMove::Pan(-1, 0))),
             KeyCode::Right => Some(Action::MoveMap(MapMove::Pan(1, 0))),
             KeyCode::Up => Some(Action::MoveMap(MapMove::Pan(0, -1))),
@@ -242,16 +211,15 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             // needs one.
             KeyCode::Char('+' | '=') => Some(Action::MoveMap(MapMove::In)),
             KeyCode::Char('-') => Some(Action::MoveMap(MapMove::Out)),
-            KeyCode::Char('c') => Some(Action::MoveMap(MapMove::Home)),
-            KeyCode::Char('[') => Some(Action::PrevFrame),
-            KeyCode::Char(']') => Some(Action::NextFrame),
+            KeyCode::Char('n') | KeyCode::Home => Some(Action::MoveMap(MapMove::Home)),
+            // The keys `<` and `>` are printed on, without the shift.
+            KeyCode::Char(',') => Some(Action::PrevFrame),
+            KeyCode::Char('.') => Some(Action::NextFrame),
             KeyCode::Char(' ') => Some(Action::TogglePlayback),
-            KeyCode::Char('?') => help_key(key_hint_style),
-            KeyCode::Char(',') => Some(Action::ToggleKeyHints),
-            _ => None,
+            _ => shared(key.code, screen),
         },
         // Every printable key is text here, so none of the command letters
-        // apply — `q` types a q rather than quitting.
+        // apply: `q` types a q and does not quit.
         Screen::Search => match key.code {
             KeyCode::Esc => Some(Action::Back),
             KeyCode::Enter => Some(Action::Submit),
@@ -263,6 +231,37 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Down => Some(Action::NextResult),
             _ => None,
         },
+    }
+}
+
+/// The keys that mean the same on the forecast, the hourly screen and the
+/// radar. A key learned on one is not relearned on the next.
+///
+/// A screen's number goes to it and its letter goes to it or, from it, back:
+/// the key that got you somewhere is always a way out again. The number of
+/// the screen already showing does nothing, so `1` `2` `3` can be pressed
+/// without first working out where one is.
+fn shared(code: KeyCode, screen: Screen) -> Option<Action> {
+    let on = |here: Screen| screen == here;
+    match code {
+        KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('?') => Some(Action::ToggleHelp),
+        KeyCode::Char('/') => Some(Action::OpenSearch),
+        KeyCode::Char('r') => Some(Action::Refresh),
+        KeyCode::Char('u') => Some(Action::ToggleUnits),
+        KeyCode::Char('t') => Some(Action::CycleTheme),
+        KeyCode::Char('1') => (!on(Screen::Weather)).then_some(Action::Back),
+        KeyCode::Char('2') => (!on(Screen::Hourly)).then_some(Action::OpenHourly),
+        KeyCode::Char('3') => (!on(Screen::Radar)).then_some(Action::OpenRadar),
+        KeyCode::Char('h') if on(Screen::Hourly) => Some(Action::Back),
+        KeyCode::Char('h') => Some(Action::OpenHourly),
+        KeyCode::Char('m') if on(Screen::Radar) => Some(Action::Back),
+        KeyCode::Char('m') => Some(Action::OpenRadar),
+        // Never quits. From the forecast there is nowhere back to go, and a
+        // key that closes things on two screens and the app on the third
+        // gets pressed once too often.
+        KeyCode::Esc => (!on(Screen::Weather)).then_some(Action::Back),
+        _ => None,
     }
 }
 
@@ -283,60 +282,135 @@ fn is_chord(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL) != modifiers.contains(KeyModifiers::ALT)
 }
 
-/// `?` opens the reference only in `Hint` style — in `Full` style the bar
-/// already names everything, so there is nothing behind the card to open,
-/// and the key is better left unbound than opening an empty one.
-fn help_key(key_hint_style: KeyHintStyle) -> Option<Action> {
-    (key_hint_style == KeyHintStyle::Hint).then_some(Action::ToggleHelp)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Shadows the real, four-argument `action_for` for every test below
-    /// that does not care which key hint style is active or whether the
-    /// reference is open — which is most of them. Tests that do care call
-    /// `super::action_for` directly.
+    const WEATHER_SCREENS: [Screen; 3] = [Screen::Weather, Screen::Hourly, Screen::Radar];
+
+    /// Shadows the real `action_for` for every test below that does not
+    /// care whether the reference is open, which is most of them. Tests
+    /// that do care call `super::action_for` directly.
     fn action_for(key: KeyEvent, screen: Screen) -> Option<Action> {
-        super::action_for(key, screen, KeyHintStyle::Hint, false)
+        super::action_for(key, screen, false)
     }
 
+    /// A screen's number goes to it from either of the others and does
+    /// nothing on it. Its letter goes to it, and from it goes back.
     #[test]
-    fn the_radar_opens_with_m_and_closes_the_way_it_opened() {
-        assert_eq!(
-            action_for(press(KeyCode::Char('m')), Screen::Weather),
-            Some(Action::OpenRadar)
-        );
-        for code in [
-            KeyCode::Char('m'),
-            KeyCode::Char('b'),
-            KeyCode::Esc,
-            KeyCode::Enter,
-        ] {
+    fn each_screen_has_a_number_and_a_letter() {
+        let key = |c: char, screen| action_for(press(KeyCode::Char(c)), screen);
+        let table = [
+            (Screen::Weather, '1', None, Action::Back),
+            (Screen::Hourly, '2', Some('h'), Action::OpenHourly),
+            (Screen::Radar, '3', Some('m'), Action::OpenRadar),
+        ];
+        for (target, number, letter, action) in table {
+            for from in WEATHER_SCREENS {
+                let there = from == target;
+                assert_eq!(
+                    key(number, from),
+                    (!there).then_some(action),
+                    "{number} on {from:?}"
+                );
+                if let Some(letter) = letter {
+                    let wanted = if there { Action::Back } else { action };
+                    assert_eq!(key(letter, from), Some(wanted), "{letter} on {from:?}");
+                }
+            }
+        }
+    }
+
+    /// The keys that mean the same thing wherever the weather is on
+    /// screen, the radar included.
+    #[test]
+    fn the_shared_keys_work_on_every_weather_screen() {
+        let shared = [
+            ('q', Action::Quit),
+            ('r', Action::Refresh),
+            ('u', Action::ToggleUnits),
+            ('t', Action::CycleTheme),
+            ('/', Action::OpenSearch),
+            ('?', Action::ToggleHelp),
+        ];
+        for screen in WEATHER_SCREENS {
+            for (c, action) in shared {
+                assert_eq!(
+                    action_for(press(KeyCode::Char(c)), screen),
+                    Some(action),
+                    "{c} on {screen:?}"
+                );
+            }
+        }
+    }
+
+    /// One key for "back to here and now", whatever that is on the screen:
+    /// today, this hour, or the city at the opening zoom.
+    #[test]
+    fn n_and_home_come_back_to_here_and_now() {
+        let table = [
+            (Screen::Weather, Action::Today),
+            (Screen::Hourly, Action::Now),
+            (Screen::Radar, Action::MoveMap(MapMove::Home)),
+        ];
+        for (screen, action) in table {
+            for code in [KeyCode::Char('n'), KeyCode::Home] {
+                assert_eq!(action_for(press(code), screen), Some(action), "{screen:?}");
+            }
+        }
+    }
+
+    /// Escape goes back and never quits: from the forecast there is nowhere
+    /// back to go, so there it does nothing.
+    #[test]
+    fn escape_goes_back_and_never_quits() {
+        assert_eq!(action_for(press(KeyCode::Esc), Screen::Weather), None);
+        for screen in [Screen::Hourly, Screen::Radar, Screen::Search] {
             assert_eq!(
-                action_for(press(code), Screen::Radar),
+                action_for(press(KeyCode::Esc), screen),
                 Some(Action::Back),
-                "{code:?}"
+                "{screen:?}"
             );
         }
-        assert_eq!(
-            action_for(press(KeyCode::Char('m')), Screen::Hourly),
-            None,
-            "only the weather screen opens it"
-        );
     }
 
-    /// The brackets scrub and may be held; space and `r` act once per
-    /// press, since a held `r` would queue a radar fetch per repeat.
+    /// The keys this scheme took away do nothing, so an old habit fails
+    /// quietly and does not do something else.
     #[test]
-    fn the_radar_loop_is_scrubbed_with_the_brackets_and_paused_with_space() {
+    fn the_retired_keys_are_unbound() {
+        let retired = [
+            (Screen::Weather, KeyCode::Char('p')),
+            (Screen::Weather, KeyCode::Char('l')),
+            (Screen::Weather, KeyCode::Char(',')),
+            (Screen::Hourly, KeyCode::Char('p')),
+            (Screen::Hourly, KeyCode::Char('b')),
+            (Screen::Hourly, KeyCode::Char(',')),
+            (Screen::Hourly, KeyCode::Enter),
+            (Screen::Radar, KeyCode::Char('b')),
+            (Screen::Radar, KeyCode::Char('c')),
+            (Screen::Radar, KeyCode::Char('[')),
+            (Screen::Radar, KeyCode::Char(']')),
+            (Screen::Radar, KeyCode::Enter),
+        ];
+        for (screen, code) in retired {
+            assert_eq!(
+                action_for(press(code), screen),
+                None,
+                "{code:?} on {screen:?}"
+            );
+        }
+    }
+
+    /// Comma and full stop scrub and may be held; space and `r` act once a
+    /// press, since a held `r` would queue a radar fetch a repeat.
+    #[test]
+    fn the_radar_loop_is_scrubbed_with_comma_and_stop_and_paused_with_space() {
         assert_eq!(
-            action_for(press(KeyCode::Char('[')), Screen::Radar),
+            action_for(press(KeyCode::Char(',')), Screen::Radar),
             Some(Action::PrevFrame)
         );
         assert_eq!(
-            action_for(press(KeyCode::Char(']')), Screen::Radar),
+            action_for(press(KeyCode::Char('.')), Screen::Radar),
             Some(Action::NextFrame)
         );
         assert_eq!(
@@ -345,7 +419,7 @@ mod tests {
         );
         assert_eq!(
             action_for(
-                of_kind(KeyCode::Char(']'), KeyEventKind::Repeat),
+                of_kind(KeyCode::Char('.'), KeyEventKind::Repeat),
                 Screen::Radar
             ),
             Some(Action::NextFrame)
@@ -359,8 +433,8 @@ mod tests {
         }
     }
 
-    /// The arrows pan and `+` and `-` zoom, held or not. `c` goes home
-    /// once a press, and with Control it still quits.
+    /// The arrows pan and `+` and `-` zoom, held or not. Going home is once
+    /// a press.
     #[test]
     fn the_radar_map_is_moved_with_the_arrows_and_zoomed_with_plus_and_minus() {
         let moves = [
@@ -381,148 +455,75 @@ mod tests {
                 );
             }
         }
-
-        let home = KeyCode::Char('c');
         assert_eq!(
-            action_for(press(home), Screen::Radar),
-            Some(Action::MoveMap(MapMove::Home))
-        );
-        assert_eq!(
-            action_for(of_kind(home, KeyEventKind::Repeat), Screen::Radar),
-            None
-        );
-        let chord = KeyEvent::new(home, KeyModifiers::CONTROL);
-        assert_eq!(action_for(chord, Screen::Radar), Some(Action::Quit));
-    }
-
-    /// The card's footer promises any key closes it. That has to include
-    /// keys the screen has no binding for — Tab, a digit, a function key —
-    /// which would otherwise resolve to `None` and never reach the app,
-    /// leaving the card sitting there against its own word.
-    #[test]
-    fn with_the_reference_open_an_unbound_press_still_closes_it() {
-        for code in [KeyCode::Tab, KeyCode::Char('5'), KeyCode::F(5)] {
-            assert_eq!(
-                super::action_for(press(code), Screen::Weather, KeyHintStyle::Hint, true),
-                Some(Action::ToggleHelp),
-                "{code:?}"
-            );
-        }
-    }
-
-    /// With the reference closed an unbound key stays unbound — the catch-all
-    /// exists for the card, not as a new binding.
-    #[test]
-    fn with_the_reference_closed_an_unbound_key_still_means_nothing() {
-        assert_eq!(
-            super::action_for(
-                press(KeyCode::Tab),
-                Screen::Weather,
-                KeyHintStyle::Hint,
-                false
+            action_for(
+                of_kind(KeyCode::Char('n'), KeyEventKind::Repeat),
+                Screen::Radar
             ),
             None
         );
     }
 
-    /// Windows reports a release per press, and enhanced protocols repeat.
-    /// The press that arrives alongside either has already closed the card,
-    /// so acting on them too would toggle it straight back open.
+    /// With the reference open, `?` and Escape close it, Ctrl-C still
+    /// quits, and every other key does nothing at all: not its usual job,
+    /// and not closing the card either.
     #[test]
-    fn with_the_reference_open_releases_and_repeats_still_do_nothing() {
-        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+    fn with_the_reference_open_only_the_closing_keys_mean_anything() {
+        for screen in WEATHER_SCREENS {
+            for code in [KeyCode::Char('?'), KeyCode::Esc] {
+                assert_eq!(
+                    super::action_for(press(code), screen, true),
+                    Some(Action::ToggleHelp),
+                    "{code:?} on {screen:?}"
+                );
+            }
+            for code in [
+                KeyCode::Char('q'),
+                KeyCode::Char('r'),
+                KeyCode::Char('x'),
+                KeyCode::Char(' '),
+                KeyCode::Left,
+                KeyCode::Enter,
+                KeyCode::F(5),
+            ] {
+                assert_eq!(
+                    super::action_for(press(code), screen, true),
+                    None,
+                    "{code:?} on {screen:?}"
+                );
+            }
+            let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert_eq!(
-                super::action_for(
-                    of_kind(KeyCode::Tab, kind),
-                    Screen::Weather,
-                    KeyHintStyle::Hint,
-                    true
-                ),
-                None,
-                "{kind:?}"
+                super::action_for(interrupt, screen, true),
+                Some(Action::Quit)
             );
         }
     }
 
-    /// `?` opens the key reference wherever a legend hint advertises it, and
-    /// stays ordinary text in the search box, where a query might contain one.
+    /// A release never acts and a held `?` does not flicker the card open
+    /// and shut, with the card up or down.
     #[test]
-    fn question_mark_toggles_help_on_the_weather_screens_only() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            assert_eq!(
-                action_for(press(KeyCode::Char('?')), screen),
-                Some(Action::ToggleHelp),
-                "{screen:?}"
-            );
+    fn a_held_or_released_question_mark_does_not_toggle() {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            for open in [false, true] {
+                assert_eq!(
+                    super::action_for(of_kind(KeyCode::Char('?'), kind), Screen::Weather, open),
+                    None,
+                    "{kind:?}, open: {open}"
+                );
+            }
         }
+    }
+
+    /// `?` is text where text is being typed.
+    #[test]
+    fn question_mark_is_text_on_the_search_screen() {
         assert_eq!(
             action_for(press(KeyCode::Char('?')), Screen::Search),
             Some(Action::Insert('?'))
         );
     }
 
-    /// `Full` style has no card behind `?` to open, so the key is unbound
-    /// there rather than opening an empty one.
-    #[test]
-    fn question_mark_is_unbound_in_full_style() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            assert_eq!(
-                super::action_for(press(KeyCode::Char('?')), screen, KeyHintStyle::Full, false),
-                None,
-                "{screen:?}"
-            );
-        }
-    }
-
-    /// `,` switches the bar style wherever it names a binding at all, and
-    /// stays ordinary text in the search box, matching every other command
-    /// letter there.
-    #[test]
-    fn comma_toggles_the_key_hint_style_on_the_weather_screens_only() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            assert_eq!(
-                action_for(press(KeyCode::Char(',')), screen),
-                Some(Action::ToggleKeyHints),
-                "{screen:?}"
-            );
-        }
-        assert_eq!(
-            action_for(press(KeyCode::Char(',')), Screen::Search),
-            Some(Action::Insert(','))
-        );
-    }
-
-    /// The toggle works the same whichever style is already active — it is
-    /// what switches between them, so it cannot be gated by the very thing it
-    /// changes.
-    #[test]
-    fn comma_toggles_from_either_style() {
-        for style in [KeyHintStyle::Hint, KeyHintStyle::Full] {
-            assert_eq!(
-                super::action_for(press(KeyCode::Char(',')), Screen::Weather, style, false),
-                Some(Action::ToggleKeyHints),
-                "{style:?}"
-            );
-        }
-    }
-
-    /// A toggle on key repeat flickers: a held `?` would open and close the
-    /// overlay every frame. Windows also reports a release per press, which
-    /// the kind filter already discards — pinned here because a toggle is
-    /// where acting twice is most visible.
-    #[test]
-    fn a_held_or_released_question_mark_does_not_toggle() {
-        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
-            assert_eq!(
-                action_for(of_kind(KeyCode::Char('?'), kind), Screen::Weather),
-                None,
-                "{kind:?}"
-            );
-        }
-    }
-
-    /// `v` flips the hourly view, and only there: on the weather screen it is
-    /// unbound, and in search it types a letter like any other.
     #[test]
     fn v_toggles_the_hourly_view_only_on_the_hourly_screen() {
         assert_eq!(
@@ -612,15 +613,15 @@ mod tests {
 
         for (code, screen) in [
             (KeyCode::Char('r'), Screen::Weather),
-            (KeyCode::Char('l'), Screen::Weather),
+            (KeyCode::Char('/'), Screen::Weather),
             (KeyCode::Char('u'), Screen::Weather),
-            (KeyCode::Char(','), Screen::Weather),
-            (KeyCode::Char(','), Screen::Hourly),
+            (KeyCode::Char('?'), Screen::Hourly),
             // Six palettes go past in well under a second on key repeat, and
             // the one you wanted is not the one you land on.
             (KeyCode::Char('t'), Screen::Weather),
             (KeyCode::Char('t'), Screen::Hourly),
-            (KeyCode::Char('p'), Screen::Weather),
+            (KeyCode::Char('h'), Screen::Weather),
+            (KeyCode::Char('3'), Screen::Weather),
             (KeyCode::Char('q'), Screen::Weather),
             (KeyCode::Char('r'), Screen::Hourly),
             (KeyCode::Enter, Screen::Search),
@@ -879,7 +880,9 @@ mod tests {
     /// city with a `q` or an `r` in it would set the app off.
     #[test]
     fn command_letters_are_text_on_the_search_screen() {
-        for c in ['q', 'r', 'u', 't', 'l', 'p', 'b', 'n'] {
+        for c in [
+            'q', 'r', 'u', 't', 'h', 'm', 'n', '1', '2', '3', '/', ',', '.',
+        ] {
             assert_eq!(
                 action_for(press(KeyCode::Char(c)), Screen::Search),
                 Some(Action::Insert(c)),
@@ -941,52 +944,9 @@ mod tests {
         );
     }
 
-    /// Esc quits the weather screen but only backs out of the others, so a
-    /// stray Esc while searching cannot close the app.
-    #[test]
-    fn escape_quits_only_from_the_weather_screen() {
-        assert_eq!(
-            action_for(press(KeyCode::Esc), Screen::Weather),
-            Some(Action::Quit)
-        );
-        assert_eq!(
-            action_for(press(KeyCode::Esc), Screen::Hourly),
-            Some(Action::Back)
-        );
-        assert_eq!(
-            action_for(press(KeyCode::Esc), Screen::Search),
-            Some(Action::Back)
-        );
-    }
-
-    /// The palette is global, so the key that changes it works from either
-    /// screen that shows the weather — the same way `r` and `u` already do.
-    #[test]
-    fn t_cycles_the_theme_from_both_weather_screens() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            assert_eq!(
-                action_for(press(KeyCode::Char('t')), screen),
-                Some(Action::CycleTheme),
-                "{screen:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn p_both_opens_and_closes_the_hourly_screen() {
-        assert_eq!(
-            action_for(press(KeyCode::Char('p')), Screen::Weather),
-            Some(Action::OpenHourly)
-        );
-        assert_eq!(
-            action_for(press(KeyCode::Char('p')), Screen::Hourly),
-            Some(Action::Back)
-        );
-    }
-
     #[test]
     fn unbound_keys_are_ignored_rather_than_guessed_at() {
-        for screen in [Screen::Weather, Screen::Hourly] {
+        for screen in WEATHER_SCREENS {
             assert_eq!(action_for(press(KeyCode::Tab), screen), None);
             assert_eq!(action_for(press(KeyCode::F(5)), screen), None);
         }

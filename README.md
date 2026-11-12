@@ -44,7 +44,7 @@ https://github.com/user-attachments/assets/5044c045-0f86-448c-9000-19c9fe541134
 
 <img width="2000" height="1609" alt="Animated: the hourly weathergram, with the selected hour's readings in a pane above it and the week's precipitation strip below. Temperature, precipitation chance, sky and wind share one hour axis; the selection steps through hours and days, then v flips to the classic precipitation bars" src="https://github.com/user-attachments/assets/9cbfe3f2-dbae-487d-a691-72e6be021d92" />
 
-Press `p` for the hourly view. Sky, temperature, precipitation chance, and wind
+Press `h` for the hourly view. Sky, temperature, precipitation chance, and wind
 share one clock, so a change in the forecast reads down a column instead of
 across four separate tables. Temperature stands as a filled silhouette four
 rows tall, the chance of rain rises in a band beneath it, a weather emoji
@@ -220,23 +220,28 @@ directory:
 
 | Key | Action |
 |---|---|
-| `←` `→` | Previous / next day — or hour, on the hourly screen; wraps |
-| `↑` `↓` | Back / forward a day — on the hourly screen too, keeping the time of day |
-| `n` / `Home` | Jump back to now |
-| `p` | Hourly weathergram — `p` again, `b`, `Enter` or `Esc` to go back |
-| `m` | Radar: the last two hours, looping — `m` again, `b`, `Enter` or `Esc` to go back |
-| `+` `-` | On the radar screen, zoom in and out, from about 190 km across to the whole world (`=` also zooms in) |
-| `←` `→` `↑` `↓` | On the radar screen, move the map a quarter of its width |
-| `c` | On the radar screen, go back to the city at the opening zoom |
-| `space` | On the radar screen, pause or restart the loop; `[` `]` step a frame and pause it |
+| `1` `2` `3` | Go to the forecast, the hourly weathergram, the radar |
+| `h` | Hourly weathergram. `h` again goes back |
+| `m` | Radar, the last two hours, looping. `m` again goes back |
+| `/` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
+| `Esc` | Back to the forecast. It never quits |
+| `←` `→` | Previous or next day. On the hourly screen, previous or next hour. Both wrap |
+| `↑` `↓` | Back or forward a day, on the hourly screen too, keeping the time of day |
+| `n` / `Home` | Back to here and now: today, the current hour, or on the radar the city at the opening zoom |
 | `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
-| `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
-| `r` | Refetch the current location — on the radar screen, refetch the radar |
+| `←` `→` `↑` `↓` | On the radar screen, move the map a quarter of its width |
+| `+` `-` | On the radar screen, zoom in and out, from about 190 km across to the whole world (`=` also zooms in) |
+| `,` `.` | On the radar screen, step back or forward a frame and pause the loop |
+| `space` | On the radar screen, pause or restart the loop |
+| `r` | Refetch the weather. On the radar screen, refetch the radar |
 | `u` | Toggle metric / imperial |
-| `t` | Cycle the colour theme — the key bar names the one you land on for a few seconds |
-| `?` | Every key for the current screen, on a card — any key closes it |
-| `,` | Switch the bar between hinting at `?` and naming every binding itself — persisted, like the theme |
-| `q` / `Ctrl-C` | Quit — `Esc` too, except on the hourly and search screens, where it only backs out |
+| `t` | Cycle the colour theme. The key bar names the one you land on for a few seconds |
+| `?` | Every key for the current screen, on a card grouped by what the keys do. `?` or `Esc` closes it |
+| `q` / `Ctrl-C` | Quit |
+
+`r`, `u`, `t`, `/` and the screen keys work on all three screens. The bar at
+the bottom names a screen's own keys and drops them from the end as the
+terminal narrows. `? keys` and `q quit` stay at every width.
 
 The hourly screen puts its four tracks on a shared axis. `▲` marks the selected
 hour, a weather emoji marks the sky every three hours, and wind arrows every
@@ -368,8 +373,8 @@ will carry it.
 
 ## Themes
 
-`t` steps through seven palettes from either weather screen. The key bar names
-the one you land on — `[t] theme (nord)` — and drops the name again a few
+`t` steps through seven palettes from any of the three screens. The key bar names
+the one you land on — `t theme (nord)` — and drops the name again a few
 seconds later, so cycling tells you where you are without leaving a permanent
 readout.
 
@@ -429,7 +434,7 @@ persisted theme rather than refusing to run.
 Virga starts where your IP address says you are, so the first thing on screen is
 your own weather rather than a city chosen for you.
 
-Press `l` and pick somewhere, and that becomes the answer for good: a location
+Press `/` and pick somewhere, and that becomes the answer for good: a location
 you chose is remembered in the platform's per-user state/data directory, and
 every later launch starts there without asking the network anything. Detection
 only runs while you have not chosen.
@@ -539,7 +544,7 @@ least one of the terminals named under [Limitations](#limitations):
   lines, those lines are visibly fainter than the coast. Holding `-` zooms
   out to the whole world without a blank pane on the way, an arrow key held
   down slides the map, the rain arrives within a second or two of letting
-  go, and `c` comes back to the city. A font without the braille block
+  go, and `n` comes back to the city. A font without the braille block
   shows boxes, which is a font problem and worth noting which font.
 - The `▲`, `┬`, `═`, `◉`, and box-drawing borders are East Asian
   ambiguous-width glyphs. In a terminal that draws those two cells wide,
@@ -569,10 +574,10 @@ still publishes and only the tap update is skipped, with a warning.
 - There is no general configuration file. Every launch fetches fresh weather;
   the previous launch's forecast is shown, labelled with its age, only until
   the fetch answers, and only when it is under a day old. The startup theme,
-  key bar style, and location are persisted, and units follow `VIRGA_UNITS`
+  and location are persisted, and units follow `VIRGA_UNITS`
   at startup and last for the session.
 - Detection is city-level and sometimes wrong. Behind a VPN or a carrier-grade
-  NAT it lands near your provider rather than near you — `l` fixes that
+  NAT it lands near your provider rather than near you — `/` fixes that
   permanently, and `VIRGA_GEOIP=off` avoids the lookup altogether.
 - The two-hour precipitation sentence reads Open-Meteo's 15-minute series,
   which is native model data over North America and central Europe and
@@ -711,7 +716,7 @@ default `User-Agent`, which names the library and its version, not Virga.
 Virga stores only the last successfully loaded location label and coordinates
 locally, in its per-user state/data directory, alongside a note of whether you
 chose it or it was detected — and, if you set them, the name of your startup
-theme (with `virga theme`), your key bar style (with `,`), and the version of
+theme (with `virga theme`) and the version of
 the last update notice you cleared. Your IP address is never written to disk —
 the resolved city is. It does not store weather responses, searches, or
 history.

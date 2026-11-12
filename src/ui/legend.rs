@@ -1,4 +1,4 @@
-use crate::app::{App, Fetch, KeyHintStyle, Screen};
+use crate::app::{App, Fetch, Screen};
 use crate::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -14,14 +14,22 @@ const SPACING: usize = 3;
 /// rows the chart needs more.
 const MAX_ROWS: u16 = 2;
 
-/// What `t` is labelled with: the word, and — for a few seconds after it is
-/// pressed — the palette it landed on, in brackets after it.
+/// A key, or the keys that share a job, and what it does.
+pub(super) type Binding = (&'static str, String);
+
+/// Bindings under the heading the key card files them under.
+pub(super) struct Group {
+    pub heading: &'static str,
+    pub bindings: Vec<Binding>,
+}
+
+/// What `t` is labelled with: the word, and for a few seconds after it is
+/// pressed the palette it landed on, in brackets after it.
 ///
-/// The name alone, `[t] nord`, said what was on but not what the key did,
-/// which is the one job every other label on the bar has. The name is the
-/// answer to "which one did I just get", so it is worth showing while that is
-/// a live question and not after: left up it is a readout nobody is reading,
-/// and on a narrow terminal it costs a whole binding its place.
+/// The name is the answer to "which one did I just get", so it is worth
+/// showing while that is a live question and not after: left up it is a
+/// readout nobody is reading, and on a narrow terminal it costs a whole
+/// binding its place.
 fn theme_label(app: &App) -> String {
     if app.theme_readout_visible() {
         format!("theme ({})", app.theme.name())
@@ -30,152 +38,191 @@ fn theme_label(app: &App) -> String {
     }
 }
 
-fn owned(pairs: Vec<(&'static str, &str)>) -> Vec<(&'static str, String)> {
+fn owned(pairs: &[(&'static str, &str)]) -> Vec<Binding> {
     pairs
-        .into_iter()
-        .map(|(key, label)| (key, label.to_string()))
+        .iter()
+        .map(|&(key, label)| (key, label.to_string()))
         .collect()
 }
 
-/// Every binding the screen answers to — the overlay's reading matter, no
-/// longer the bar's. `?` closes as well as opens, so it earns a line like
-/// any other key.
-pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
-    // `?` only does something in `Hint` style — `Full` already names
-    // everything here, so listing a binding for a key that does nothing
-    // would be a lie the reference itself is telling.
-    let help = (app.key_hint_style == KeyHintStyle::Hint).then_some(("?", "keys".to_string()));
-
-    // `,` rides right behind the way out rather than at the tail, because
-    // the bar's wrapping drops from the tail: in `Full` style the bar is the
-    // only place the comma is discoverable — `?` is unbound there — and a
-    // narrow terminal that dropped it would strand the user in `Full` with
-    // no visible way back.
-    match app.screen {
-        Screen::Weather => owned(vec![
-            ("q", "quit"),
-            (",", "hide"),
-            ("←→↑↓", "day"),
-            ("n", "now"),
-            ("p", "hourly"),
-            ("m", "radar"),
-            ("r", "refresh"),
-            ("u", "units"),
-            ("l", "location"),
-            ("t", &theme_label(app)),
-        ])
-        .into_iter()
-        .chain(help)
-        .collect(),
-        Screen::Hourly => owned(vec![
-            ("q", "quit"),
-            ("b", "back"),
-            (",", "hide"),
-            ("←→", "hour"),
-            ("↑↓", "day"),
-            ("n", "now"),
-            ("v", "view"),
-            ("r", "refresh"),
-            ("u", "units"),
-            ("l", "location"),
-            ("t", &theme_label(app)),
-        ])
-        .into_iter()
-        .chain(help)
-        .collect(),
-        Screen::Radar => owned(vec![
-            ("q", "quit"),
-            ("b", "back"),
-            (",", "hide"),
-            ("←→↑↓", "move"),
-            ("+-", "zoom"),
-            ("c", "centre"),
-            ("[ ]", "frame"),
-            (
-                "space",
-                if app.playback.is_playing() {
-                    "pause"
-                } else {
-                    "play"
-                },
-            ),
-            ("r", "refresh"),
-            ("t", &theme_label(app)),
-        ])
-        .into_iter()
-        .chain(help)
-        .collect(),
-        // Search never opens the overlay — `?` is text there — so its short
-        // self-explanatory lists are both hint and reference.
-        Screen::Search => match &app.results {
-            Fetch::Ready(l) if !l.is_empty() => owned(vec![
-                ("↑↓", "navigate"),
-                ("enter", "select"),
-                ("esc", "cancel"),
-            ]),
-            _ => owned(vec![("enter", "search"), ("esc", "cancel")]),
-        },
+fn group(heading: &'static str, pairs: &[(&'static str, &str)]) -> Group {
+    Group {
+        heading,
+        bindings: owned(pairs),
     }
 }
 
-/// What the bar itself shows: the way out, the way back where there is one,
-/// and the key that opens the full reference. The bar still doubles as the
-/// theme readout — `t`'s feedback has nowhere else to be seen, since the
-/// overlay is closed while anyone is cycling — but only while the readout is
-/// live; the standing entry lives in the overlay.
-fn hint(app: &App) -> Vec<(&'static str, String)> {
-    let mut pairs = match app.screen {
-        Screen::Weather => owned(vec![("q", "quit"), ("?", "keybinds")]),
-        Screen::Hourly | Screen::Radar => {
-            owned(vec![("q", "quit"), ("b", "back"), ("?", "keybinds")])
-        }
-        Screen::Search => return bindings(app),
+/// Every key the screen answers to, for the card behind `?`. Keys that do
+/// one job share a line, so the card is as long as the list of jobs and not
+/// the list of keys.
+pub(super) fn reference(app: &App) -> Vec<Group> {
+    let pause = if app.playback.is_playing() {
+        "pause"
+    } else {
+        "play"
     };
-    if app.theme_readout_visible() {
-        pairs.push(("t", theme_label(app)));
+    let theme = theme_label(app);
+    let app_keys = group(
+        "App",
+        &[
+            ("r", "refresh"),
+            ("u", "units"),
+            ("t", &theme),
+            ("?", "close this"),
+            ("q", "quit"),
+        ],
+    );
+    match app.screen {
+        Screen::Weather => vec![
+            group("Move", &[("←→↑↓", "day"), ("n", "today")]),
+            group(
+                "Go to",
+                &[("h 2", "hourly"), ("m 3", "radar map"), ("/", "search")],
+            ),
+            app_keys,
+        ],
+        Screen::Hourly => vec![
+            group("Move", &[("←→", "hour"), ("↑↓", "day"), ("n", "now")]),
+            group("Show", &[("v", "weathergram or classic")]),
+            group(
+                "Go to",
+                &[
+                    ("esc 1 h", "forecast"),
+                    ("m 3", "radar map"),
+                    ("/", "search"),
+                ],
+            ),
+            app_keys,
+        ],
+        Screen::Radar => vec![
+            group(
+                "Move",
+                &[("←→↑↓", "pan"), ("+ -", "zoom"), ("n", "your city")],
+            ),
+            group("Loop", &[(", .", "frame"), ("space", pause)]),
+            group(
+                "Go to",
+                &[("esc 1 m", "forecast"), ("h 2", "hourly"), ("/", "search")],
+            ),
+            app_keys,
+        ],
+        // Search never opens the card: `?` is text there.
+        Screen::Search => Vec::new(),
     }
-    pairs
+}
+
+/// What the bar shows, in two parts: the screen's own keys, and the ones
+/// that stay when there is not room for all of it.
+///
+/// The bar is a reminder and not the reference. It names what this screen
+/// is for, and the three keys that get someone unstuck: back, the card with
+/// everything on it, and out.
+fn bar(app: &App) -> (Vec<Binding>, Vec<Binding>) {
+    let pause = if app.playback.is_playing() {
+        "pause"
+    } else {
+        "play"
+    };
+    let (own, back) = match app.screen {
+        Screen::Weather => (
+            owned(&[
+                ("←→", "day"),
+                ("h", "hourly"),
+                ("m", "map"),
+                ("/", "search"),
+            ]),
+            false,
+        ),
+        Screen::Hourly => (
+            owned(&[("←→", "hour"), ("↑↓", "day"), ("v", "view"), ("n", "now")]),
+            true,
+        ),
+        Screen::Radar => (
+            owned(&[
+                ("←→↑↓", "move"),
+                ("+-", "zoom"),
+                (",.", "frame"),
+                ("space", pause),
+                ("n", "home"),
+            ]),
+            true,
+        ),
+        Screen::Search => {
+            let own = match &app.results {
+                Fetch::Ready(found) if !found.is_empty() => {
+                    owned(&[("↑↓", "navigate"), ("enter", "select"), ("esc", "cancel")])
+                }
+                _ => owned(&[("enter", "search"), ("esc", "cancel")]),
+            };
+            return (Vec::new(), own);
+        }
+    };
+
+    let mut standing = Vec::new();
+    if back {
+        standing.push(("esc", "back".to_string()));
+    }
+    standing.push(("?", "keys".to_string()));
+    standing.push(("q", "quit".to_string()));
+    // `t`'s feedback has nowhere else to be seen, since the card is closed
+    // while anyone is cycling, so it stands with the keys that are not
+    // dropped for as long as it is live.
+    if app.theme_readout_visible() {
+        standing.push(("t", theme_label(app)));
+    }
+    (own, standing)
+}
+
+/// Columns a binding takes: its key, a space, its label.
+fn entry_width((key, label): &Binding) -> usize {
+    key.chars().count() + 1 + label.chars().count()
+}
+
+/// The bindings the bar has room for, in the order it shows them: the
+/// screen's own first, then the standing ones.
+///
+/// What goes when the bar is too narrow is the tail of the screen's own
+/// keys, so the middle of the bar gives way and both ends hold. A standing
+/// binding wider than the whole bar cannot be shown without shearing it, so
+/// it is not shown at all, which is only reachable below the app's minimum
+/// width, where the size warning replaces the interface.
+fn fitted(app: &App, width: u16) -> Vec<Binding> {
+    let room = width as usize;
+    let (own, standing) = bar(app);
+    let fits = |binding: &Binding| entry_width(binding) <= room;
+    let own: Vec<Binding> = own.into_iter().filter(fits).collect();
+    let standing: Vec<Binding> = standing.into_iter().filter(fits).collect();
+
+    for kept in (0..=own.len()).rev() {
+        let shown: Vec<Binding> = own[..kept].iter().chain(&standing).cloned().collect();
+        let widths: Vec<usize> = shown.iter().map(entry_width).collect();
+        if split(&widths, room).iter().sum::<usize>() == shown.len() {
+            return shown;
+        }
+    }
+    standing
 }
 
 /// Lay the bindings out on up to `MAX_ROWS` centred rows.
 ///
-/// One row that simply clipped sheared bindings mid-word as the terminal
-/// narrowed, leaving something like `[u] uni` against the edge that read as a
-/// rendering fault. Breaking between whole bindings keeps every one that is
-/// shown legible, and lets a narrow terminal keep them all rather than losing
-/// the tail. The rows are centred, so the bar sits under the centred panes
-/// above it instead of pinned to the left edge, and `split` levels the break
-/// so a wrapped bar reads as two deliberate rows rather than a full one over
-/// a stub.
-fn wrapped(
-    bindings: Vec<(&'static str, String)>,
-    palette: Palette,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let room = width as usize;
-
-    // A binding wider than the whole bar cannot be shown without shearing
-    // it, so it is not shown at all. Only reachable below the app's minimum
-    // width, where the size warning replaces the interface.
-    let entry = |key: &str, label: &str| format!("[{key}] {label}").chars().count();
-    let bindings: Vec<(&'static str, String)> = bindings
-        .into_iter()
-        .filter(|(key, label)| entry(key, label) <= room)
-        .collect();
-    let widths: Vec<usize> = bindings
-        .iter()
-        .map(|(key, label)| entry(key, label))
-        .collect();
-
+/// Breaking between whole bindings keeps every one that is shown legible.
+/// The rows are centred, so the bar sits under the centred panes above it,
+/// and `split` levels the break so a wrapped bar reads as two deliberate
+/// rows and not a full one over a stub.
+///
+/// A key is told from its label by colour alone. Brackets around it cost
+/// two columns a binding, and made a key that is itself a bracket unreadable.
+fn wrapped(bindings: &[Binding], palette: Palette, width: u16) -> Vec<Line<'static>> {
+    let widths: Vec<usize> = bindings.iter().map(entry_width).collect();
     let mut lines: Vec<Line> = Vec::new();
     let mut next = 0;
-    for count in split(&widths, room) {
+    for count in split(&widths, width as usize) {
         let mut row: Vec<Span> = Vec::new();
         for (key, label) in &bindings[next..next + count] {
             if !row.is_empty() {
                 row.push(Span::from(" ".repeat(SPACING)));
             }
-            row.push(Span::from(format!("[{key}]")).fg(palette.selection));
+            row.push(Span::from(*key).fg(palette.selection).bold());
             row.push(Span::from(format!(" {label}")).fg(palette.muted));
         }
         next += count;
@@ -251,26 +298,17 @@ fn row_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + SPACING * widths.len().saturating_sub(1)
 }
 
-/// What the bar shows: every binding in `Full` style, since there is no card
-/// behind `?` to carry the rest, and just the hint in `Hint` style.
-fn displayed(app: &App) -> Vec<(&'static str, String)> {
-    match app.key_hint_style {
-        KeyHintStyle::Full => bindings(app),
-        KeyHintStyle::Hint => hint(app),
-    }
-}
-
 /// How many rows the legend needs at this width, so the caller can reserve
 /// them before laying out everything else.
 pub(super) fn legend_rows(app: &App, width: u16) -> u16 {
     // The palette cannot change how much room the bindings need, so measuring
     // with any of them gives the same answer.
-    (wrapped(displayed(app), app.theme.palette(), width).len() as u16).clamp(1, MAX_ROWS)
+    (wrapped(&fitted(app, width), app.theme.palette(), width).len() as u16).clamp(1, MAX_ROWS)
 }
 
 pub(super) fn keybind_legend_render(frame: &mut Frame, app: &App, palette: Palette, area: Rect) {
     frame.render_widget(
-        Paragraph::new(wrapped(displayed(app), palette, area.width)),
+        Paragraph::new(wrapped(&fitted(app, area.width), palette, area.width)),
         area,
     );
 }
@@ -284,6 +322,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::time::{Duration, Instant};
+
+    const SCREENS: [Screen; 3] = [Screen::Weather, Screen::Hourly, Screen::Radar];
 
     fn app_on(screen: Screen) -> App {
         let mut app = App::new();
@@ -311,337 +351,167 @@ mod tests {
             .collect()
     }
 
-    /// `Full` style is what a user opts into to get the old always-visible
-    /// bar back — every binding named, the same as `bindings` gives the
-    /// overlay in `Hint` style.
-    #[test]
-    fn full_style_lists_every_binding_on_the_bar_itself() {
-        let mut app = app_on(Screen::Weather);
-        app.key_hint_style = KeyHintStyle::Full;
-        let legend = legend_at_with(&app, 120).join("\n");
-        for entry in ["[p] hourly", "[l] location", "[t] theme"] {
-            assert!(legend.contains(entry), "{legend:?}");
-        }
+    /// The bindings a row of the bar shows, split where the bar spaces them.
+    fn shown(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .flat_map(|row| row.trim().split("   "))
+            .map(|binding| binding.trim().to_string())
+            .filter(|binding| !binding.is_empty())
+            .collect()
     }
 
-    /// `?` opens nothing in `Full` style, so advertising it on the bar would
-    /// be a binding that lies about what pressing it does.
     #[test]
-    fn full_style_never_advertises_the_question_mark() {
-        let mut app = app_on(Screen::Weather);
-        app.key_hint_style = KeyHintStyle::Full;
-        let legend = legend_at_with(&app, 120).join("\n");
-        assert!(!legend.contains("[?]"), "{legend:?}");
+    fn a_wide_bar_names_the_screens_keys_and_the_ways_out() {
+        assert_eq!(
+            shown(&legend_at(120, Screen::Weather)),
+            [
+                "←→ day",
+                "h hourly",
+                "m map",
+                "/ search",
+                "? keys",
+                "q quit"
+            ]
+        );
+        assert_eq!(
+            shown(&legend_at(120, Screen::Hourly)),
+            [
+                "←→ hour",
+                "↑↓ day",
+                "v view",
+                "n now",
+                "esc back",
+                "? keys",
+                "q quit"
+            ]
+        );
+        assert_eq!(
+            shown(&legend_at(120, Screen::Radar)),
+            [
+                "←→↑↓ move",
+                "+- zoom",
+                ",. frame",
+                "space pause",
+                "n home",
+                "esc back",
+                "? keys",
+                "q quit"
+            ]
+        );
     }
 
-    /// The toggle itself has to be discoverable from whichever style is
-    /// active: from `Hint` behind the card, and from `Full` right on the bar,
-    /// since `Full` has nowhere else to put it.
+    /// No key on the bar is wrapped in brackets, which is what let a key
+    /// that is a bracket or a comma be read at all.
     #[test]
-    fn the_key_style_toggle_is_listed_in_both_styles() {
-        for style in [KeyHintStyle::Hint, KeyHintStyle::Full] {
-            let mut app = app_on(Screen::Weather);
-            app.key_hint_style = style;
-            let listed = bindings(&app).iter().any(|(key, _)| *key == ",");
-            assert!(listed, "{style:?}");
-        }
+    fn keys_are_set_off_by_colour_and_not_by_brackets() {
+        let app = app_on(Screen::Radar);
+        let palette = app.theme.palette();
+        let lines = wrapped(&fitted(&app, 120), palette, 120);
+        let text: String = lines.iter().map(Line::to_string).collect();
+        assert!(!text.contains('[') && !text.contains(']'), "{text}");
+
+        let spans = &lines[0].spans;
+        assert_eq!(spans[0].content, "←→↑↓");
+        assert_eq!(spans[0].style.fg, Some(palette.selection));
+        assert_eq!(spans[1].content, " move");
+        assert_eq!(spans[1].style.fg, Some(palette.muted));
     }
 
-    /// The list is written by hand beside the binding table in `input`, and
-    /// nothing tied the two together: `l` opened the search from the hourly
-    /// screen for months while that screen's card never mentioned it (#148).
-    /// So every key a screen answers to has to be on its list, unless it is
-    /// named here as a twin of a key that is. The search screen is left out:
-    /// every printable key is text there.
+    /// As the terminal narrows the screen's own keys go from the end, and
+    /// the way back, the card and the way out are still there at the
+    /// narrowest the app draws.
     #[test]
-    fn every_key_a_screen_answers_to_is_on_its_list() {
-        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn narrowing_drops_the_middle_and_keeps_both_ends() {
+        for screen in SCREENS {
+            let mut last = usize::MAX;
+            for width in (34..=120).rev() {
+                let rows = legend_at(width, screen);
+                assert!(rows.len() <= MAX_ROWS as usize, "{screen:?} at {width}");
+                let bindings = shown(&rows);
+                assert!(bindings.len() <= last, "{screen:?} grew at {width}");
+                last = bindings.len();
 
-        let twins = [
-            (Screen::Weather, KeyCode::Esc, "quits, like q"),
-            (Screen::Weather, KeyCode::Home, "goes to now, like n"),
-            (Screen::Hourly, KeyCode::Char('p'), "goes back, like b"),
-            (Screen::Hourly, KeyCode::Enter, "goes back, like b"),
-            (Screen::Hourly, KeyCode::Esc, "goes back, like b"),
-            (Screen::Hourly, KeyCode::Home, "goes to now, like n"),
-        ];
-        let keys = (' '..='~').map(KeyCode::Char).chain([
-            KeyCode::Left,
-            KeyCode::Right,
-            KeyCode::Up,
-            KeyCode::Down,
-            KeyCode::Home,
-            KeyCode::End,
-            KeyCode::PageUp,
-            KeyCode::PageDown,
-            KeyCode::Enter,
-            KeyCode::Esc,
-            KeyCode::Tab,
-            KeyCode::Backspace,
-            KeyCode::Delete,
-        ]);
-
-        for screen in [Screen::Weather, Screen::Hourly] {
-            let listed = bindings(&app_on(screen));
-            for code in keys.clone() {
-                let pressed = KeyEvent::new(code, KeyModifiers::NONE);
-                let bound = crate::input::action_for(pressed, screen, KeyHintStyle::Hint, false);
-                if bound.is_none() || twins.iter().any(|(s, c, _)| *s == screen && *c == code) {
-                    continue;
+                let tail: Vec<&str> = bindings.iter().rev().take(2).map(String::as_str).collect();
+                assert_eq!(tail, ["q quit", "? keys"], "{screen:?} at {width}");
+                if screen != Screen::Weather {
+                    assert!(
+                        bindings.iter().any(|binding| binding == "esc back"),
+                        "{screen:?} at {width}: {bindings:?}"
+                    );
                 }
-                let glyph = match code {
-                    KeyCode::Char(c) => c.to_string(),
-                    KeyCode::Left => "←".to_string(),
-                    KeyCode::Right => "→".to_string(),
-                    KeyCode::Up => "↑".to_string(),
-                    KeyCode::Down => "↓".to_string(),
-                    other => format!("{other:?}"),
-                };
-                let arrow = ["←", "→", "↑", "↓"].contains(&glyph.as_str());
-                assert!(
-                    listed
-                        .iter()
-                        .any(|(key, _)| *key == glyph || (arrow && key.contains(&glyph))),
-                    "{screen:?} answers to {glyph} ({bound:?}) but its list never says so: {listed:?}"
-                );
+                let (own, standing) = bar(&app_on(screen));
+                let whole: Vec<String> = own
+                    .iter()
+                    .chain(&standing)
+                    .map(|(key, label)| format!("{key} {label}"))
+                    .collect();
+                for binding in &bindings {
+                    assert!(whole.contains(binding), "{binding:?} was cut at {width}");
+                }
             }
         }
     }
 
-    /// The bar is a hint now, so the one thing it must advertise is the key
-    /// that shows everything else — and the way out, which is too important
-    /// to hide behind another keypress.
     #[test]
-    fn the_bar_hints_at_the_full_reference() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            let legend = legend_at(120, screen).join("\n");
-            assert!(legend.contains("[q] quit"), "{screen:?}: {legend:?}");
-            assert!(legend.contains("[?] keybinds"), "{screen:?}: {legend:?}");
+    fn the_radar_bar_says_whether_space_pauses_or_plays() {
+        let mut app = app_on(Screen::Radar);
+        assert!(shown(&legend_at_with(&app, 120)).contains(&"space pause".to_string()));
+        app.on_action(Action::TogglePlayback);
+        assert!(shown(&legend_at_with(&app, 120)).contains(&"space play".to_string()));
+    }
+
+    /// `t` is not on the bar until it is pressed, and then it names the
+    /// palette it landed on for a few seconds, on every screen and at the
+    /// narrowest width.
+    #[test]
+    fn the_theme_readout_visits_the_bar_and_leaves() {
+        for screen in SCREENS {
+            let mut app = app_on(screen);
+            assert!(!legend_at_with(&app, 80).concat().contains("theme"));
+
+            app.on_action(Action::CycleTheme);
+            let name = app.theme.name();
+            for width in [34, 80] {
+                let bar = legend_at_with(&app, width).concat();
+                assert!(bar.contains(&format!("t theme ({name})")), "{width}: {bar}");
+            }
+
+            assert!(app.expire_theme_readout(Instant::now() + Duration::from_secs(60)));
+            assert!(!legend_at_with(&app, 80).concat().contains("theme"));
         }
     }
 
-    /// The full list lives behind `?`; a bar still carrying it would mean
-    /// the overlay freed no rows.
-    #[test]
-    fn the_bar_no_longer_carries_the_full_list() {
-        let weather = legend_at(120, Screen::Weather).join("\n");
-        assert!(!weather.contains("[p] hourly"), "{weather:?}");
-
-        let hourly = legend_at(120, Screen::Hourly).join("\n");
-        assert!(!hourly.contains("[v] view"), "{hourly:?}");
-    }
-
-    /// `b` stays on the hourly hint: how you got in is not obvious once you
-    /// are there, and the way back should not take a detour through help.
-    #[test]
-    fn the_hourly_hint_keeps_a_way_back() {
-        let legend = legend_at(120, Screen::Hourly).join("\n");
-        assert!(legend.contains("[b] back"), "{legend:?}");
-    }
-
-    /// The point of the hint: one row even at the minimum width, where the
-    /// full list used to wrap onto two and cost the chart a row.
-    #[test]
-    fn the_hint_fits_one_row_even_at_the_minimum_width() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            assert_eq!(legend_rows(&app_on(screen), 34), 1, "{screen:?}");
-        }
-    }
-
-    /// Pressing `t` has to be its own feedback: the bar is the only thing on
-    /// screen that says which palette you just landed on.
-    #[test]
-    fn pressing_the_key_names_the_palette_it_landed_on() {
-        let mut app = app_on(Screen::Weather);
-
-        app.on_action(Action::CycleTheme);
-        let first = legend_at_with(&app, 120).join(" ");
-        assert!(
-            first.contains(&format!("[t] theme ({})", app.theme.name())),
-            "{first:?}"
-        );
-
-        app.on_action(Action::CycleTheme);
-        let second = legend_at_with(&app, 120).join(" ");
-        assert!(
-            second.contains(&format!("[t] theme ({})", app.theme.name())),
-            "the bar did not follow the theme: {second:?}"
-        );
-        assert_ne!(first, second, "cycling left the bar unchanged");
-    }
-
-    /// Whichever palette is on, the readout that names it fits the bar. The
-    /// name is the only label here whose width is not fixed, so the longest of
-    /// them is what would shear first.
     #[test]
     fn every_palette_can_be_named_on_the_bar() {
         for theme in Theme::ALL {
             let mut app = app_on(Screen::Weather);
             app.theme = theme;
             app.on_action(Action::CycleTheme);
-
-            let legend = legend_at_with(&app, 120).join(" ");
-            assert!(
-                legend.contains(&format!("[t] theme ({})", app.theme.name())),
-                "{}: {legend:?}",
-                app.theme.name()
-            );
+            let name = app.theme.name();
+            let bar = legend_at_with(&app, 34).concat();
+            assert!(bar.contains(name), "{name} at the minimum width: {bar}");
         }
     }
 
-    /// `t` on the hint is feedback, not a standing entry: the name answers
-    /// "which one did I just get" while that is a live question, and the
-    /// whole binding steps back into the overlay once it has been read.
     #[test]
-    fn the_theme_readout_visits_the_hint_and_leaves() {
-        let mut app = app_on(Screen::Weather);
-
-        // Before it has ever been pressed there is nothing to report.
-        let untouched = legend_at_with(&app, 120).join(" ");
-        assert!(
-            !untouched.contains("[t]"),
-            "the hint named a palette nobody had asked about: {untouched:?}"
-        );
-
-        app.on_action(Action::CycleTheme);
-        assert!(legend_at_with(&app, 120).join(" ").contains("[t] theme ("));
-
-        app.expire_theme_readout(Instant::now() + Duration::from_secs(60));
-        let lapsed = legend_at_with(&app, 120).join(" ");
-        assert!(
-            !lapsed.contains("[t]"),
-            "the name outstayed its welcome: {lapsed:?}"
+    fn the_search_bar_names_what_enter_and_escape_do() {
+        assert_eq!(
+            shown(&legend_at(80, Screen::Search)),
+            ["enter search", "esc cancel"]
         );
     }
 
-    /// The readout is transient, so the room it takes has to come back — on a
-    /// narrow terminal it is the difference between the bar fitting on one row
-    /// and taking a row off the chart.
-    #[test]
-    fn the_bar_gets_its_columns_back() {
-        let mut app = app_on(Screen::Weather);
-        app.theme = Theme::GruvboxDark;
-        app.on_action(Action::CycleTheme);
-
-        let showing = legend_at_with(&app, 120).join(" ").trim_end().len();
-
-        app.expire_theme_readout(Instant::now() + Duration::from_secs(60));
-        let hidden = legend_at_with(&app, 120).join(" ").trim_end().len();
-
-        assert!(
-            hidden < showing,
-            "the name went but its columns did not: {hidden} vs {showing}"
-        );
-    }
-
-    /// The bug: a single row simply clipped, so narrowing the terminal sheared
-    /// bindings mid-word. Every binding that appears must appear whole.
-    ///
-    /// Swept across every theme as well as every width, with the readout
-    /// showing: `[t] theme (gruvbox dark)` is the widest label the bar
-    /// ever carries, and it is the only one whose width is not fixed. Sweeping
-    /// with the readout hidden would test the *narrowest* case and call it
-    /// covered.
-    #[test]
-    fn narrowing_never_cuts_a_binding_in_half() {
-        for theme in Theme::ALL {
-            for screen in [Screen::Weather, Screen::Hourly, Screen::Search] {
-                for width in 8u16..=160 {
-                    let mut app = app_on(screen);
-                    // Press first, then force the palette: the press is what
-                    // puts the name on the bar, and cycling would otherwise
-                    // land on a different theme than the one under test.
-                    app.on_action(Action::CycleTheme);
-                    app.theme = theme;
-                    let rows = legend_at_with(&app, width);
-
-                    for row in &rows {
-                        assert!(
-                            row.chars().count() <= width as usize,
-                            "{} at {width}: row overflows: {row:?}",
-                            theme.name()
-                        );
-                        // A sheared binding leaves an opening bracket with no
-                        // closing one.
-                        assert_eq!(
-                            row.matches('[').count(),
-                            row.matches(']').count(),
-                            "{} at {width}: cut a key in half: {row:?}",
-                            theme.name()
-                        );
-                    }
-
-                    // Any key that made it onto the bar brought its label with it.
-                    let shown = rows.join(" ");
-                    for (key, label) in hint(&app) {
-                        if shown.contains(&format!("[{key}]")) {
-                            assert!(
-                                shown.contains(&format!("[{key}] {label}")),
-                                "{} at {width}: {key:?} lost its label: {shown:?}",
-                                theme.name()
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// `Full` style's list is longer than the hint's — the same sweep, over
-    /// `bindings` instead, since that list is what the bar now carries whole
-    /// rather than behind a card.
-    #[test]
-    fn narrowing_never_cuts_a_full_style_binding_in_half() {
-        for screen in [Screen::Weather, Screen::Hourly, Screen::Search] {
-            for width in 8u16..=160 {
-                let mut app = app_on(screen);
-                app.key_hint_style = KeyHintStyle::Full;
-                let rows = legend_at_with(&app, width);
-
-                for row in &rows {
-                    assert!(
-                        row.chars().count() <= width as usize,
-                        "at {width}: row overflows: {row:?}"
-                    );
-                    assert_eq!(
-                        row.matches('[').count(),
-                        row.matches(']').count(),
-                        "at {width}: cut a key in half: {row:?}"
-                    );
-                }
-
-                let shown = rows.join(" ");
-                for (key, label) in bindings(&app) {
-                    if shown.contains(&format!("[{key}]")) {
-                        assert!(
-                            shown.contains(&format!("[{key}] {label}")),
-                            "at {width}: {key:?} lost its label: {shown:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// Wrapping is what lets a terminal narrower than the minimum keep the
-    /// hint's bindings whole instead of clipping them mid-word.
-    #[test]
-    fn a_very_narrow_terminal_wraps_the_hint_rather_than_clipping() {
-        let narrow = legend_at(20, Screen::Weather);
-        assert_eq!(narrow.len(), 2, "20 columns needs two rows: {narrow:?}");
-
-        let shown = narrow.join(" ");
-        for key in ["[q]", "[?]"] {
-            assert!(shown.contains(key), "20 columns lost {key}: {shown:?}");
-        }
-    }
-
-    /// The complaint: the bar sat pinned to the left edge while every pane
+    /// Left-aligned, the bar hugged the terminal edge while every pane
     /// above it is centred, so it read as detached from the interface.
     #[test]
-    fn the_bar_is_centred_rather_than_pinned_left() {
-        for screen in [Screen::Weather, Screen::Hourly, Screen::Search] {
-            for row in legend_at(120, screen) {
+    fn the_bar_is_centred_and_not_pinned_left() {
+        for screen in [
+            Screen::Weather,
+            Screen::Hourly,
+            Screen::Radar,
+            Screen::Search,
+        ] {
+            for row in legend_at(140, screen) {
                 let leading = row.chars().take_while(|c| *c == ' ').count();
                 let trailing = row.chars().rev().take_while(|c| *c == ' ').count();
                 assert!(leading > 0, "{screen:?}: {row:?}");
@@ -661,56 +531,65 @@ mod tests {
         assert_eq!(split(&[10, 10, 10, 10], 46), vec![2, 2]);
     }
 
-    /// Two rows is the ceiling however little room there is, or the legend
-    /// would start taking rows the chart needs more.
+    /// Every key `input` binds on a screen is on that screen's card, and
+    /// the card promises no key that does nothing.
     #[test]
-    fn the_legend_never_takes_more_than_its_share() {
-        for width in 1u16..=200 {
-            for screen in [Screen::Weather, Screen::Hourly] {
-                let rows = legend_rows(&app_on(screen), width);
-                assert!((1..=MAX_ROWS).contains(&rows), "width {width}: {rows} rows");
+    fn the_card_lists_every_key_a_screen_answers_to_and_no_other() {
+        use crate::input::action_for;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let code_of = |name: &str| match name {
+            "esc" => vec![KeyCode::Esc],
+            "space" => vec![KeyCode::Char(' ')],
+            "←→↑↓" => vec![KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down],
+            "←→" => vec![KeyCode::Left, KeyCode::Right],
+            "↑↓" => vec![KeyCode::Up, KeyCode::Down],
+            one => {
+                let mut chars = one.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(only), None) => vec![KeyCode::Char(only)],
+                    _ => panic!("the card names a key this test cannot press: {one:?}"),
+                }
             }
-        }
-    }
+        };
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
-    /// Whatever gets dropped, the two keys that get you out come first.
-    #[test]
-    fn quitting_and_leaving_survive_a_very_narrow_terminal() {
-        let legend = legend_at(20, Screen::Hourly).join(" ");
-        assert!(legend.contains("[q]"), "{legend:?}");
-        assert!(legend.contains("[b]"), "{legend:?}");
-    }
-
-    /// In `Full` style the bar is the only place `,` is discoverable at all —
-    /// `?` is unbound there, so a wrap that drops the comma from the tail
-    /// strands the user in `Full` with no visible way back. The rendered bar,
-    /// not just the list, has to keep it at every width the app runs at.
-    #[test]
-    fn full_style_keeps_the_way_back_to_hint_at_every_supported_width() {
-        for screen in [Screen::Weather, Screen::Hourly] {
-            for width in 34u16..=160 {
-                let mut app = app_on(screen);
-                app.key_hint_style = KeyHintStyle::Full;
-                let shown = legend_at_with(&app, width).join(" ");
+        for screen in SCREENS {
+            let listed: Vec<KeyCode> = reference(&app_on(screen))
+                .iter()
+                .flat_map(|group| &group.bindings)
+                .flat_map(|(keys, _)| keys.split(' '))
+                .flat_map(code_of)
+                .collect();
+            for code in &listed {
                 assert!(
-                    shown.contains("[,] hide"),
-                    "{screen:?} at {width} lost the way back: {shown:?}"
+                    action_for(press(*code), screen, false).is_some(),
+                    "{screen:?} lists {code:?}, which does nothing"
                 );
             }
-        }
-    }
 
-    /// `Full` style's longer list is still bound by the same ceiling — the
-    /// row it costs never grows past what `Hint` style's bar already reserves
-    /// room for.
-    #[test]
-    fn full_style_never_takes_more_than_its_share_either() {
-        for width in 1u16..=200 {
-            for screen in [Screen::Weather, Screen::Hourly] {
-                let mut app = app_on(screen);
-                app.key_hint_style = KeyHintStyle::Full;
-                let rows = legend_rows(&app, width);
-                assert!((1..=MAX_ROWS).contains(&rows), "width {width}: {rows} rows");
+            let typed = (' '..='~').map(KeyCode::Char);
+            let named = [
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Esc,
+                KeyCode::Enter,
+                KeyCode::Tab,
+                KeyCode::Backspace,
+            ];
+            // Second spellings of a listed key, which the card leaves out
+            // so each job is one line: `=` is `+` unshifted, and `Home`
+            // would be `n`. The number of the screen already showing is
+            // the one listed key that is meant to do nothing.
+            let unlisted = [KeyCode::Char('='), KeyCode::Home];
+            for code in typed.chain(named) {
+                let bound = action_for(press(code), screen, false).is_some();
+                assert!(
+                    !bound || listed.contains(&code) || unlisted.contains(&code),
+                    "{screen:?} answers to {code:?} and does not list it"
+                );
             }
         }
     }

@@ -767,10 +767,6 @@ mod tests {
             let mut helped = ready(screen);
             helped.help_visible = true;
             states.push((format!("{screen:?}/help"), helped));
-
-            let mut full_style = ready(screen);
-            full_style.key_hint_style = crate::app::KeyHintStyle::Full;
-            states.push((format!("{screen:?}/full-style"), full_style));
         }
 
         // The search box floats over a loaded screen, so the weather stays
@@ -815,28 +811,27 @@ mod tests {
         }
     }
 
-    /// The bar only hints, so the overlay is now the one place a binding like
-    /// `p` or `l` is discoverable at all.
+    /// The bar only hints, so the card is the one place a key like `u` or
+    /// `t` is discoverable at all.
     #[test]
     fn the_help_overlay_lists_every_binding() {
         let mut app = ready(Screen::Weather);
         app.help_visible = true;
         let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
 
-        for entry in ["[p] hourly", "[←→↑↓] day", "[l] location", "[t] theme"] {
+        for entry in ["h 2  hourly", "←→↑↓  day", "/  search", "t  theme"] {
             assert!(text.contains(entry), "the overlay lost {entry}: {text}");
         }
         assert!(text.contains("Keys"), "{text}");
 
-        // And that screen's bindings, not the weather screen's: on the hourly
-        // screen `p` goes back rather than opening it, and `l` opens the
-        // search there too, though the card left it out until #148.
+        // And that screen's keys, not the weather screen's: on the hourly
+        // screen `h` goes back rather than opening it.
         let mut app = ready(Screen::Hourly);
         app.help_visible = true;
         let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
-        assert!(text.contains("[v] view"), "{text}");
-        assert!(text.contains("[l] location"), "{text}");
-        assert!(!text.contains("[p] hourly"), "{text}");
+        assert!(text.contains("v  weathergram or classic"), "{text}");
+        assert!(text.contains("esc 1 h  forecast"), "{text}");
+        assert!(!text.contains("h 2  hourly"), "{text}");
     }
 
     /// Closed is the resting state, and it must not leak the reference onto
@@ -845,81 +840,38 @@ mod tests {
     fn a_closed_overlay_leaves_the_dashboard_alone() {
         let app = ready(Screen::Weather);
         let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
-        assert!(!text.contains("[p] hourly"), "{text}");
+        assert!(!text.contains("h 2  hourly"), "{text}");
+        assert!(!text.contains("esc closes"), "{text}");
     }
 
-    /// The overlay has to earn its keep at the floor too: every line whole,
-    /// no panic, inside 34x12 — on the hourly screen, whose list is longest.
+    /// At 34x12 the card is too narrow for two columns and too short for
+    /// one, so it clips from the tail, where `q quit` and `? keys` are, the
+    /// two keys the bar names at every width. What must survive is the
+    /// frame and the footer, which says how to get out of the card.
     #[test]
     fn the_help_overlay_survives_the_minimum_terminal() {
-        for screen in [Screen::Weather, Screen::Hourly] {
+        for screen in [Screen::Weather, Screen::Hourly, Screen::Radar] {
             let mut app = ready(screen);
             app.help_visible = true;
-            let rows = symbols(
+            let text = symbols(
                 &drawn(&app, probe(), MIN_WIDTH, MIN_HEIGHT),
                 MIN_WIDTH,
                 MIN_HEIGHT,
-            );
+            )
+            .join("\n");
 
-            for row in &rows {
-                assert_eq!(
-                    row.matches('[').count(),
-                    row.matches(']').count(),
-                    "{screen:?} cut a key in half: {row:?}"
-                );
-            }
+            assert!(text.contains("Keys"), "{screen:?}:\n{text}");
+            assert!(text.contains("Move"), "{screen:?}:\n{text}");
             assert!(
-                rows.join("\n").contains("[q] quit"),
-                "{screen:?} lost the way out: {rows:?}"
+                text.contains("? or esc closes"),
+                "{screen:?} lost the way out:\n{text}"
             );
         }
     }
 
-    /// The hourly card is two lines taller than the floor can hold with its
-    /// border, so the last two clip: `[t] theme` and `[?] keys`, the second
-    /// being the binding the footer already restates. At 34x12 the hourly
-    /// screen itself is only a size warning, so the theme key is the cheapest
-    /// to lose; the ways out and around survive, `[l] location` among them
-    /// (#148).
-    #[test]
-    fn the_floor_clips_the_card_from_its_tail() {
-        let mut app = ready(Screen::Hourly);
-        app.help_visible = true;
-        let text = symbols(
-            &drawn(&app, probe(), MIN_WIDTH, MIN_HEIGHT),
-            MIN_WIDTH,
-            MIN_HEIGHT,
-        )
-        .join("\n");
-
-        for entry in ["[q] quit", "[b] back", "[,] hide", "[l] location"] {
-            assert!(text.contains(entry), "lost {entry:?}: {text:?}");
-        }
-        for entry in ["[t] theme", "[?] keys"] {
-            assert!(
-                !text.contains(entry),
-                "{entry:?} should have clipped: {text:?}"
-            );
-        }
-    }
-
-    /// `Full` style is the pre-overlay bar revived: every binding named on
-    /// the bar itself, with no card behind `?` because there is nothing left
-    /// for it to hold.
-    #[test]
-    fn full_style_names_every_binding_on_the_bar_and_opens_no_card() {
-        let mut app = ready(Screen::Weather);
-        app.key_hint_style = crate::app::KeyHintStyle::Full;
-        let text = symbols(&drawn(&app, probe(), 120, 30), 120, 30).join("\n");
-
-        for entry in ["[p] hourly", "[l] location", "[t] theme"] {
-            assert!(text.contains(entry), "{text:?}");
-        }
-        assert!(!text.contains("any key closes"), "{text:?}");
-    }
-
-    /// `?` then any key must be a round trip: the overlay borrows the screen,
-    /// it does not get to change it.
+    /// `?` twice must be a round trip: the card borrows the screen, it does
+    /// not get to change it. A key pressed while it is up changes nothing
+    /// underneath.
     #[test]
     fn toggling_help_twice_returns_the_prior_frame() {
         let mut app = ready(Screen::Weather);
@@ -930,6 +882,9 @@ mod tests {
         assert_ne!(before, open, "opening help drew nothing");
 
         app.on_action(crate::input::Action::NextDay);
+        assert_eq!(open, drawn(&app, probe(), 120, 30), "a key got through");
+
+        app.on_action(crate::input::Action::ToggleHelp);
         let after = drawn(&app, probe(), 120, 30);
         assert_eq!(before, after, "help did not put the screen back");
     }
@@ -1070,8 +1025,8 @@ mod tests {
             let rows = symbols(&drawn(&App::new(), probe(), width, height), width, height);
             let text = rows.join("\n");
             assert!(text.contains("NEW YORK"), "{width}x{height}:\n{text}");
-            assert!(text.contains("[q] quit"), "{width}x{height}:\n{text}");
-            assert!(text.contains("[?] keybinds"), "{width}x{height}:\n{text}");
+            assert!(text.contains("q quit"), "{width}x{height}:\n{text}");
+            assert!(text.contains("? keys"), "{width}x{height}:\n{text}");
             assert!(!text.contains("Loading"), "{width}x{height}:\n{text}");
 
             let (top, bottom, left, right) = pane_of(&rows, "Forecast");
@@ -1511,7 +1466,7 @@ mod tests {
             "the compact tracks came back:\n{short}"
         );
         assert!(
-            short.contains("[b] back"),
+            short.contains("esc back"),
             "the way back left the screen:\n{short}"
         );
 
@@ -1558,7 +1513,7 @@ mod tests {
         let text = symbols(&buffer, MIN_WIDTH, MIN_HEIGHT).join("\n");
 
         assert!(text.contains("Terminal too small"), "{text}");
-        assert!(text.contains("[b] back"), "{text}");
+        assert!(text.contains("esc back"), "{text}");
     }
 
     /// The classic view has its own height tiers and was never the widget the
