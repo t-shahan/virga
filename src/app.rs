@@ -47,44 +47,6 @@ impl HourlyView {
     }
 }
 
-/// Whether the key bar hints at the reference behind `?` or names every
-/// binding itself, the way it always has. `,` toggles it and the choice is
-/// persisted, the same shape as the theme, but the default is `Hint` rather
-/// than `Full`: unlike the theme, nobody has this bar in front of them yet —
-/// the hint shipped inside the same unreleased range this toggle did, so
-/// there is no standing muscle memory for `Full` to protect. `Full` is what a
-/// user opts *into*, to get the always-visible list back.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum KeyHintStyle {
-    #[default]
-    Hint,
-    Full,
-}
-
-impl KeyHintStyle {
-    pub fn toggle(self) -> Self {
-        match self {
-            KeyHintStyle::Hint => KeyHintStyle::Full,
-            KeyHintStyle::Full => KeyHintStyle::Hint,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            KeyHintStyle::Hint => "hint",
-            KeyHintStyle::Full => "full",
-        }
-    }
-
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "hint" => Some(KeyHintStyle::Hint),
-            "full" => Some(KeyHintStyle::Full),
-            _ => None,
-        }
-    }
-}
-
 /// How far the vertical arrows jump. Eight days is a long way at one press
 /// per hour.
 const HOURS_PER_DAY: usize = 24;
@@ -427,9 +389,8 @@ pub struct App {
     /// stays the thing this module displays; this is the thing it records.
     noticed_release: Option<Release>,
     /// Set the moment the notice is cleared, so the caller knows to write
-    /// the release down — the same "persist the moment it changes" shape as
-    /// `key_hint_style_dirty`, carrying the value rather than a flag because
-    /// the notice it came from is gone by the time the caller asks.
+    /// the release down. It carries the value and not a flag, because the
+    /// notice it came from is gone by the time the caller asks.
     dismissed_release: Option<Release>,
     /// Whether the last frame drawn had the notice on it. Set by the draw
     /// loop from what `ui::render` reports, because only the layout knows:
@@ -438,16 +399,9 @@ pub struct App {
     /// when this says the user could have read it.
     pub notice_drawn: bool,
     /// Whether the key reference overlay is open. Only reachable from the
-    /// weather screens: search binds `?` to text, and while the overlay is
-    /// open every action closes it before it could change screen.
+    /// weather screens: search binds `?` to text. While it is open nothing
+    /// behind it can be acted on.
     pub help_visible: bool,
-    /// Whether the bar hints at `?` or lists every binding itself.
-    pub key_hint_style: KeyHintStyle,
-    /// Set the moment `,` changes `key_hint_style`, so the caller knows to
-    /// write it down — the same "persist the moment it changes" shape a
-    /// chosen location already follows, rather than a save pass over
-    /// everything at exit.
-    key_hint_style_dirty: bool,
 }
 
 /// How long the palette's name stays on the key bar after `t`. Long enough to
@@ -533,8 +487,6 @@ impl App {
             dismissed_release: None,
             notice_drawn: false,
             help_visible: false,
-            key_hint_style: KeyHintStyle::default(),
-            key_hint_style_dirty: false,
         }
     }
 
@@ -558,14 +510,18 @@ impl App {
     /// I/O out here — the caller owns the channel — is what lets every
     /// transition below be tested without a terminal or a network.
     pub fn on_action(&mut self, action: Action) -> Option<Request> {
-        // With the reference open, the next key's only job is closing it —
-        // even `q`: quitting or navigating through the overlay would mean
-        // acting on a screen the reader cannot see, and a misread key
-        // reopening help mid-journey is worse than one spent keystroke.
+        // With the reference open, a key either closes it or does nothing.
+        // Acting through the card would mean acting on a screen the reader
+        // cannot see. `input` only lets the closing keys and Ctrl-C through,
+        // and this holds the same line for a caller that did not ask it.
         // Checked before the notice is let go, because a key pressed with
         // the card covering the screen has not seen any news behind it.
         if self.help_visible {
-            self.help_visible = false;
+            match action {
+                Action::ToggleHelp => self.help_visible = false,
+                Action::Quit => self.should_quit = true,
+                _ => {}
+            }
             return None;
         }
         // The notice is dismissed by living — but only by a key that could
@@ -619,14 +575,8 @@ impl App {
             Action::NextHourDay => self.select_next_hour_day(),
             Action::Now => self.select_now(),
             Action::ToggleHourlyView => self.hourly_view = self.hourly_view.toggle(),
-            // Only ever opens: a `?` with the overlay up is closed by the
-            // interception above, like any other key, and `input` only ever
-            // produces this action in `Hint` style — `?` is unbound in `Full`.
+            // Only ever opens: with the card up, the check above answers.
             Action::ToggleHelp => self.help_visible = true,
-            Action::ToggleKeyHints => {
-                self.key_hint_style = self.key_hint_style.toggle();
-                self.key_hint_style_dirty = true;
-            }
             Action::Insert(c) => {
                 self.query.push(c);
                 self.invalidate_results();
@@ -1096,21 +1046,10 @@ impl App {
         }
     }
 
-    /// Takes the pending save left by a `,` press, if there is one.
-    ///
-    /// Mirrors `expire_theme_readout`'s shape for the same reason: the caller
-    /// owns the write, so this only has to report that one is due and hand
-    /// back what to write, once, rather than write it itself.
-    pub fn take_key_hint_style_save(&mut self) -> Option<KeyHintStyle> {
-        self.key_hint_style_dirty.then(|| {
-            self.key_hint_style_dirty = false;
-            self.key_hint_style
-        })
-    }
-
     /// Takes the release whose notice a key just cleared, if one did, so
     /// the caller can remember not to announce it again. Once per
-    /// dismissal, for the same reason `take_key_hint_style_save` is.
+    /// dismissal: the caller owns the write, so this only reports that one
+    /// is due and hands back what to write.
     pub fn take_update_dismissal(&mut self) -> Option<Release> {
         self.dismissed_release.take()
     }
@@ -1242,6 +1181,11 @@ impl App {
         if let Some(picked) = picked {
             self.results = Fetch::Idle;
             self.close_search();
+            // The radar on screen is the old place's. The forecast is where
+            // a new place arrives, and the radar reopens on it from there.
+            if self.screen == Screen::Radar {
+                self.screen = Screen::Weather;
+            }
             // The one place a location becomes a choice. Everything else the app
             // fetches is a guess it made on the user's behalf.
             return Some(self.fetch(picked, LocationSource::Chosen));
@@ -1503,24 +1447,23 @@ mod tests {
         assert!(!app.help_visible);
     }
 
-    /// With the reference open the next key's only job is to close it. Acting
-    /// as well would mean navigating blind behind the overlay, and reopening
-    /// help by accident while trying to move would be worse than a no-op
-    /// keystroke.
+    /// With the reference open nothing behind it moves, and the card stays
+    /// until it is closed on purpose.
     #[test]
-    fn any_action_closes_the_help_overlay_and_does_nothing_else() {
+    fn the_help_overlay_holds_until_closed_and_lets_nothing_through() {
         let mut app = app_with(22, 14);
         app.on_action(Action::ToggleHelp);
 
         let request = app.on_action(Action::Refresh);
-        assert!(request.is_none(), "a swallowed key sent a request");
-        assert!(!app.help_visible, "the overlay outlived a keypress");
-        assert_eq!(app.selected_day, 14);
+        assert!(request.is_none(), "a key sent a request through the card");
+        app.on_action(Action::NextDay);
+        assert!(app.help_visible, "a stray key closed the card");
+        assert_eq!(app.selected_day, 14, "a key moved the selection");
 
         app.on_action(Action::ToggleHelp);
-        app.on_action(Action::NextDay);
         assert!(!app.help_visible);
-        assert_eq!(app.selected_day, 14, "a swallowed key moved the selection");
+        app.on_action(Action::NextDay);
+        assert_eq!(app.selected_day, 15);
     }
 
     /// The notice is dismissed by a key that could have seen it, and a key
@@ -1536,10 +1479,11 @@ mod tests {
         app.notice_drawn = true;
 
         app.on_action(Action::NextDay);
+        app.on_action(Action::ToggleHelp);
         assert!(!app.help_visible);
         assert!(
             app.update_notice.is_some(),
-            "the closing key deleted news nobody was shown"
+            "a key pressed behind the card deleted news nobody was shown"
         );
 
         // The next ordinary key sees it on screen and lets it go.
@@ -1547,52 +1491,13 @@ mod tests {
         assert_eq!(app.update_notice, None);
     }
 
-    /// `q` and Esc close the overlay rather than quitting through it: the
-    /// first press answers the thing on top, the way htop's help does.
+    /// Ctrl-C is the one way out that the card does not stand in front of.
     #[test]
-    fn quit_closes_the_help_overlay_without_quitting() {
+    fn an_interrupt_quits_through_the_help_overlay() {
         let mut app = app_with(22, 14);
         app.on_action(Action::ToggleHelp);
         app.on_action(Action::Quit);
-
-        assert!(!app.help_visible);
-        assert!(!app.should_quit, "quit acted through the overlay");
-
-        app.on_action(Action::Quit);
-        assert!(app.should_quit, "the second press must still quit");
-    }
-
-    /// The default matches what this branch already renders for everyone —
-    /// there is no released `Full` bar to protect muscle memory for, so
-    /// nobody's first launch may change out from under them.
-    #[test]
-    fn the_key_hint_style_defaults_to_hint() {
-        assert_eq!(App::new().key_hint_style, KeyHintStyle::Hint);
-    }
-
-    #[test]
-    fn a_comma_toggles_the_key_hint_style_and_back() {
-        let mut app = App::new();
-        app.on_action(Action::ToggleKeyHints);
-        assert_eq!(app.key_hint_style, KeyHintStyle::Full);
-        app.on_action(Action::ToggleKeyHints);
-        assert_eq!(app.key_hint_style, KeyHintStyle::Hint);
-    }
-
-    /// The toggle is worth writing down, but only once per press — a caller
-    /// that saves on every idle tick must not rewrite the file forever.
-    #[test]
-    fn toggling_the_key_hint_style_leaves_exactly_one_pending_save() {
-        let mut app = App::new();
-        assert_eq!(app.take_key_hint_style_save(), None);
-
-        app.on_action(Action::ToggleKeyHints);
-        assert_eq!(app.take_key_hint_style_save(), Some(KeyHintStyle::Full));
-        assert_eq!(
-            app.take_key_hint_style_save(),
-            None,
-            "the save was not taken exactly once"
-        );
+        assert!(app.should_quit);
     }
 
     #[test]
@@ -3675,6 +3580,35 @@ mod tests {
             app.close_search();
             assert_eq!(app.screen, origin, "came back to the wrong screen");
         }
+    }
+
+    /// The radar on screen belongs to the place being left, so a city chosen
+    /// from there lands on the forecast. Backing out of the search without
+    /// choosing still returns to the radar.
+    #[test]
+    fn choosing_a_city_from_the_radar_lands_on_the_forecast() {
+        let mut app = app_with(22, 14);
+        app.screen = Screen::Radar;
+
+        app.on_action(Action::OpenSearch);
+        app.close_search();
+        assert_eq!(app.screen, Screen::Radar, "cancelling left the radar");
+
+        app.on_action(Action::OpenSearch);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52437,
+            lon: 13.41053,
+            timezone: None,
+            country_code: None,
+            population: None,
+        }]);
+        let picked = app.on_action(Action::Submit);
+
+        assert!(matches!(picked, Some(Request::Fetch { .. })));
+        assert_eq!(app.screen, Screen::Weather);
     }
 
     /// Cancelling has to come back to the same place as choosing, or Esc

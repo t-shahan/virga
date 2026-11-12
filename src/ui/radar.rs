@@ -31,7 +31,7 @@ pub(super) fn radar_render(frame: &mut Frame, app: &App, palette: Palette, area:
     match &app.radar {
         Fetch::Ready(scene) => scene_render(frame, app, scene, palette, area),
         Fetch::Failed(error) => {
-            let message = format!("No radar: {error}\n\n[r] tries again");
+            let message = format!("No radar: {error}\n\npress r to try again");
             notice_render(frame, app, palette, area, &message, palette.error);
         }
         Fetch::Loading | Fetch::Idle => {
@@ -773,7 +773,7 @@ mod tests {
         assert_eq!(buffer[(40, 5)].symbol(), "⣿");
         let bar = row(&buffer, 23);
         assert!(
-            bar.contains("[b] back") && bar.contains("[q] quit"),
+            bar.contains("esc back") && bar.contains("q quit"),
             "{bar:?}"
         );
     }
@@ -834,17 +834,18 @@ mod tests {
         let text: String = (0..24).map(|y| row(&buffer, y) + "\n").collect();
 
         for binding in [
-            "[space] pause",
-            "[←→↑↓] move",
-            "[+-] zoom",
-            "[c] centre",
-            "[[ ]] frame",
-            "[r] refresh",
-            "[b] back",
+            "space  pause",
+            "←→↑↓  pan",
+            "+ -  zoom",
+            "n  your city",
+            ", .  frame",
+            "r  refresh",
+            "esc 1 m  forecast",
+            "h 2  hourly",
         ] {
             assert!(text.contains(binding), "{binding} in\n{text}");
         }
-        assert!(!text.contains("hourly"), "{text}");
+        assert!(!text.contains("weathergram"), "{text}");
     }
 
     #[test]
@@ -863,7 +864,7 @@ mod tests {
             text.contains("No radar") && text.contains("timed out"),
             "{text}"
         );
-        assert!(text.contains("[r] tries again"), "{text}");
+        assert!(text.contains("press r to try again"), "{text}");
     }
 
     /// Every size from the app's floor to a very large terminal, a pane
