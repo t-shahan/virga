@@ -87,7 +87,10 @@ pub(super) fn bindings(app: &App) -> Vec<(&'static str, String)> {
             ("q", "quit"),
             ("b", "back"),
             (",", "hide"),
-            ("←→", "frame"),
+            ("←→↑↓", "move"),
+            ("+-", "zoom"),
+            ("c", "centre"),
+            ("[ ]", "frame"),
             (
                 "space",
                 if app.playback.is_playing() {

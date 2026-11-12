@@ -85,8 +85,9 @@ The weathergram is the default; the choice lasts for the session.
 - **Hourly weathergram** — four shared-axis tracks, a selected-hour inspector,
   an adaptive horizon, and an optional weekly precipitation strip.
 - **Radar** — `m` opens the last two hours of rain as a looping map in
-  braille, over coastlines and borders that are built into the binary, with
-  the loop scrubbable frame by frame.
+  braille, over coastlines and borders that are built into the binary. The
+  map zooms from a city out to the whole world and pans anywhere on it, and
+  the loop is scrubbable frame by frame.
 - **Forecast confidence** — a dimmed cap on the temperature silhouette shows
   how far an ensemble's runs disagree, hour by hour, and the selected hour
   states its likely range.
@@ -224,7 +225,10 @@ directory:
 | `n` / `Home` | Jump back to now |
 | `p` | Hourly weathergram — `p` again, `b`, `Enter` or `Esc` to go back |
 | `m` | Radar: the last two hours, looping — `m` again, `b`, `Enter` or `Esc` to go back |
-| `space` | On the radar screen, pause or restart the loop; `←` `→` step a frame and pause it |
+| `+` `-` | On the radar screen, zoom in and out, from about 190 km across to the whole world (`=` also zooms in) |
+| `←` `→` `↑` `↓` | On the radar screen, move the map a quarter of its width |
+| `c` | On the radar screen, go back to the city at the opening zoom |
+| `space` | On the radar screen, pause or restart the loop; `[` `]` step a frame and pause it |
 | `v` | On the hourly screen, flip between the weathergram and the classic precipitation view |
 | `l` | Search for a city (`Enter` selects, `↑` `↓` move, `Esc` cancels) |
 | `r` | Refetch the current location — on the radar screen, refetch the radar |
@@ -532,9 +536,11 @@ least one of the terminals named under [Limitations](#limitations):
   map says it is, the `◉` sits on the city, the loop advances about twice a
   second and rests on the newest frame, and braille cells line up with no
   gaps between rows. In the United States or another country with state
-  lines, those lines are visibly fainter than the coast. A font without the
-  braille block shows boxes, which is
-  a font problem and worth noting which font.
+  lines, those lines are visibly fainter than the coast. Holding `-` zooms
+  out to the whole world without a blank pane on the way, an arrow key held
+  down slides the map, the rain arrives within a second or two of letting
+  go, and `c` comes back to the city. A font without the braille block
+  shows boxes, which is a font problem and worth noting which font.
 - The `▲`, `┬`, `═`, `◉`, and box-drawing borders are East Asian
   ambiguous-width glyphs. In a terminal that draws those two cells wide,
   such as one set to an East Asian locale, the hourly views' markers still
@@ -599,14 +605,22 @@ still publishes and only the tap update is skipped, with a warning.
   serves a forecast. Where no radar station reaches, which is most ocean
   and much of Africa and Asia, the map is empty, and an empty map cannot
   tell "dry" from "not covered". If frames fail to arrive the loop is shown
-  without them and the border counts them. Frames are reused for ten
-  minutes; after that, reopening the screen fetches again. The faint scattered dots are echoes below
+  without them and the border counts them. The loops of the last eight
+  views are reused for ten minutes; after that, going back to one fetches
+  again. The faint scattered dots are echoes below
   the palette's first solid colour and are often not rain reaching the
-  ground. The view is fixed at about 380 km across at mid-latitudes and
-  does not zoom or pan. The outline is Natural Earth's 1:50m data: fine
-  for a coast, too coarse for a harbour, and without rivers, roads or
-  place names. State and province lines are drawn fainter than coasts and
-  country borders, for the nine countries Natural Earth divides at that scale:
+  ground. The closest view is about 190 km across at mid-latitudes,
+  because RainViewer draws nothing closer. Zoomed out to a continent the
+  whole world is a few hundred pixels wide, so rain shows as regional
+  blobs and not as fronts. The map ends at the antimeridian and at 85
+  degrees north and south, as RainViewer's pictures do, so a place beside
+  either sits off centre. At the widest zoom a pane wider than it is tall
+  shows the middle latitudes and crops the poles. The scale on the border
+  is the width of the picture on the ground at its centre, to two figures.
+  The outline is Natural Earth's 1:50m data up close and 1:110m from a
+  continent out: fine for a coast, too coarse for a harbour, and without
+  rivers, roads or place names. State and province lines are drawn fainter than coasts and
+  country borders once the view is closer than a continent, for the nine countries Natural Earth divides at that scale:
   the United States, Canada, Australia, Brazil, Russia, China, India,
   Indonesia and South Africa. A cell has one colour, so where a state line meets a border
   the cell takes the border's. Each frame's time is on the forecast place's clock. The
@@ -651,12 +665,16 @@ that fails is not repeated until the next launch. With
 `VIRGA_CACHE=off` there is nowhere to keep the table and the request is not
 made. `virga now` never makes it.
 
-Opening the radar screen makes fourteen requests to
+Each view of the radar screen makes fourteen requests to
 [RainViewer](https://www.rainviewer.com): one for the list of frames and one
-for each of the thirteen pictures. They are made when you press `m` or
-refresh the radar, never at launch. Each picture request carries the
-location rounded to a tenth of a degree, about eleven kilometres, which is
-all a 380 km picture needs. RainViewer's free API needs no key and its
+for each of the thirteen pictures. They are made when you press `m`, refresh
+the radar, or stop on a view after zooming or panning, never at launch. A
+held key passes through views without asking for them: nothing is requested
+until the map has been still for a third of a second, and leaving a view
+calls off whatever of its pictures have not been asked for yet. Each picture
+request carries the centre of the view rounded to a tenth of a degree, about
+eleven kilometres, and its zoom. On opening that centre is your location;
+after panning it is wherever you are looking. RainViewer's free API needs no key and its
 [terms](https://www.rainviewer.com/api.html) allow personal and educational
 use only, so a commercial deployment of Virga would need its own
 arrangement with them. Nothing from RainViewer is written to disk.

@@ -10,7 +10,7 @@ use crate::weather::client::{Detail, fetch_forecast, fetch_history};
 use crate::weather::climate::Normals;
 use crate::weather::model::Location;
 use crate::weather::model::Weather;
-use crate::weather::radar::fetch_radar;
+use crate::weather::radar::{Cancel, Radar, View, fetch_newest, fetch_rest};
 use anyhow::Result;
 use chrono::{NaiveDate, TimeDelta, Utc};
 use std::path::{Path, PathBuf};
@@ -63,10 +63,26 @@ pub enum Request {
         /// archive's are measured against.
         recent: Vec<(NaiveDate, f64)>,
     },
-    /// The last two hours of radar around a place. Named by place, like
-    /// the normals: the answer is kept only if it is still wanted there.
+    /// The newest radar frame of a view, with the list of the frames
+    /// before it. By id, because the same view can be asked for twice in a
+    /// minute by someone panning away and back.
     Radar {
+        id: RequestId,
         location: ActiveLocation,
+        view: View,
+    },
+    /// The frames before the newest, which make the one frame a loop.
+    /// Carries the id of the ask it completes.
+    RadarRest {
+        id: RequestId,
+        location: ActiveLocation,
+        /// Boxed so that the one request with a loop in it does not set
+        /// the size of every request, and of the error a full queue
+        /// hands each one back in.
+        radar: Box<Radar>,
+        /// Set when the view has been left, so thirteen pictures nobody
+        /// will see do not stand in front of the next view's.
+        cancel: Cancel,
     },
 }
 
@@ -133,10 +149,11 @@ pub enum Message {
         error: String,
     },
     Radar {
+        id: RequestId,
         scene: RadarScene,
     },
     RadarFailed {
-        location: ActiveLocation,
+        id: RequestId,
         error: String,
     },
 }
@@ -193,7 +210,7 @@ impl Workers {
             Request::Detect { .. } => self.detect.try_send(request),
             Request::Search { .. } => self.search.try_send(request),
             Request::Normals { .. } => self.normals.try_send(request),
-            Request::Radar { .. } => self.radar.try_send(request),
+            Request::Radar { .. } | Request::RadarRest { .. } => self.radar.try_send(request),
         }
     }
 }
@@ -255,8 +272,8 @@ fn spawn_workers_with(
         // A queue of its own, so thirty years of history arriving slowly
         // never stands between the user and a forecast or a search.
         normals: spawn(None),
-        // Fourteen requests to another service. On the fetch queue a slow
-        // radar would hold up the next forecast.
+        // Up to fourteen requests a view to another service. On the fetch
+        // queue a slow radar would hold up the next forecast.
         radar: spawn(None),
     }
 }
@@ -308,13 +325,31 @@ fn serve(request: Request, normals_store: Option<&Path>) -> Message {
                 fetch_history(lat, lon, through)
             })
         }
-        Request::Radar { location } => match fetch_radar(location.lat, location.lon) {
+        Request::Radar { id, location, view } => match fetch_newest(view) {
             Ok(radar) => Message::Radar {
+                id,
                 scene: RadarScene::new(location, radar),
             },
             Err(error) => Message::RadarFailed {
-                location,
+                id,
                 error: format!("{error:#}"),
+            },
+        },
+        Request::RadarRest {
+            id,
+            location,
+            radar,
+            cancel,
+        } => match fetch_rest(*radar, &cancel) {
+            Some(radar) => Message::Radar {
+                id,
+                scene: RadarScene::new(location, radar),
+            },
+            // Whoever called it off has stopped waiting on this id, so
+            // the reason is never shown.
+            None => Message::RadarFailed {
+                id,
+                error: "called off".to_string(),
             },
         },
     }
@@ -558,9 +593,11 @@ mod tests {
                 id,
                 locations: Vec::new(),
             },
-            Request::Normals { .. } | Request::Radar { .. } => Message::NormalsFailed {
-                error: "unused".to_string(),
-            },
+            Request::Normals { .. } | Request::Radar { .. } | Request::RadarRest { .. } => {
+                Message::NormalsFailed {
+                    error: "unused".to_string(),
+                }
+            }
         });
         (workers, release)
     }
@@ -667,9 +704,11 @@ mod tests {
                     error: "unused".to_string(),
                 }
             }
-            Request::Normals { .. } | Request::Radar { .. } => Message::NormalsFailed {
-                error: "unused".to_string(),
-            },
+            Request::Normals { .. } | Request::Radar { .. } | Request::RadarRest { .. } => {
+                Message::NormalsFailed {
+                    error: "unused".to_string(),
+                }
+            }
         });
         workers.try_send(search(1)).expect("room for a search");
         assert!(matches!(

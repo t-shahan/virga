@@ -3,7 +3,7 @@
 
 use crate::app::ActiveLocation;
 use crate::outline;
-use crate::weather::radar::{FRAME_SIDE, Level, Radar};
+use crate::weather::radar::{FRAME_SIDE, Level, Radar, View};
 use std::time::{Duration, Instant};
 
 /// Everything a draw needs, worked out once on the worker's thread so a
@@ -21,6 +21,13 @@ pub struct RadarScene {
 }
 
 impl RadarScene {
+    /// The map of a view whose frames have not come yet. The outline is
+    /// in the binary, so a view that has just been moved to is drawn at
+    /// once and the rain is laid over it when it arrives.
+    pub fn awaited(location: ActiveLocation, view: View) -> Self {
+        Self::new(location, Radar::awaited(view))
+    }
+
     pub fn new(location: ActiveLocation, radar: Radar) -> Self {
         let outline = outline::traced_on(&radar);
         let has_rain = radar.frames.iter().any(|frame| {
@@ -102,6 +109,19 @@ impl Playback {
         } else {
             frame.saturating_sub(1)
         };
+    }
+
+    /// The loop has grown from its newest frame alone to `count` frames,
+    /// with that frame now last. A loop that is running starts over from
+    /// the oldest; one that was paused stays on the frame it was paused
+    /// on.
+    pub fn land_on_newest(&mut self, count: usize) {
+        self.frame = if self.is_playing {
+            0
+        } else {
+            count.saturating_sub(1)
+        };
+        self.shown_at = None;
     }
 
     pub fn toggle(&mut self) {
