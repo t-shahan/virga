@@ -3582,6 +3582,35 @@ mod tests {
         }
     }
 
+    /// The radar on screen belongs to the place being left, so a city chosen
+    /// from there lands on the forecast. Backing out of the search without
+    /// choosing still returns to the radar.
+    #[test]
+    fn choosing_a_city_from_the_radar_lands_on_the_forecast() {
+        let mut app = app_with(22, 14);
+        app.screen = Screen::Radar;
+
+        app.on_action(Action::OpenSearch);
+        app.close_search();
+        assert_eq!(app.screen, Screen::Radar, "cancelling left the radar");
+
+        app.on_action(Action::OpenSearch);
+        app.results = Fetch::Ready(vec![Location {
+            name: "Berlin".to_string(),
+            admin1: None,
+            country: Some("Germany".to_string()),
+            lat: 52.52437,
+            lon: 13.41053,
+            timezone: None,
+            country_code: None,
+            population: None,
+        }]);
+        let picked = app.on_action(Action::Submit);
+
+        assert!(matches!(picked, Some(Request::Fetch { .. })));
+        assert_eq!(app.screen, Screen::Weather);
+    }
+
     /// Cancelling has to come back to the same place as choosing, or Esc
     /// becomes its own kind of surprise.
     #[test]
