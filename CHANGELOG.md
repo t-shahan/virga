@@ -12,6 +12,8 @@ refuse to publish a version this file does not describe.
 
 ## [Unreleased]
 
+## [0.9.0]
+
 ### Added
 
 - **The radar zooms and pans.** `+` and `-` zoom from about 190 km across
@@ -20,6 +22,11 @@ refuse to publish a version this file does not describe.
   the newest frame first, then the rest of the loop. The border gives the
   width of the view on the ground. Loops for the last eight views are kept
   for ten minutes, so going back to one is instant.
+- **State and province lines on the radar.** The map under the rain now
+  draws the borders of states and provinces, fainter than coasts and
+  country borders, for the nine countries Natural Earth divides: the United
+  States, Canada, Australia, Brazil, Russia, China, India, Indonesia and
+  South Africa.
 
 ### Changed
 
@@ -43,12 +50,6 @@ refuse to publish a version this file does not describe.
 - **The radar map ends at the antimeridian.** RainViewer's pictures do not
   continue across it, so a place beside it now sits off centre in a frame
   that is all map.
-
-- **State and province lines on the radar.** The map under the rain now
-  draws the borders of states and provinces, fainter than coasts and
-  country borders, for the nine countries Natural Earth divides: the United
-  States, Canada, Australia, Brazil, Russia, China, India, Indonesia and
-  South Africa.
 
 ### Removed
 
@@ -699,7 +700,8 @@ First release.
   a responsive layout down to a 34x12 terminal.
 - Dual licensed MIT OR Apache-2.0. Weather data by Open-Meteo under CC BY 4.0.
 
-[Unreleased]: https://github.com/t-shahan/virga/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/t-shahan/virga/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/t-shahan/virga/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/t-shahan/virga/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/t-shahan/virga/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/t-shahan/virga/compare/v0.6.1...v0.7.0
