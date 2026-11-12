@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """Build src/outline.bin, the coastlines and borders under the radar.
 
-Reads Natural Earth's 1:50m GeoJSON, which is in the public domain, and
-writes the compact form `src/outline.rs` reads. Run it only to change the
+Reads Natural Earth's GeoJSON, which is in the public domain, and writes
+the compact form `src/outline.rs` reads. Run it only to change the
 source data or the format; the output is checked in, so a build needs
 neither Python nor the network.
 
     scripts/build-outline.py DIR
 
-DIR holds ne_50m_coastline.geojson, ne_50m_admin_0_boundary_lines_land.geojson
-and ne_50m_lakes.geojson from
+DIR holds the files named in SOURCES, each with .geojson after it, from
 https://github.com/nvkelso/natural-earth-vector/tree/master/geojson
+
+Two levels of detail are packed. The 1:110m lines are for a view of a
+continent or the world, where the 1:50m ones would put several points in
+every dot and cost a draw the whole file. State and province lines are only
+drawn close in, so they are packed at 1:50m alone.
 
 Format, little-endian, one record per line until the file ends:
 
+    u8       what the line is: its layer in the low four bits (COAST,
+             COUNTRY, STATE, LAKE) and its detail in the high four
+             (COARSE, FINE)
     u16      points in the line, at least 2
     i16 i16  the first point's longitude and latitude, in steps of STEP degrees
     i8 i8    each later point, as its difference from the one before
@@ -28,10 +35,16 @@ import sys
 from pathlib import Path
 
 STEP = 0.02
+COAST, COUNTRY, STATE, LAKE = range(4)
+COARSE, FINE = range(2)
 SOURCES = [
-    "ne_50m_coastline",
-    "ne_50m_admin_0_boundary_lines_land",
-    "ne_50m_lakes",
+    ("ne_110m_coastline", COAST, COARSE),
+    ("ne_110m_admin_0_boundary_lines_land", COUNTRY, COARSE),
+    ("ne_110m_lakes", LAKE, COARSE),
+    ("ne_50m_coastline", COAST, FINE),
+    ("ne_50m_admin_0_boundary_lines_land", COUNTRY, FINE),
+    ("ne_50m_admin_1_states_provinces_lines", STATE, FINE),
+    ("ne_50m_lakes", LAKE, FINE),
 ]
 MAX_POINTS = 65535
 
@@ -65,12 +78,12 @@ def quantised(line):
     return points
 
 
-def records(points):
+def records(points, tag):
     for start in range(0, len(points) - 1, MAX_POINTS - 1):
         piece = points[start : start + MAX_POINTS]
         if len(piece) < 2:
             continue
-        yield struct.pack("<Hhh", len(piece), *piece[0]) + b"".join(
+        yield struct.pack("<BHhh", tag, len(piece), *piece[0]) + b"".join(
             struct.pack("<bb", b[0] - a[0], b[1] - a[1])
             for a, b in zip(piece, piece[1:])
         )
@@ -81,9 +94,9 @@ def main():
     out = Path(__file__).resolve().parent.parent / "src" / "outline.bin"
     data = b"".join(
         record
-        for name in SOURCES
+        for name, layer, detail in SOURCES
         for line in lines_of(source / f"{name}.geojson")
-        for record in records(quantised(line))
+        for record in records(quantised(line), layer | detail << 4)
     )
     out.write_bytes(data)
     print(f"{out}: {len(data)} bytes")

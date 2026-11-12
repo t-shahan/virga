@@ -7,6 +7,7 @@
 //! shows.
 
 use crate::app::{App, Fetch};
+use crate::outline::Trace;
 use crate::radar_view::RadarScene;
 use crate::theme::Palette;
 use crate::ui::pane::bottom_titles;
@@ -114,8 +115,8 @@ fn scene_render(frame: &mut Frame, app: &App, scene: &RadarScene, palette: Palet
     let dots = Dots::of(inner);
     let mut cells = vec![Cell::default(); inner.width as usize * inner.height as usize];
     rain_plot(&mut cells, dots, shown);
-    for line in &scene.coast {
-        coast_plot(&mut cells, dots, line);
+    for trace in &scene.outline {
+        outline_plot(&mut cells, dots, trace);
     }
     cells_render(frame, inner, &cells, palette);
 
@@ -250,7 +251,10 @@ const BRAILLE_BLANK: u32 = 0x2800;
 #[derive(Clone, Copy)]
 struct Cell {
     rain: u8,
+    /// Dots on a coast, a country's border or a lake's shore.
     coast: u8,
+    /// Dots on a state's or a province's border.
+    state: u8,
     level: Level,
 }
 
@@ -259,6 +263,7 @@ impl Default for Cell {
         Self {
             rain: 0,
             coast: 0,
+            state: 0,
             level: Level::None,
         }
     }
@@ -312,13 +317,13 @@ fn heaviest_under(dots: Dots, frame: &RadarFrame, x: usize, y: usize) -> Level {
         .unwrap_or(Level::None)
 }
 
-/// Dots a single stretch of coast may light. A stretch is short, because
+/// Dots a single stretch of outline may light. A stretch is short, because
 /// the outline is cut off a little outside the frame; the bound is for the
 /// stretch that is not, so one bad line cannot stall a draw.
 const MAX_STEPS: usize = 4096;
 
-fn coast_plot(cells: &mut [Cell], dots: Dots, line: &[(f64, f64)]) {
-    for pair in line.windows(2) {
+fn outline_plot(cells: &mut [Cell], dots: Dots, trace: &Trace) {
+    for pair in trace.points.windows(2) {
         let (from_x, from_y) = dots.dot(pair[0]);
         let (to_x, to_y) = dots.dot(pair[1]);
         let reach = (to_x - from_x).abs().max((to_y - from_y).abs());
@@ -333,7 +338,11 @@ fn coast_plot(cells: &mut [Cell], dots: Dots, line: &[(f64, f64)]) {
             if let Some((cell, bit)) = dots.bit(x, y)
                 && let Some(cell) = cells.get_mut(cell)
             {
-                cell.coast |= bit;
+                if trace.layer.is_minor() {
+                    cell.state |= bit;
+                } else {
+                    cell.coast |= bit;
+                }
             }
         }
     }
@@ -357,17 +366,21 @@ fn cells_render(frame: &mut Frame, inner: Rect, cells: &[Cell], palette: Palette
 
 /// The dots and colour for a cell, or `None` for one with nothing in it.
 ///
-/// Under a trace, or nothing, the coast is drawn and the haze shares its
-/// cell. Under real rain the coast is cut out of the rain instead: lit, it
-/// would disappear into a solid cell, and as a gap it stays readable
+/// Under a trace, or nothing, the outline is drawn and the haze shares its
+/// cell. Under real rain the outline is cut out of the rain instead: lit,
+/// it would disappear into a solid cell, and as a gap it stays readable
 /// through the heaviest band.
+///
+/// A cell has one colour. Where a state line meets a coast or a country's
+/// border the cell takes theirs, so the quiet line never passes for the
+/// loud one along its length, only where the two touch.
 fn glyph(cell: Cell, palette: Palette) -> Option<(u8, Style)> {
     let color = |color: Color| Style::new().fg(color);
     let (bits, style) = match cell.level {
         Level::None | Level::Trace if cell.coast != 0 => {
-            (cell.coast | cell.rain, color(palette.border))
+            (cell.coast | cell.state | cell.rain, color(palette.border))
         }
-        Level::None | Level::Trace => (cell.rain, color(palette.muted)),
+        Level::None | Level::Trace => (cell.state | cell.rain, color(palette.muted)),
         Level::Light | Level::Moderate => (cut(cell), color(palette.accent)),
         Level::Heavy => (cut(cell), color(palette.now)),
         Level::Intense => (cut(cell), color(palette.error).add_modifier(Modifier::BOLD)),
@@ -375,9 +388,9 @@ fn glyph(cell: Cell, palette: Palette) -> Option<(u8, Style)> {
     (bits != 0).then_some((bits, style))
 }
 
-/// Rain with the coast's dots taken out, unless that would leave nothing.
+/// Rain with the outline's dots taken out, unless that would leave nothing.
 fn cut(cell: Cell) -> u8 {
-    match cell.rain & !cell.coast {
+    match cell.rain & !(cell.coast | cell.state) {
         0 => cell.rain,
         cut => cut,
     }
@@ -559,6 +572,34 @@ mod tests {
             gaps * 10 >= coast.len() * 9,
             "{gaps} of {} cut",
             coast.len()
+        );
+    }
+
+    /// Where four states meet and nothing else does, the lines are there
+    /// and quiet. Rain is cut around them as it is around a coast.
+    #[test]
+    fn state_lines_are_drawn_quietly_and_cut_out_of_rain() {
+        let plains = ActiveLocation {
+            label: "Campo, Colorado".to_string(),
+            lat: 37.0,
+            lon: -102.5,
+        };
+        let dry = frame_at(0, Level::None, |_, _| false);
+        let buffer = drawn(&app_showing(plains.clone(), vec![dry]), 80, 24);
+        let states = braille_in(&buffer, palette().muted);
+        assert!(states.len() > 30, "{} cells of state line", states.len());
+        assert!(braille_in(&buffer, palette().border).is_empty());
+
+        let soaked = frame_at(0, Level::Moderate, |_, _| true);
+        let wet = drawn(&app_showing(plains, vec![soaked]), 80, 24);
+        let gaps = states
+            .iter()
+            .filter(|&&at| wet[at].symbol() != "⣿" && wet[at].fg == palette().accent)
+            .count();
+        assert!(
+            gaps * 10 >= states.len() * 9,
+            "{gaps} of {} cut",
+            states.len()
         );
     }
 

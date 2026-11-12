@@ -13,7 +13,7 @@ pub struct RadarScene {
     pub location: ActiveLocation,
     pub radar: Radar,
     /// Coastlines, borders and lakes, as lines of frame pixels.
-    pub coast: Vec<Vec<(f64, f64)>>,
+    pub outline: Vec<outline::Trace>,
     /// Whether any frame shows more than a trace. An empty map is what a
     /// dry afternoon looks like and also what a broken screen looks like,
     /// so the pane says which.
@@ -22,14 +22,14 @@ pub struct RadarScene {
 
 impl RadarScene {
     pub fn new(location: ActiveLocation, radar: Radar) -> Self {
-        let coast = outline::traced_on(&radar);
+        let outline = outline::traced_on(&radar);
         let has_rain = radar.frames.iter().any(|frame| {
             (0..FRAME_SIDE).any(|y| (0..FRAME_SIDE).any(|x| frame.level_at(x, y) > Level::Trace))
         });
         Self {
             location,
             radar,
-            coast,
+            outline,
             has_rain,
         }
     }
@@ -193,13 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn a_scene_knows_its_coast_and_whether_anything_is_falling() {
+    fn a_scene_knows_its_outline_and_whether_anything_is_falling() {
         let trace = Frame::fixture(0, Level::Trace, |x, y| x == y);
         let rain = Frame::fixture(600, Level::Light, |x, y| x == 3 && y == 200);
 
         let hazy = RadarScene::new(place(), Radar::fixture(55.7, 12.6, vec![trace.clone()]));
         assert!(!hazy.has_rain, "a trace is not rain");
-        assert!(!hazy.coast.is_empty());
+        assert!(!hazy.outline.is_empty());
 
         let wet = RadarScene::new(place(), Radar::fixture(55.7, 12.6, vec![trace, rain]));
         assert!(wet.has_rain);
