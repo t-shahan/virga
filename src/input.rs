@@ -5,7 +5,7 @@
 //! — more usefully — makes the whole of "which key does what" testable without
 //! a terminal.
 
-use crate::app::{KeyHintStyle, Screen};
+use crate::app::{KeyHintStyle, MapMove, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// Something the user asked for, named in the app's own terms.
@@ -27,6 +27,8 @@ pub enum Action {
     NextFrame,
     /// Stop or restart the radar loop.
     TogglePlayback,
+    /// Zoom or pan the radar's map.
+    MoveMap(MapMove),
     PrevDay,
     NextDay,
     Today,
@@ -62,6 +64,10 @@ impl Action {
             self,
             Action::PrevFrame
                 | Action::NextFrame
+                // Held, these pass through a view a repeat, and none of
+                // them is asked for until the key comes up: the app waits
+                // for the map to stop.
+                | Action::MoveMap(MapMove::In | MapMove::Out | MapMove::Pan(..))
                 | Action::PrevDay
                 | Action::NextDay
                 | Action::PrevHour
@@ -226,8 +232,19 @@ fn binding(key: KeyEvent, screen: Screen, key_hint_style: KeyHintStyle) -> Optio
             KeyCode::Char('b' | 'm') | KeyCode::Enter | KeyCode::Esc => Some(Action::Back),
             KeyCode::Char('r') => Some(Action::Refresh),
             KeyCode::Char('t') => Some(Action::CycleTheme),
-            KeyCode::Left => Some(Action::PrevFrame),
-            KeyCode::Right => Some(Action::NextFrame),
+            // The arrows move the map, as they would any map, which leaves
+            // the brackets for the loop.
+            KeyCode::Left => Some(Action::MoveMap(MapMove::Pan(-1, 0))),
+            KeyCode::Right => Some(Action::MoveMap(MapMove::Pan(1, 0))),
+            KeyCode::Up => Some(Action::MoveMap(MapMove::Pan(0, -1))),
+            KeyCode::Down => Some(Action::MoveMap(MapMove::Pan(0, 1))),
+            // `=` is `+` without the shift key, on the layouts where `+`
+            // needs one.
+            KeyCode::Char('+' | '=') => Some(Action::MoveMap(MapMove::In)),
+            KeyCode::Char('-') => Some(Action::MoveMap(MapMove::Out)),
+            KeyCode::Char('c') => Some(Action::MoveMap(MapMove::Home)),
+            KeyCode::Char('[') => Some(Action::PrevFrame),
+            KeyCode::Char(']') => Some(Action::NextFrame),
             KeyCode::Char(' ') => Some(Action::TogglePlayback),
             KeyCode::Char('?') => help_key(key_hint_style),
             KeyCode::Char(',') => Some(Action::ToggleKeyHints),
@@ -310,16 +327,16 @@ mod tests {
         );
     }
 
-    /// The arrows scrub and may be held; space and `r` act once per press,
-    /// since a held `r` would queue a radar fetch per repeat.
+    /// The brackets scrub and may be held; space and `r` act once per
+    /// press, since a held `r` would queue a radar fetch per repeat.
     #[test]
-    fn the_radar_loop_is_scrubbed_with_the_arrows_and_paused_with_space() {
+    fn the_radar_loop_is_scrubbed_with_the_brackets_and_paused_with_space() {
         assert_eq!(
-            action_for(press(KeyCode::Left), Screen::Radar),
+            action_for(press(KeyCode::Char('[')), Screen::Radar),
             Some(Action::PrevFrame)
         );
         assert_eq!(
-            action_for(press(KeyCode::Right), Screen::Radar),
+            action_for(press(KeyCode::Char(']')), Screen::Radar),
             Some(Action::NextFrame)
         );
         assert_eq!(
@@ -327,7 +344,10 @@ mod tests {
             Some(Action::TogglePlayback)
         );
         assert_eq!(
-            action_for(of_kind(KeyCode::Right, KeyEventKind::Repeat), Screen::Radar),
+            action_for(
+                of_kind(KeyCode::Char(']'), KeyEventKind::Repeat),
+                Screen::Radar
+            ),
             Some(Action::NextFrame)
         );
         for code in [KeyCode::Char(' '), KeyCode::Char('r')] {
@@ -337,6 +357,42 @@ mod tests {
                 "{code:?}"
             );
         }
+    }
+
+    /// The arrows pan and `+` and `-` zoom, held or not. `c` goes home
+    /// once a press, and with Control it still quits.
+    #[test]
+    fn the_radar_map_is_moved_with_the_arrows_and_zoomed_with_plus_and_minus() {
+        let moves = [
+            (KeyCode::Left, MapMove::Pan(-1, 0)),
+            (KeyCode::Right, MapMove::Pan(1, 0)),
+            (KeyCode::Up, MapMove::Pan(0, -1)),
+            (KeyCode::Down, MapMove::Pan(0, 1)),
+            (KeyCode::Char('+'), MapMove::In),
+            (KeyCode::Char('='), MapMove::In),
+            (KeyCode::Char('-'), MapMove::Out),
+        ];
+        for (code, to) in moves {
+            for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+                assert_eq!(
+                    action_for(of_kind(code, kind), Screen::Radar),
+                    Some(Action::MoveMap(to)),
+                    "{code:?}"
+                );
+            }
+        }
+
+        let home = KeyCode::Char('c');
+        assert_eq!(
+            action_for(press(home), Screen::Radar),
+            Some(Action::MoveMap(MapMove::Home))
+        );
+        assert_eq!(
+            action_for(of_kind(home, KeyEventKind::Repeat), Screen::Radar),
+            None
+        );
+        let chord = KeyEvent::new(home, KeyModifiers::CONTROL);
+        assert_eq!(action_for(chord, Screen::Radar), Some(Action::Quit));
     }
 
     /// The card's footer promises any key closes it. That has to include

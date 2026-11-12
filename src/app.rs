@@ -6,6 +6,7 @@ use crate::units::Unit;
 use crate::update::Release;
 use crate::weather::climate::Normals;
 use crate::weather::model::{Location, Weather};
+use crate::weather::radar::{Cancel, HOME_ZOOM, MAX_ZOOM, View};
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -217,6 +218,67 @@ impl Outcome {
 /// morning as "the last two hours".
 const RADAR_FRESH: TimeDelta = TimeDelta::minutes(10);
 
+/// How long the map must be still before its rain is asked for. A held
+/// arrow key passes through a view every repeat, and each one is up to
+/// fourteen requests to a service that gives them away.
+const RADAR_SETTLE: Duration = Duration::from_millis(300);
+
+/// Views whose loops are kept for going back to. Each is thirteen frames
+/// of 65 kilobytes, so this is the bound on seven megabytes.
+const MAX_KEPT_RADARS: usize = 8;
+
+/// Where the map is looking. The point is the one the user chose, and the
+/// view at each zoom is the nearest the map's edges allow to it, so
+/// zooming out to the whole world and back in returns to where it began.
+#[derive(Clone, Debug, PartialEq)]
+struct RadarFocus {
+    /// The forecast place the map was opened for.
+    place: ActiveLocation,
+    lat: f64,
+    lon: f64,
+    zoom: u32,
+}
+
+impl RadarFocus {
+    fn home(place: &ActiveLocation) -> Self {
+        Self {
+            place: place.clone(),
+            lat: place.lat,
+            lon: place.lon,
+            zoom: HOME_ZOOM,
+        }
+    }
+
+    fn view(&self) -> View {
+        View::at(self.lat, self.lon, self.zoom)
+    }
+}
+
+/// A fetch of one view that is out: both its requests answer to the id.
+#[derive(Debug)]
+struct RadarAsk {
+    id: RequestId,
+    view: View,
+    cancel: Cancel,
+}
+
+/// Whether a view's rain is asked for at once or when the map stops.
+#[derive(Clone, Copy, PartialEq)]
+enum Haste {
+    Now,
+    WhenSettled,
+}
+
+/// A way the map can be moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapMove {
+    In,
+    Out,
+    /// Steps east and south; west and north are negative.
+    Pan(i32, i32),
+    Home,
+}
+
 /// Tables held at once. A session rarely visits more places than the store
 /// keeps, and one that does only loses the comparison for the oldest.
 const MAX_CLIMATES: usize = 8;
@@ -288,10 +350,15 @@ pub struct App {
     /// until the answer, so one press cannot queue two.
     pub radar: Fetch<RadarScene>,
     pub playback: Playback,
-    /// The place the radar was last asked for.
-    radar_asked: Option<ActiveLocation>,
-    /// When the frames in hand arrived, by the app's clock.
-    radar_arrived: Option<DateTime<Utc>>,
+    radar_focus: Option<RadarFocus>,
+    radar_ask: Option<RadarAsk>,
+    /// Set by a move and taken by the next tick, which is where the
+    /// clock is: the tick turns it into `radar_due`.
+    has_radar_moved: bool,
+    /// When a view moved to and since left alone gets asked for.
+    radar_due: Option<Instant>,
+    /// Whole loops and when each arrived, oldest first.
+    radar_kept: Vec<(RadarScene, DateTime<Utc>)>,
     /// The normals that have arrived this session, each with its place.
     /// Read through `normals`, which hands over the one for the place on
     /// screen. More than one, so an answer for a city the user has just
@@ -438,8 +505,11 @@ impl App {
             tick: 0,
             radar: Fetch::Idle,
             playback: Playback::default(),
-            radar_asked: None,
-            radar_arrived: None,
+            radar_focus: None,
+            radar_ask: None,
+            has_radar_moved: false,
+            radar_due: None,
+            radar_kept: Vec::new(),
             climates: Vec::new(),
             normals_asked: Vec::new(),
             keeps_normals: false,
@@ -517,7 +587,8 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
             Action::Back => self.back(),
-            Action::Refresh if self.screen == Screen::Radar => return self.fetch_radar(),
+            Action::Refresh if self.screen == Screen::Radar => return self.refresh_radar(),
+            Action::MoveMap(to) => return self.move_radar(to),
             Action::Refresh => return self.refresh(),
             Action::OpenRadar => return self.open_radar(),
             Action::PrevFrame => self.step_radar(false),
@@ -641,20 +712,12 @@ impl App {
                     ..Outcome::nothing()
                 }
             }
-            // Kept whichever place is on screen by now: `open_radar` judges
-            // whether it is still the right one when it is next looked at.
-            Message::Radar { scene } => {
-                if self.is_awaiting_radar_for(&scene.location) {
-                    self.radar = Fetch::Ready(scene);
-                    self.radar_arrived = Some(self.now);
-                    self.playback = Playback::default();
-                }
-                Outcome::nothing()
-            }
+            Message::Radar { id, scene } => self.on_radar(id, scene),
             // Shown in the pane and not saved for the exit: the user asked
             // for the radar and is looking at where it would be.
-            Message::RadarFailed { location, error } => {
-                if self.is_awaiting_radar_for(&location) {
+            Message::RadarFailed { id, error } => {
+                if self.radar_ask.as_ref().is_some_and(|ask| ask.id == id) {
+                    self.radar_ask = None;
                     self.radar = Fetch::Failed(error);
                 }
                 Outcome::nothing()
@@ -758,8 +821,8 @@ impl App {
         self.pending_detect.is_some()
     }
 
-    /// Opens the radar screen, asking for frames unless the ones in hand
-    /// are for this place and still current. Waits for a forecast, as the hourly screen does:
+    /// Opens the radar screen where it was left, or on the place if the
+    /// place has changed. Waits for a forecast, as the hourly screen does:
     /// until one loads, `location` may still be the fallback city, and the
     /// radar over somewhere the user is not would be worse than no radar.
     fn open_radar(&mut self) -> Option<Request> {
@@ -767,49 +830,180 @@ impl App {
             return None;
         }
         self.screen = Screen::Radar;
-        let is_current = self
-            .radar_arrived
-            .is_some_and(|arrived| self.now - arrived < RADAR_FRESH);
-        match &self.radar {
-            Fetch::Ready(scene) if is_current && scene.location.same_place(&self.location) => {
-                self.playback = Playback::default();
-                None
-            }
-            _ => self.fetch_radar(),
+        let is_here = |focus: &RadarFocus| focus.place.same_place(&self.location);
+        if !self.radar_focus.as_ref().is_some_and(is_here) {
+            self.drop_radar_ask();
+            self.radar_kept.clear();
+            self.radar_focus = Some(RadarFocus::home(&self.location));
         }
+        self.show_radar(Haste::Now)
     }
 
-    /// Ignored while an ask for this place is out, so a repeated `r` or `m`
-    /// cannot queue fourteen requests per press. An ask that is out for a
-    /// place since left does not count: its answer will be dropped, and
-    /// waiting on it would leave the new place with a spinner and no radar.
-    fn fetch_radar(&mut self) -> Option<Request> {
-        let here = self.location.clone();
-        if self.is_awaiting_radar_for(&here) {
+    /// The view the map is on, once it has been opened.
+    pub fn radar_view(&self) -> Option<View> {
+        self.radar_focus.as_ref().map(RadarFocus::view)
+    }
+
+    /// Puts the map's view on screen: its loop if one is in hand and still
+    /// current, and otherwise its outline alone while the rain is fetched.
+    ///
+    /// Nothing happens while an ask for this very view is out, so a
+    /// repeated `r` or `m` cannot queue fourteen requests a press. An ask
+    /// for a view since left is called off: its pictures would only stand
+    /// in front of this one's.
+    fn show_radar(&mut self, haste: Haste) -> Option<Request> {
+        let view = self.radar_view()?;
+        if self.radar_ask.as_ref().is_some_and(|ask| ask.view == view) {
             return None;
         }
-        self.radar = Fetch::Loading;
-        self.radar_asked = Some(self.location.clone());
-        Some(Request::Radar {
+        self.drop_radar_ask();
+        self.radar_due = None;
+        self.has_radar_moved = false;
+        self.playback = Playback::default();
+
+        let now = self.now;
+        let kept = self
+            .radar_kept
+            .iter()
+            .find(|(scene, arrived)| scene.radar.view() == view && now - *arrived < RADAR_FRESH);
+        if let Some((scene, _)) = kept {
+            self.radar = Fetch::Ready(scene.clone());
+            return None;
+        }
+        self.radar = Fetch::Ready(RadarScene::awaited(self.location.clone(), view));
+        match haste {
+            Haste::Now => Some(self.ask_radar(view)),
+            Haste::WhenSettled => {
+                self.has_radar_moved = true;
+                None
+            }
+        }
+    }
+
+    fn ask_radar(&mut self, view: View) -> Request {
+        let id = self.next_id();
+        self.radar_ask = Some(RadarAsk {
+            id,
+            view,
+            cancel: Cancel::default(),
+        });
+        Request::Radar {
+            id,
             location: self.location.clone(),
-        })
+            view,
+        }
     }
 
-    /// Whether the radar screen is showing a spinner, which is the draw
-    /// loop's reason to keep drawing.
+    fn drop_radar_ask(&mut self) {
+        if let Some(ask) = self.radar_ask.take() {
+            ask.cancel.cancel();
+        }
+    }
+
+    /// `r` on the radar screen: the view's loop is thrown away and asked
+    /// for again, unless that is already happening.
+    fn refresh_radar(&mut self) -> Option<Request> {
+        let view = self.radar_view()?;
+        if self.radar_ask.as_ref().is_some_and(|ask| ask.view == view) {
+            return None;
+        }
+        self.radar_kept
+            .retain(|(scene, _)| scene.radar.view() != view);
+        self.show_radar(Haste::Now)
+    }
+
+    /// Zooms or pans. The map is redrawn at once, since its outline is in
+    /// hand, and the rain is asked for when the keys have stopped. A move
+    /// that goes nowhere, off the edge of the map or past the last zoom,
+    /// changes nothing and asks for nothing.
+    fn move_radar(&mut self, to: MapMove) -> Option<Request> {
+        if self.screen != Screen::Radar {
+            return None;
+        }
+        let focus = self.radar_focus.as_mut()?;
+        let before = focus.view();
+        match to {
+            MapMove::In => focus.zoom = (focus.zoom + 1).min(MAX_ZOOM),
+            MapMove::Out => focus.zoom = focus.zoom.saturating_sub(1),
+            // At the edge the point is left alone as well as the view:
+            // moved onto the view's centre, it would no longer be where
+            // zooming back in returns to.
+            MapMove::Pan(east, south) => {
+                let panned = before.panned(east, south);
+                if panned != before {
+                    (focus.lat, focus.lon) = panned.center();
+                }
+            }
+            MapMove::Home => *focus = RadarFocus::home(&focus.place),
+        }
+        if focus.view() == before {
+            return None;
+        }
+        self.show_radar(Haste::WhenSettled)
+    }
+
+    /// Asks for the view's rain once the map has been still for
+    /// `RADAR_SETTLE`. Called every tick with the caller's clock, so a
+    /// test steps it and nothing sleeps.
+    pub fn settle_radar(&mut self, now: Instant) -> Option<Request> {
+        if self.screen != Screen::Radar {
+            return None;
+        }
+        if self.has_radar_moved {
+            self.has_radar_moved = false;
+            self.radar_due = Some(now + RADAR_SETTLE);
+            return None;
+        }
+        if self.radar_due.is_none_or(|due| now < due) {
+            return None;
+        }
+        self.radar_due = None;
+        let view = self.radar_view()?;
+        Some(self.ask_radar(view))
+    }
+
+    /// An answer to the ask that is out: the newest frame, which is shown
+    /// and followed by a request for the rest, or the whole loop, which is
+    /// shown and kept. An answer to any other ask is for a view since
+    /// left, and is dropped.
+    fn on_radar(&mut self, id: RequestId, scene: RadarScene) -> Outcome {
+        let Some(ask) = self.radar_ask.as_ref().filter(|ask| ask.id == id) else {
+            return Outcome::nothing();
+        };
+        if !scene.radar.is_whole() {
+            let request = Request::RadarRest {
+                id,
+                location: scene.location.clone(),
+                radar: Box::new(scene.radar.clone()),
+                cancel: ask.cancel.clone(),
+            };
+            self.radar = Fetch::Ready(scene);
+            return Outcome {
+                request: Some(request),
+                ..Outcome::nothing()
+            };
+        }
+
+        self.radar_ask = None;
+        let view = scene.radar.view();
+        self.radar_kept
+            .retain(|(kept, _)| kept.radar.view() != view);
+        self.radar_kept.push((scene.clone(), self.now));
+        let surplus = self.radar_kept.len().saturating_sub(MAX_KEPT_RADARS);
+        self.radar_kept.drain(..surplus);
+
+        // Someone who paused on the one frame there was is still looking
+        // at it, and it is now the last of the loop.
+        self.playback.land_on_newest(scene.radar.frames.len());
+        self.radar = Fetch::Ready(scene);
+        Outcome::nothing()
+    }
+
+    /// Whether the radar screen is waiting on rain for its view, which is
+    /// the draw loop's reason to keep drawing the spinner.
     pub fn is_awaiting_radar(&self) -> bool {
-        self.screen == Screen::Radar && matches!(self.radar, Fetch::Loading)
-    }
-
-    /// Whether an answer about `place` is the one being waited for. An
-    /// answer for a place asked about earlier, and since abandoned for
-    /// another, must not land on top of the newer ask.
-    fn is_awaiting_radar_for(&self, place: &ActiveLocation) -> bool {
-        matches!(self.radar, Fetch::Loading)
-            && self
-                .radar_asked
-                .as_ref()
-                .is_some_and(|asked| asked.same_place(place))
+        self.screen == Screen::Radar
+            && (self.radar_ask.is_some() || self.has_radar_moved || self.radar_due.is_some())
     }
 
     fn step_radar(&mut self, forward: bool) {
@@ -954,9 +1148,17 @@ impl App {
                     self.results = Fetch::Failed("too many requests at once".to_string());
                 }
             }
-            Request::Radar { location } => {
-                if self.is_awaiting_radar_for(&location) {
+            Request::Radar { id, .. } => {
+                if self.radar_ask.as_ref().is_some_and(|ask| ask.id == id) {
+                    self.radar_ask = None;
                     self.radar = Fetch::Failed("too many requests at once".to_string());
+                }
+            }
+            // The newest frame is on screen and stays there. The pane
+            // says it is the only one.
+            Request::RadarRest { id, .. } => {
+                if self.radar_ask.as_ref().is_some_and(|ask| ask.id == id) {
+                    self.radar_ask = None;
                 }
             }
             // Nothing on screen waits for normals. A request that was never
@@ -2340,9 +2542,8 @@ mod tests {
     fn id_of(request: &Request) -> RequestId {
         match request {
             Request::Fetch { id, .. } | Request::Search { id, .. } | Request::Detect { id } => *id,
-            Request::Normals { .. } | Request::Radar { .. } => {
-                panic!("asked for by place, not by id")
-            }
+            Request::Radar { id, .. } | Request::RadarRest { id, .. } => *id,
+            Request::Normals { .. } => panic!("asked for by place, not by id"),
         }
     }
 
@@ -2562,19 +2763,67 @@ mod tests {
         assert!(loaded_into(&mut app).request.is_none(), "already answered");
     }
 
-    fn scene_for(location: &ActiveLocation, frames: usize) -> RadarScene {
-        use crate::weather::radar::{Frame, Level, Radar};
-        let frames = (0..frames)
+    fn dry_frames(count: usize) -> Vec<crate::weather::radar::Frame> {
+        use crate::weather::radar::{Frame, Level};
+        (0..count)
             .map(|i| Frame::fixture(600 * i as i64, Level::None, |_, _| false))
-            .collect();
+            .collect()
+    }
+
+    /// A whole loop of `frames` for whatever view the app is on.
+    fn loop_for(app: &App, frames: usize) -> RadarScene {
+        use crate::weather::radar::Radar;
+        let view = app.radar_view().expect("the map is open");
         RadarScene::new(
-            location.clone(),
-            Radar::fixture(location.lat, location.lon, frames),
+            app.location.clone(),
+            Radar::fixture_at(view, dry_frames(frames)),
         )
     }
 
-    /// `m` does nothing until there is a forecast, then opens the screen
-    /// and asks once; a second press while the ask is out asks nothing.
+    /// The newest frame alone for the app's view, with `rest` to come.
+    fn newest_for(app: &App, rest: usize) -> RadarScene {
+        use crate::weather::radar::Radar;
+        let view = app.radar_view().expect("the map is open");
+        let newest = dry_frames(1).remove(0);
+        RadarScene::new(
+            app.location.clone(),
+            Radar::fixture_begun(view, newest, rest),
+        )
+    }
+
+    fn radar_ask(request: Option<Request>) -> (RequestId, View) {
+        match request {
+            Some(Request::Radar { id, view, .. }) => (id, view),
+            _ => panic!("no radar was asked for"),
+        }
+    }
+
+    fn frames_shown(app: &App) -> usize {
+        match &app.radar {
+            Fetch::Ready(scene) => scene.radar.frames.len(),
+            _ => panic!("no map on screen"),
+        }
+    }
+
+    /// Opens the radar and answers with a whole loop.
+    fn radar_open(app: &mut App, frames: usize) {
+        loaded(app);
+        let (id, _) = radar_ask(app.on_action(Action::OpenRadar));
+        let scene = loop_for(app, frames);
+        app.on_message(Message::Radar { id, scene });
+    }
+
+    /// Moves the map and lets it settle, returning what is then asked.
+    fn moved(app: &mut App, to: MapMove) -> Option<Request> {
+        assert!(app.on_action(Action::MoveMap(to)).is_none(), "not at once");
+        let start = Instant::now();
+        assert!(app.settle_radar(start).is_none(), "the clock starts");
+        app.settle_radar(start + RADAR_SETTLE)
+    }
+
+    /// `m` does nothing until there is a forecast, then opens the map on
+    /// the place and asks once; a second press while the ask is out asks
+    /// nothing.
     #[test]
     fn opening_the_radar_asks_for_frames_once() {
         let mut app = App::new();
@@ -2582,12 +2831,18 @@ mod tests {
         assert_eq!(app.screen, Screen::Weather, "no forecast, no radar");
 
         loaded(&mut app);
-        let Some(Request::Radar { location }) = app.on_action(Action::OpenRadar) else {
-            panic!("the first open asks")
-        };
-        assert!(location.same_place(&app.location));
+        let (_, view) = radar_ask(app.on_action(Action::OpenRadar));
+        assert_eq!(
+            view,
+            View::at(app.location.lat, app.location.lon, HOME_ZOOM)
+        );
         assert_eq!(app.screen, Screen::Radar);
         assert!(app.is_awaiting_radar());
+        let Fetch::Ready(scene) = &app.radar else {
+            panic!("the map is drawn while the rain is fetched")
+        };
+        assert!(scene.radar.frames.is_empty());
+        assert_eq!(scene.radar.view(), view);
 
         assert!(app.on_action(Action::Refresh).is_none(), "already asked");
         app.on_action(Action::Back);
@@ -2599,18 +2854,66 @@ mod tests {
         assert!(app.on_action(Action::OpenRadar).is_none(), "still out");
     }
 
+    /// The newest frame is shown as soon as it comes and the rest are then
+    /// asked for under the same id. The loop that follows ends the wait.
+    #[test]
+    fn the_newest_frame_is_shown_and_then_the_loop_is_fetched() {
+        let mut app = App::new();
+        loaded(&mut app);
+        let (id, view) = radar_ask(app.on_action(Action::OpenRadar));
+
+        let scene = newest_for(&app, 12);
+        let outcome = app.on_message(Message::Radar { id, scene });
+        let Some(Request::RadarRest {
+            id: rest_id,
+            radar,
+            cancel,
+            ..
+        }) = outcome.request
+        else {
+            panic!("the rest of the loop is asked for")
+        };
+        assert_eq!((rest_id, radar.view()), (id, view));
+        assert!(!cancel.is_cancelled());
+        assert_eq!(frames_shown(&app), 1);
+        assert!(app.is_awaiting_radar(), "the loop is still to come");
+
+        let scene = loop_for(&app, 13);
+        assert!(
+            app.on_message(Message::Radar { id, scene })
+                .request
+                .is_none()
+        );
+        assert_eq!(frames_shown(&app), 13);
+        assert!(!app.is_awaiting_radar());
+        assert_eq!(app.playback.frame(13), 0, "the loop starts at its oldest");
+    }
+
+    /// Someone who paused on the one frame there was is still on that
+    /// frame, now the last, when the loop arrives around it.
+    #[test]
+    fn a_pause_on_the_newest_frame_survives_the_loop_arriving() {
+        let mut app = App::new();
+        loaded(&mut app);
+        let (id, _) = radar_ask(app.on_action(Action::OpenRadar));
+        let scene = newest_for(&app, 12);
+        app.on_message(Message::Radar { id, scene });
+        app.on_action(Action::TogglePlayback);
+
+        let scene = loop_for(&app, 13);
+        app.on_message(Message::Radar { id, scene });
+
+        assert!(!app.playback.is_playing());
+        assert_eq!(app.playback.frame(13), 12);
+    }
+
     /// Frames in hand are shown again without asking, from the start of
     /// the loop; `r` on the radar screen fetches radar and not a forecast.
     #[test]
     fn frames_in_hand_are_reused_until_refreshed() {
         let mut app = App::new();
-        loaded(&mut app);
-        app.on_action(Action::OpenRadar);
-        let here = app.location.clone();
-        app.on_message(Message::Radar {
-            scene: scene_for(&here, 5),
-        });
-        assert!(matches!(app.radar, Fetch::Ready(_)));
+        radar_open(&mut app, 5);
+        assert_eq!(frames_shown(&app), 5);
 
         app.on_action(Action::NextFrame);
         app.on_action(Action::NextFrame);
@@ -2619,13 +2922,16 @@ mod tests {
 
         app.on_action(Action::Back);
         assert!(app.on_action(Action::OpenRadar).is_none());
+        assert_eq!(frames_shown(&app), 5);
         assert_eq!(app.playback.frame(5), 0);
         assert!(app.playback.is_playing());
 
-        assert!(matches!(
-            app.on_action(Action::Refresh),
-            Some(Request::Radar { .. })
-        ));
+        radar_ask(app.on_action(Action::Refresh));
+        assert_eq!(
+            frames_shown(&app),
+            0,
+            "the old loop is not passed off as new"
+        );
         assert!(!app.is_fetching(), "the forecast was not refetched");
     }
 
@@ -2634,12 +2940,7 @@ mod tests {
     #[test]
     fn frames_that_have_aged_are_fetched_again_on_reopening() {
         let mut app = App::new();
-        loaded(&mut app);
-        app.on_action(Action::OpenRadar);
-        let here = app.location.clone();
-        app.on_message(Message::Radar {
-            scene: scene_for(&here, 5),
-        });
+        radar_open(&mut app, 5);
         app.on_action(Action::Back);
 
         app.now += TimeDelta::minutes(9);
@@ -2647,24 +2948,18 @@ mod tests {
         app.on_action(Action::Back);
 
         app.now += TimeDelta::minutes(2);
-        assert!(matches!(
-            app.on_action(Action::OpenRadar),
-            Some(Request::Radar { .. })
-        ));
+        radar_ask(app.on_action(Action::OpenRadar));
         assert!(app.is_awaiting_radar());
     }
 
-    /// Frames for a city the user has since left are not shown over the
-    /// new one, and an answer nobody is waiting for is dropped.
+    /// The map of a city the user has since left is not shown over the new
+    /// one, and an answer nobody is waiting for is dropped.
     #[test]
     fn radar_for_another_place_is_fetched_again_and_stale_answers_dropped() {
         let mut app = App::new();
-        loaded(&mut app);
-        app.on_action(Action::OpenRadar);
-        let first = app.location.clone();
-        app.on_message(Message::Radar {
-            scene: scene_for(&first, 3),
-        });
+        radar_open(&mut app, 3);
+        app.on_action(Action::MoveMap(MapMove::Out));
+        let first_scene = loop_for(&app, 3);
 
         app.on_action(Action::Back);
         app.location = ActiveLocation {
@@ -2672,44 +2967,38 @@ mod tests {
             lat: 1.0,
             lon: 2.0,
         };
-        let Some(Request::Radar { location }) = app.on_action(Action::OpenRadar) else {
-            panic!("another place is another ask")
-        };
-        assert!(!location.same_place(&first));
+        let (second, view) = radar_ask(app.on_action(Action::OpenRadar));
+        assert_eq!(
+            view,
+            View::at(1.0, 2.0, HOME_ZOOM),
+            "home, on the new place"
+        );
+        let second_scene = loop_for(&app, 3);
 
         // And again while that ask is still out: the user moves on a
         // second time before any frames arrive.
         app.on_action(Action::Back);
-        let second = app.location.clone();
         app.location = ActiveLocation {
             label: "Further".to_string(),
             lat: 3.0,
             lon: 4.0,
         };
-        assert!(matches!(
-            app.on_action(Action::OpenRadar),
-            Some(Request::Radar { .. })
-        ));
-        app.on_message(Message::Radar {
-            scene: scene_for(&second, 3),
-        });
-        assert!(
-            matches!(app.radar, Fetch::Loading),
-            "not the place asked last"
-        );
+        let (third, _) = radar_ask(app.on_action(Action::OpenRadar));
 
-        app.on_message(Message::Radar {
-            scene: scene_for(&first, 3),
-        });
-        assert!(
-            matches!(app.radar, Fetch::Loading),
-            "the old answer is dropped"
-        );
+        for (id, scene) in [(second, second_scene), (0, first_scene)] {
+            app.on_message(Message::Radar { id, scene });
+            assert_eq!(frames_shown(&app), 0, "not the ask that is out");
+        }
         app.on_message(Message::RadarFailed {
-            location: first,
+            id: second,
             error: "late".to_string(),
         });
-        assert!(matches!(app.radar, Fetch::Loading));
+        assert_eq!(frames_shown(&app), 0);
+        assert!(app.is_awaiting_radar());
+
+        let scene = loop_for(&app, 3);
+        app.on_message(Message::Radar { id: third, scene });
+        assert_eq!(frames_shown(&app), 3);
     }
 
     /// A failure is shown where the map would be, and `r` tries again. So
@@ -2718,19 +3007,36 @@ mod tests {
     fn a_failed_or_dropped_radar_is_shown_and_can_be_retried() {
         let mut app = App::new();
         loaded(&mut app);
-        let request = app.on_action(Action::OpenRadar).expect("asked");
-        let here = app.location.clone();
+        let (id, _) = radar_ask(app.on_action(Action::OpenRadar));
 
         let outcome = app.on_message(Message::RadarFailed {
-            location: here,
+            id,
             error: "timed out".to_string(),
         });
         assert!(outcome.warning.is_none(), "said on screen, not on exit");
         assert!(matches!(&app.radar, Fetch::Failed(error) if error == "timed out"));
+        assert!(!app.is_awaiting_radar());
 
-        assert!(app.on_action(Action::Refresh).is_some());
-        assert!(app.on_dispatch_dropped(request).is_none());
+        let retry = app.on_action(Action::Refresh).expect("asked again");
+        assert!(app.on_dispatch_dropped(retry).is_none());
         assert!(matches!(&app.radar, Fetch::Failed(error) if error.contains("too many")));
+        assert!(!app.is_awaiting_radar());
+    }
+
+    /// With no room to ask for the rest of the loop, the frame in hand
+    /// stays and the waiting stops.
+    #[test]
+    fn a_loop_that_could_not_be_asked_for_leaves_its_newest_frame() {
+        let mut app = App::new();
+        loaded(&mut app);
+        let (id, _) = radar_ask(app.on_action(Action::OpenRadar));
+        let scene = newest_for(&app, 12);
+        let rest = app.on_message(Message::Radar { id, scene }).request;
+
+        assert!(app.on_dispatch_dropped(rest.expect("asked")).is_none());
+
+        assert_eq!(frames_shown(&app), 1);
+        assert!(!app.is_awaiting_radar());
     }
 
     /// The loop moves only on the radar screen, so an app left on the
@@ -2738,12 +3044,7 @@ mod tests {
     #[test]
     fn the_radar_loop_only_runs_while_it_is_on_screen() {
         let mut app = App::new();
-        loaded(&mut app);
-        app.on_action(Action::OpenRadar);
-        let here = app.location.clone();
-        app.on_message(Message::Radar {
-            scene: scene_for(&here, 4),
-        });
+        radar_open(&mut app, 4);
         let start = Instant::now();
 
         assert!(!app.advance_radar(start));
@@ -2759,6 +3060,169 @@ mod tests {
             !app.advance_radar(start + Duration::from_secs(180)),
             "paused"
         );
+    }
+
+    /// A move redraws the map at once, with no rain on it, and asks for
+    /// the rain only when the keys have been still. A held key is one ask.
+    #[test]
+    fn a_moved_map_is_drawn_at_once_and_fetched_when_it_settles() {
+        let mut app = App::new();
+        radar_open(&mut app, 4);
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+
+        for held in 0..3 {
+            assert!(app.on_action(Action::MoveMap(MapMove::Out)).is_none());
+            assert!(app.settle_radar(start + ms(100) * held).is_none());
+        }
+        assert_eq!(frames_shown(&app), 0);
+        let view = app.radar_view().expect("open");
+        assert_eq!(view.zoom(), HOME_ZOOM - 3);
+        assert!(matches!(&app.radar, Fetch::Ready(scene) if scene.radar.view() == view));
+        assert!(app.is_awaiting_radar(), "the spinner runs");
+
+        // 300 ms from the last move, not from the first.
+        assert!(app.settle_radar(start + ms(499)).is_none());
+        let (_, asked) = radar_ask(app.settle_radar(start + ms(500)));
+        assert_eq!(asked, view);
+        assert!(app.settle_radar(start + ms(900)).is_none(), "asked once");
+    }
+
+    /// Leaving a view calls its fetch off, and what still arrives for it
+    /// is not drawn over the view that replaced it.
+    #[test]
+    fn leaving_a_view_calls_off_its_fetch() {
+        let mut app = App::new();
+        loaded(&mut app);
+        let (id, _) = radar_ask(app.on_action(Action::OpenRadar));
+        let scene = newest_for(&app, 12);
+        let Some(Request::RadarRest { cancel, .. }) =
+            app.on_message(Message::Radar { id, scene }).request
+        else {
+            panic!("the rest is asked for")
+        };
+        let late = loop_for(&app, 13);
+
+        let (next, _) = radar_ask(moved(&mut app, MapMove::Pan(1, 0)));
+
+        assert!(cancel.is_cancelled());
+        assert_ne!(next, id);
+        app.on_message(Message::Radar { id, scene: late });
+        assert_eq!(frames_shown(&app), 0, "the old view's loop is dropped");
+        app.on_message(Message::RadarFailed {
+            id,
+            error: "called off".to_string(),
+        });
+        assert!(
+            matches!(app.radar, Fetch::Ready(_)),
+            "and so is its failure"
+        );
+    }
+
+    /// Going back to a view just left costs nothing; going back to one
+    /// left ten minutes ago is a new ask.
+    #[test]
+    fn a_view_gone_back_to_is_drawn_from_the_loop_in_hand() {
+        let mut app = App::new();
+        radar_open(&mut app, 4);
+        let (id, _) = radar_ask(moved(&mut app, MapMove::Out));
+        let scene = loop_for(&app, 6);
+        app.on_message(Message::Radar { id, scene });
+
+        assert!(app.on_action(Action::MoveMap(MapMove::In)).is_none());
+        assert_eq!(frames_shown(&app), 4);
+        assert!(!app.is_awaiting_radar());
+        assert!(
+            app.settle_radar(Instant::now() + RADAR_SETTLE * 2)
+                .is_none()
+        );
+
+        assert!(app.on_action(Action::MoveMap(MapMove::Out)).is_none());
+        assert_eq!(frames_shown(&app), 6);
+
+        app.now += TimeDelta::minutes(11);
+        radar_ask(moved(&mut app, MapMove::In));
+        assert_eq!(frames_shown(&app), 0);
+    }
+
+    #[test]
+    fn only_the_newest_few_loops_are_kept() {
+        let mut app = App::new();
+        radar_open(&mut app, 2);
+        for _ in 0..MAX_KEPT_RADARS {
+            let (id, _) = radar_ask(moved(&mut app, MapMove::Pan(1, 0)));
+            let scene = loop_for(&app, 2);
+            app.on_message(Message::Radar { id, scene });
+        }
+        assert_eq!(app.radar_kept.len(), MAX_KEPT_RADARS);
+
+        assert!(
+            app.on_action(Action::MoveMap(MapMove::Pan(-1, 0)))
+                .is_none()
+        );
+        assert_eq!(frames_shown(&app), 2, "the last view left is in hand");
+        radar_ask(moved(&mut app, MapMove::Home));
+        assert_eq!(frames_shown(&app), 0, "the first has been let go");
+    }
+
+    /// Zooming out ends at the whole world and zooming in at the closest
+    /// picture there is. A move that goes nowhere asks for nothing, and
+    /// the way back in leads to where the way out began.
+    #[test]
+    fn the_map_stops_at_its_limits_and_comes_back_to_where_it_was() {
+        let mut app = App::new();
+        radar_open(&mut app, 2);
+        let home = app.radar_view().expect("open");
+
+        for _ in 0..HOME_ZOOM {
+            app.on_action(Action::MoveMap(MapMove::Out));
+        }
+        let world = app.radar_view().expect("open");
+        assert_eq!((world.zoom(), world.center()), (0, (0.0, 0.0)));
+        let start = Instant::now();
+        assert!(app.settle_radar(start).is_none());
+        let (id, _) = radar_ask(app.settle_radar(start + RADAR_SETTLE));
+        let scene = loop_for(&app, 2);
+        app.on_message(Message::Radar { id, scene });
+
+        for stuck in [MapMove::Out, MapMove::Pan(1, 0), MapMove::Pan(0, -1)] {
+            assert!(app.on_action(Action::MoveMap(stuck)).is_none());
+            assert_eq!(app.radar_view(), Some(world), "{stuck:?}");
+            assert!(!app.is_awaiting_radar(), "{stuck:?} asked for nothing");
+        }
+
+        for _ in 0..HOME_ZOOM {
+            app.on_action(Action::MoveMap(MapMove::In));
+        }
+        assert_eq!(app.radar_view(), Some(home));
+        assert_eq!(frames_shown(&app), 2, "and its loop is still in hand");
+
+        app.on_action(Action::MoveMap(MapMove::In));
+        let closest = app.radar_view().expect("open");
+        assert_eq!(closest.zoom(), MAX_ZOOM);
+        app.on_action(Action::MoveMap(MapMove::In));
+        assert_eq!(app.radar_view(), Some(closest));
+
+        app.on_action(Action::MoveMap(MapMove::Pan(3, 2)));
+        assert_ne!(app.radar_view().map(View::center), Some(closest.center()));
+        app.on_action(Action::MoveMap(MapMove::Home));
+        assert_eq!(app.radar_view(), Some(home));
+    }
+
+    /// The map moves only while it is on screen.
+    #[test]
+    fn a_map_that_is_not_on_screen_does_not_move() {
+        let mut app = App::new();
+        loaded(&mut app);
+        assert!(app.on_action(Action::MoveMap(MapMove::Out)).is_none());
+        assert_eq!(app.radar_view(), None);
+
+        radar_ask(app.on_action(Action::OpenRadar));
+        let view = app.radar_view();
+        app.on_action(Action::Back);
+        assert!(app.on_action(Action::MoveMap(MapMove::Out)).is_none());
+        assert_eq!(app.radar_view(), view);
+        assert!(app.settle_radar(Instant::now() + RADAR_SETTLE).is_none());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use crate::radar_view::RadarScene;
 use crate::theme::Palette;
 use crate::ui::pane::bottom_titles;
 use crate::ui::{TITLE_GUTTER, spinner, title_room, truncate};
+use crate::units::Unit;
 use crate::weather::radar::{FRAME_SIDE, Frame as RadarFrame, Level};
 use chrono::{DateTime, FixedOffset};
 use ratatui::Frame;
@@ -49,7 +50,12 @@ fn notice_render(
     message: &str,
     color: Color,
 ) {
-    let block = pane(&app.location.label, "Radar", palette, area.width);
+    let block = pane(
+        &app.location.label,
+        &[NAME.to_string()],
+        palette,
+        area.width,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -73,15 +79,9 @@ fn notice_render(
 fn scene_render(frame: &mut Frame, app: &App, scene: &RadarScene, palette: Palette, area: Rect) {
     let frames = &scene.radar.frames;
     let index = app.playback.frame(frames.len());
-    // Missing frames first: with most of the loop absent, "nothing
-    // falling" would be a claim about hours nobody has seen.
-    let heading = match (scene.radar.missing, scene.has_rain) {
-        (0, true) => "Radar".to_string(),
-        (0, false) => "Radar · nothing falling in range".to_string(),
-        (1, _) => "Radar · 1 frame missing".to_string(),
-        (missing, _) => format!("Radar · {missing} frames missing"),
-    };
-    let mut block = pane(&scene.location.label, &heading, palette, area.width);
+    let span = span_label(scene.radar.view().kilometres_across(), app.unit);
+    let headings = headings(&span, state_label(app, scene).as_deref());
+    let mut block = pane(&scene.location.label, &headings, palette, area.width);
 
     let offset = match &app.weather {
         Fetch::Ready(weather) => weather.utc_offset_secs,
@@ -110,11 +110,15 @@ fn scene_render(frame: &mut Frame, app: &App, scene: &RadarScene, palette: Palet
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(shown) = shown else { return };
 
+    // A view that has just been moved to has no frame yet, and its map is
+    // drawn all the same: that is what makes a held arrow key a pan and
+    // not a row of blank panes.
     let dots = Dots::of(inner);
     let mut cells = vec![Cell::default(); inner.width as usize * inner.height as usize];
-    rain_plot(&mut cells, dots, shown);
+    if let Some(shown) = shown {
+        rain_plot(&mut cells, dots, shown);
+    }
     for trace in &scene.outline {
         outline_plot(&mut cells, dots, trace);
     }
@@ -125,16 +129,15 @@ fn scene_render(frame: &mut Frame, app: &App, scene: &RadarScene, palette: Palet
 }
 
 /// The border: the city in its corner as on the weather screen, and what
-/// the pane is opposite it when there is room for both.
-fn pane(city: &str, heading: &str, palette: Palette, width: u16) -> Block<'static> {
+/// the pane is opposite it when there is room for both. `headings` are
+/// the same thing said at decreasing length, and the first that fits is
+/// used.
+fn pane(city: &str, headings: &[String], palette: Palette, width: u16) -> Block<'static> {
     let available = title_room(width);
     let city = truncate(&city.to_uppercase(), available);
     let len = |text: &str| text.chars().count();
-    // "Radar" alone when the whole heading will not fit: the first word is
-    // the pane's name and the rest is commentary.
-    let short = heading.split(' ').next().unwrap_or(heading);
-    let heading = [heading, short]
-        .into_iter()
+    let heading = headings
+        .iter()
         .find(|text| len(&city) + TITLE_GUTTER + len(text) <= available);
 
     let mut block = Block::bordered()
@@ -148,6 +151,68 @@ fn pane(city: &str, heading: &str, palette: Palette, width: u16) -> Block<'stati
         );
     }
     block
+}
+
+const NAME: &str = "Radar";
+
+/// The pane's heading, wordiest first. What is wrong or absent outlasts
+/// the scale when there is not room for both: the scale can be read off
+/// the coast, and a missing hour cannot.
+fn headings(span: &str, state: Option<&str>) -> Vec<String> {
+    let Some(state) = state else {
+        return vec![format!("{NAME} · {span}"), NAME.to_string()];
+    };
+    vec![
+        format!("{NAME} · {span} · {state}"),
+        format!("{NAME} · {state}"),
+        format!("{NAME} · {span}"),
+        NAME.to_string(),
+    ]
+}
+
+/// What there is to say about the frames, if anything. Waiting comes
+/// first, then missing frames: with most of the loop absent, "nothing
+/// falling" would be a claim about hours nobody has seen.
+fn state_label(app: &App, scene: &RadarScene) -> Option<String> {
+    let radar = &scene.radar;
+    if app.is_awaiting_radar() {
+        return Some(format!("{} loading", spinner(app.tick)));
+    }
+    if !radar.is_whole() {
+        // The rest of the loop was refused and nothing is fetching it. A
+        // map with no frame at all has nothing to qualify.
+        return (!radar.frames.is_empty()).then(|| "newest frame only".to_string());
+    }
+    match (radar.missing, scene.has_rain) {
+        (0, true) => None,
+        (0, false) => Some("nothing falling in range".to_string()),
+        (1, _) => Some("1 frame missing".to_string()),
+        (missing, _) => Some(format!("{missing} frames missing")),
+    }
+}
+
+const KM_PER_MILE: f64 = 1.609_344;
+
+/// How wide the frame is on the ground, to two figures: the frame is
+/// cropped to the pane and the ground narrows toward the poles, so a
+/// third figure would be invented.
+fn span_label(kilometres: f64, unit: Unit) -> String {
+    let (distance, name) = match unit {
+        Unit::Metric => (kilometres, "km"),
+        Unit::Imperial => (kilometres / KM_PER_MILE, "mi"),
+    };
+    let grain = match distance {
+        d if d >= 10_000.0 => 1_000.0,
+        d if d >= 1_000.0 => 100.0,
+        d if d >= 100.0 => 10.0,
+        _ => 1.0,
+    };
+    let rounded = ((distance / grain).round() * grain) as u64;
+    let figures = match rounded {
+        1_000.. => format!("{},{:03}", rounded / 1_000, rounded % 1_000),
+        _ => rounded.to_string(),
+    };
+    format!("{figures} {name} across")
 }
 
 /// What the bottom border says about the frame on screen, wordiest first:
@@ -669,7 +734,15 @@ mod tests {
 
         let top = row(&drawn(&app, 80, 20), 0);
         assert!(top.contains("COPENHAGEN, DENMARK"), "{top:?}");
-        assert!(top.contains("Radar · nothing falling in range"), "{top:?}");
+        assert!(
+            top.contains("Radar · 220 mi across · nothing falling in range"),
+            "{top:?}"
+        );
+        let middling = row(&drawn(&app, 58, 20), 0);
+        assert!(
+            middling.contains("Radar · nothing falling in range") && !middling.contains("mi"),
+            "what is known outlasts the scale: {middling:?}"
+        );
 
         let narrow = row(&drawn(&app, 34, 12), 0);
         assert!(
@@ -716,7 +789,7 @@ mod tests {
         scene.radar.missing = 11;
 
         let top = row(&drawn(&app, 80, 20), 0);
-        assert!(top.contains("Radar · 11 frames missing"), "{top:?}");
+        assert!(top.contains("220 mi across · 11 frames missing"), "{top:?}");
         assert!(!top.contains("nothing falling"), "{top:?}");
 
         let Fetch::Ready(scene) = &mut app.radar else {
@@ -724,7 +797,7 @@ mod tests {
         };
         scene.radar.missing = 1;
         let top = row(&drawn(&app, 80, 20), 0);
-        assert!(top.contains("Radar · 1 frame missing"), "{top:?}");
+        assert!(top.contains("220 mi across · 1 frame missing"), "{top:?}");
     }
 
     /// The spinner and a long error at the app's floor, in a pane with no
@@ -760,7 +833,15 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         let text: String = (0..24).map(|y| row(&buffer, y) + "\n").collect();
 
-        for binding in ["[space] pause", "[←→] frame", "[r] refresh", "[b] back"] {
+        for binding in [
+            "[space] pause",
+            "[←→↑↓] move",
+            "[+-] zoom",
+            "[c] centre",
+            "[[ ]] frame",
+            "[r] refresh",
+            "[b] back",
+        ] {
             assert!(text.contains(binding), "{binding} in\n{text}");
         }
         assert!(!text.contains("hourly"), "{text}");
@@ -806,8 +887,92 @@ mod tests {
 
         let empty = app_showing(copenhagen(), Vec::new());
         let buffer = drawn(&empty, 60, 15);
-        assert!(braille_in(&buffer, palette().border).is_empty());
+        assert!(
+            braille_in(&buffer, palette().border).len() > 20,
+            "the map is drawn before any rain has come"
+        );
+        let top = row(&buffer, 0);
+        assert!(
+            top.contains("220 mi across") && !top.contains("falling"),
+            "{top:?}"
+        );
         assert!(row(&buffer, 14).contains(CREDIT));
+    }
+
+    /// From the whole world to the closest picture, at a wide pane and a
+    /// narrow one: every zoom draws a map and says how wide it is.
+    #[test]
+    fn every_zoom_draws_its_map_and_its_scale() {
+        use crate::weather::radar::{MAX_ZOOM, View};
+        let spans = [
+            "25,000 mi",
+            "8,500 mi",
+            "4,200 mi",
+            "2,100 mi",
+            "1,100 mi",
+            "530 mi",
+            "270 mi",
+            "130 mi",
+        ];
+        for zoom in 0..=MAX_ZOOM {
+            let mut app = app_showing(copenhagen(), Vec::new());
+            let view = View::at(47.0, 9.5, zoom);
+            app.radar = Fetch::Ready(RadarScene::awaited(copenhagen(), view));
+            for (width, height) in [(100, 30), (34, 12)] {
+                let buffer = drawn(&app, width, height);
+                let outline = braille_in(&buffer, palette().border).len();
+                assert!(outline > 10, "{outline} cells at zoom {zoom}, {width} wide");
+            }
+            let top = row(&drawn(&app, 100, 30), 0);
+            let span = spans[zoom as usize];
+            assert!(
+                top.contains(&format!("Radar · {span} across")),
+                "{zoom}: {top:?}"
+            );
+        }
+    }
+
+    /// The place is marked only while it is in the frame.
+    #[test]
+    fn the_marker_leaves_with_the_place() {
+        use crate::weather::radar::View;
+        let mut app = app_showing(copenhagen(), Vec::new());
+        let marked = |app: &App| {
+            let buffer = drawn(app, 80, 24);
+            (0..24).any(|y| row(&buffer, y).contains(MARKER))
+        };
+        assert!(marked(&app));
+
+        app.radar = Fetch::Ready(RadarScene::awaited(copenhagen(), View::at(40.0, -3.7, 6)));
+        assert!(!marked(&app), "Madrid's frame has no Copenhagen in it");
+        app.radar = Fetch::Ready(RadarScene::awaited(copenhagen(), View::at(40.0, -3.7, 2)));
+        assert!(marked(&app), "Europe's does");
+    }
+
+    /// While the rain is on its way the border says so, over the map.
+    #[test]
+    fn a_view_being_fetched_says_it_is_loading() {
+        use crate::input::Action;
+        let mut app = app_showing(copenhagen(), Vec::new());
+        app.radar = Fetch::Idle;
+        app.screen = Screen::Weather;
+        assert!(app.on_action(Action::OpenRadar).is_some());
+
+        let buffer = drawn(&app, 80, 24);
+        let top = row(&buffer, 0);
+        assert!(top.contains("220 mi across · | loading"), "{top:?}");
+        assert!(braille_in(&buffer, palette().border).len() > 20);
+    }
+
+    #[test]
+    fn the_scale_is_given_to_two_figures_in_the_users_units() {
+        assert_eq!(span_label(384.6, Unit::Metric), "380 km across");
+        assert_eq!(span_label(384.6, Unit::Imperial), "240 mi across");
+        assert_eq!(span_label(40_075.0, Unit::Metric), "40,000 km across");
+        assert_eq!(span_label(1_549.0, Unit::Metric), "1,500 km across");
+        assert_eq!(span_label(96.4, Unit::Metric), "96 km across");
+        assert_eq!(span_label(0.0, Unit::Imperial), "0 mi across");
+        assert_eq!(span_label(f64::NAN, Unit::Metric), "0 km across");
     }
 
     /// On a wide pane the frame's full width is used and a band of it is

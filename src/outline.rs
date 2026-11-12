@@ -93,12 +93,9 @@ pub struct Trace {
 /// the frame; whoever draws them clips.
 pub fn traced_on(radar: &Radar) -> Vec<Trace> {
     let (south, west, north, east) = radar.bounds();
-    let mid = (west + east) / 2.0;
     let is_near = |lat: f64, lon: f64| {
-        // Compared the short way round, as `Radar::pixel_of` projects.
-        let across = (lon - mid + 180.0).rem_euclid(360.0) - 180.0;
         (south - MARGIN..=north + MARGIN).contains(&lat)
-            && across.abs() <= (east - west) / 2.0 + MARGIN
+            && (west - MARGIN..=east + MARGIN).contains(&lon)
     };
 
     let mut traced = Vec::new();
@@ -349,10 +346,10 @@ mod tests {
         assert!(traced_on(&radar).is_empty());
     }
 
-    /// Taveuni straddles 180°. A frame centred just west of it still gets
-    /// the coast that is stored on the east side.
+    /// A frame beside the antimeridian ends at it, as the radar's pictures
+    /// do, and the coast up to the line is all there.
     #[test]
-    fn the_outline_follows_a_frame_across_the_antimeridian() {
+    fn the_outline_runs_up_to_the_antimeridian() {
         let radar = Radar::fixture(-16.8, 179.9, Vec::new());
         let side = FRAME_SIDE as f64;
         let right_half = traced_on(&radar)
@@ -361,5 +358,21 @@ mod tests {
             .filter(|(x, y)| (side / 2.0..side).contains(x) && (0.0..side).contains(y))
             .count();
         assert!(right_half > 0);
+    }
+
+    /// The whole world is a few thousand points, every one of them in the
+    /// frame, and none of them a state's.
+    #[test]
+    fn the_whole_world_is_outlined_lightly() {
+        use crate::weather::radar::View;
+        let traced = traced_on(&Radar::awaited(View::at(0.0, 0.0, 0)));
+        let points: usize = traced.iter().map(|trace| trace.points.len()).sum();
+        assert!((3_000..12_000).contains(&points), "{points}");
+        assert!(traced.iter().all(|trace| trace.layer != Layer::State));
+        let side = FRAME_SIDE as f64;
+        for &(x, y) in traced.iter().flat_map(|trace| &trace.points) {
+            assert!((-1.0..=side + 1.0).contains(&x), "{x}");
+            assert!((-1.0..=side + 1.0).contains(&y), "{y}");
+        }
     }
 }

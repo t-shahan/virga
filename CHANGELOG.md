@@ -14,6 +14,21 @@ refuse to publish a version this file does not describe.
 
 ### Added
 
+- **The radar zooms and pans.** `+` and `-` zoom from about 190 km across
+  out to the whole world, the arrow keys move the map, and `c` goes back to
+  the city. The map redraws as the keys are pressed and the rain follows:
+  the newest frame first, then the rest of the loop. The border gives the
+  width of the view on the ground. Loops for the last eight views are kept
+  for ten minutes, so going back to one is instant.
+
+### Changed
+
+- **The radar loop is stepped with `[` and `]`.** The arrow keys, which
+  stepped it before, now move the map.
+- **The radar map ends at the antimeridian.** RainViewer's pictures do not
+  continue across it, so a place beside it now sits off centre in a frame
+  that is all map.
+
 - **State and province lines on the radar.** The map under the rain now
   draws the borders of states and provinces, fainter than coasts and
   country borders, for the nine countries Natural Earth divides: the United

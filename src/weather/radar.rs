@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::f64::consts::PI;
 use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ureq::Agent;
 
 /// Pixels along each side of a frame, the smaller of the two sizes served.
@@ -17,23 +19,119 @@ use ureq::Agent;
 /// the largest terminals, so the larger size would be thrown away.
 pub const FRAME_SIDE: usize = 256;
 
-/// Web Mercator zoom. A frame is one tile's worth of the world at this
-/// zoom, 5.6 degrees of longitude: about 380 km across at 52°N, which holds
-/// what can arrive in the two hours the frames span.
-const ZOOM: u32 = 6;
+/// The zoom the screen opens at. A frame is one tile's worth of the world
+/// at its zoom; at this one that is 5.6 degrees of longitude, about 380 km
+/// across at 52°N, which holds what can arrive in the two hours the frames
+/// span.
+pub const HOME_ZOOM: u32 = 6;
 
-/// The side of the whole world at `ZOOM`, in frame pixels.
-const WORLD: f64 = (FRAME_SIDE << ZOOM) as f64;
+/// The closest zoom RainViewer draws. Asked for a closer one it answers
+/// with a placeholder picture and a 200, which would read as a dry sky.
+pub const MAX_ZOOM: u32 = 7;
+
+/// Tenths of a degree, the grain a view's centre is kept and sent at:
+/// about eleven kilometres. The closest frame is 190 km wide, so the
+/// rounding costs nothing on screen, RainViewer learns a region and not an
+/// address, and two views compare equal exactly when they ask for the same
+/// picture.
+const TENTHS: f64 = 10.0;
+
+/// Frames a press of an arrow key moves the view by.
+const PAN_STEP: f64 = 0.25;
+
+const EQUATOR_KM: f64 = 40_075.0;
+
+/// Which part of the world a frame shows: its centre and its zoom.
+///
+/// A view never reaches past the edge of the map. RainViewer does not
+/// wrap its pictures across the antimeridian or draw beyond the poles'
+/// cut-off, so a frame hanging over an edge would be part map and part
+/// nothing, with no way to tell that nothing from a dry sky. At zoom 0 the
+/// frame is the whole world and there is one view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct View {
+    lat_tenths: i32,
+    lon_tenths: i32,
+    zoom: u32,
+}
+
+impl View {
+    /// The view at `zoom` nearest to being centred on a point.
+    pub fn at(lat: f64, lon: f64, zoom: u32) -> Self {
+        let zoom = zoom.min(MAX_ZOOM);
+        let world = world_side(zoom);
+        let half = FRAME_SIDE as f64 / 2.0;
+        let (x, y) = world_pixel(lat, lon, world);
+        let (lat, lon) = degrees_at(
+            x.clamp(half, world - half),
+            y.clamp(half, world - half),
+            world,
+        );
+        Self {
+            lat_tenths: (lat * TENTHS).round() as i32,
+            lon_tenths: (lon * TENTHS).round() as i32,
+            zoom,
+        }
+    }
+
+    /// The centre, as latitude and longitude.
+    pub fn center(self) -> (f64, f64) {
+        (
+            f64::from(self.lat_tenths) / TENTHS,
+            f64::from(self.lon_tenths) / TENTHS,
+        )
+    }
+
+    pub fn zoom(self) -> u32 {
+        self.zoom
+    }
+
+    /// The view `east` and `south` steps away, a quarter of a frame each.
+    /// At the edge of the map it stays where it is.
+    pub fn panned(self, east: i32, south: i32) -> Self {
+        let world = world_side(self.zoom);
+        let step = FRAME_SIDE as f64 * PAN_STEP;
+        let (lat, lon) = self.center();
+        let (x, y) = world_pixel(lat, lon, world);
+        let (lat, lon) = degrees_at(
+            (x + f64::from(east) * step).clamp(0.0, world),
+            (y + f64::from(south) * step).clamp(0.0, world),
+            world,
+        );
+        Self::at(lat, lon, self.zoom)
+    }
+
+    /// How much ground the frame spans from west to east at its centre.
+    pub fn kilometres_across(self) -> f64 {
+        let (lat, _) = self.center();
+        EQUATOR_KM * lat.to_radians().cos() / f64::from(1u32 << self.zoom)
+    }
+}
+
+/// The side of the whole world at a zoom, in frame pixels.
+fn world_side(zoom: u32) -> f64 {
+    (FRAME_SIDE << zoom.min(MAX_ZOOM)) as f64
+}
+
+/// A way to call off a fetch that is no longer wanted. Thirteen pictures
+/// take seconds, and a view that has been left should not hold the next
+/// one's pictures up behind its own.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// Frames kept. RainViewer lists two hours at ten-minute steps, thirteen in
 /// all; the bound is for a list that has grown, not the one expected.
 const MAX_FRAMES: usize = 16;
-
-/// The centre of the request is the place rounded to this many degrees,
-/// about eleven kilometres. The picture is 380 km wide, so the rounding
-/// costs nothing on screen, and RainViewer learns the region and not the
-/// address. The marker is still drawn at the place itself.
-const CENTER_STEP: f64 = 0.1;
 
 /// "Universal Blue" in RainViewer's numbering, the palette `Level::of`
 /// reads back, so this and that function change together. The service
@@ -145,15 +243,18 @@ impl Frame {
     }
 }
 
-/// The frames for a place, oldest first, and where their shared centre is.
+/// The frames for a view, oldest first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Radar {
-    center_lat: f64,
-    center_lon: f64,
+    view: View,
     pub frames: Vec<Frame>,
     /// Frames the service listed that did not arrive. The loop is shown
     /// without them, and says so: two frames are not two hours.
     pub missing: usize,
+    /// Frames listed and not asked for yet, oldest first. The newest frame
+    /// is fetched alone so a view has rain on it in one request's time;
+    /// these are the rest of its loop.
+    rest: Vec<Listed>,
 }
 
 impl Radar {
@@ -161,43 +262,85 @@ impl Radar {
     /// left corner. Not clamped: a caller asks about coastlines that leave
     /// the frame and wants to know which way.
     pub fn pixel_of(&self, lat: f64, lon: f64) -> (f64, f64) {
-        let (x, y) = world_pixel(lat, lon);
-        let (center_x, center_y) = world_pixel(self.center_lat, self.center_lon);
+        let (x, y) = world_pixel(lat, lon, self.world());
+        let (center_x, center_y) = self.center_pixel();
         let half = FRAME_SIDE as f64 / 2.0;
-        // The shorter way round, so a place beside the antimeridian is not
-        // a world away from the coast on its other side.
-        let across = (x - center_x + WORLD / 2.0).rem_euclid(WORLD) - WORLD / 2.0;
-        (across + half, y - center_y + half)
+        (x - center_x + half, y - center_y + half)
+    }
+
+    pub fn view(&self) -> View {
+        self.view
     }
 
     /// The Web Mercator zoom the frames were drawn at.
     pub fn zoom(&self) -> u32 {
-        ZOOM
+        self.view.zoom()
+    }
+
+    /// Whether every frame the service listed has been asked for. Until
+    /// then there is one frame and no loop, and nothing can be said about
+    /// the two hours before it.
+    pub fn is_whole(&self) -> bool {
+        self.rest.is_empty() && !self.frames.is_empty()
+    }
+
+    /// A view with no frames yet: enough to draw its map while they come.
+    pub fn awaited(view: View) -> Self {
+        Self {
+            view,
+            frames: Vec::new(),
+            missing: 0,
+            rest: Vec::new(),
+        }
+    }
+
+    fn world(&self) -> f64 {
+        world_side(self.zoom())
+    }
+
+    fn center_pixel(&self) -> (f64, f64) {
+        let (lat, lon) = self.view.center();
+        world_pixel(lat, lon, self.world())
     }
 
     /// The box of latitude and longitude that holds the frame, as
     /// `(south, west, north, east)`, for choosing which coastlines matter.
-    /// East can exceed 180 and west fall below -180 beside the antimeridian.
     pub fn bounds(&self) -> (f64, f64, f64, f64) {
-        let (center_x, center_y) = world_pixel(self.center_lat, self.center_lon);
+        let (center_x, center_y) = self.center_pixel();
         let half = FRAME_SIDE as f64 / 2.0;
-        let lat_at = |y: f64| (PI * (1.0 - 2.0 * y / WORLD)).sinh().atan().to_degrees();
-        let lon_at = |x: f64| x / WORLD * 360.0 - 180.0;
-        (
-            lat_at(center_y + half),
-            lon_at(center_x - half),
-            lat_at(center_y - half),
-            lon_at(center_x + half),
-        )
+        let world = self.world();
+        let (south, west) = degrees_at(center_x - half, center_y + half, world);
+        let (north, east) = degrees_at(center_x + half, center_y - half, world);
+        (south, west, north, east)
+    }
+
+    /// A whole loop at the opening zoom, centred as near a place as a view
+    /// can be.
+    #[cfg(test)]
+    pub fn fixture(center_lat: f64, center_lon: f64, frames: Vec<Frame>) -> Self {
+        Self::fixture_at(View::at(center_lat, center_lon, HOME_ZOOM), frames)
     }
 
     #[cfg(test)]
-    pub fn fixture(center_lat: f64, center_lon: f64, frames: Vec<Frame>) -> Self {
+    pub fn fixture_at(view: View, frames: Vec<Frame>) -> Self {
         Self {
-            center_lat,
-            center_lon,
             frames,
-            missing: 0,
+            ..Self::awaited(view)
+        }
+    }
+
+    /// A view with its newest frame in hand and `rest` more listed.
+    #[cfg(test)]
+    pub fn fixture_begun(view: View, newest: Frame, rest: usize) -> Self {
+        Self {
+            frames: vec![newest],
+            rest: (0..rest)
+                .map(|index| Listed {
+                    time: index as i64,
+                    path: format!("/v2/radar/{index}"),
+                })
+                .collect(),
+            ..Self::awaited(view)
         }
     }
 }
@@ -223,11 +366,17 @@ impl Frame {
 /// infinity; RainViewer's tiles stop there too.
 const MERCATOR_LIMIT: f64 = 85.0;
 
-fn world_pixel(lat: f64, lon: f64) -> (f64, f64) {
+fn world_pixel(lat: f64, lon: f64, world: f64) -> (f64, f64) {
     let lat = lat.clamp(-MERCATOR_LIMIT, MERCATOR_LIMIT).to_radians();
-    let x = (lon + 180.0) / 360.0 * WORLD;
-    let y = (1.0 - lat.tan().asinh() / PI) / 2.0 * WORLD;
+    let x = (lon + 180.0) / 360.0 * world;
+    let y = (1.0 - lat.tan().asinh() / PI) / 2.0 * world;
     (x, y)
+}
+
+/// The latitude and longitude at a world pixel, `world_pixel` backwards.
+fn degrees_at(x: f64, y: f64, world: f64) -> (f64, f64) {
+    let lat = (PI * (1.0 - 2.0 * y / world)).sinh().atan().to_degrees();
+    (lat, x / world * 360.0 - 180.0)
 }
 
 #[derive(Deserialize)]
@@ -242,8 +391,10 @@ struct RadarDto {
     past: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-struct FrameDto {
+/// A frame the service has, by its time and the path its pictures are
+/// under.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct Listed {
     time: i64,
     path: String,
 }
@@ -253,12 +404,12 @@ impl IndexDto {
     /// wrong shape is dropped and the rest stand. A path is only accepted
     /// in the one form RainViewer uses, because it is about to become part
     /// of a URL and a reply must not be able to aim that anywhere else.
-    fn into_frames(self) -> Vec<FrameDto> {
-        let mut frames: Vec<FrameDto> = self
+    fn into_frames(self) -> Vec<Listed> {
+        let mut frames: Vec<Listed> = self
             .radar
             .past
             .into_iter()
-            .filter_map(|entry| serde_json::from_value::<FrameDto>(entry).ok())
+            .filter_map(|entry| serde_json::from_value::<Listed>(entry).ok())
             .filter(|frame| is_frame_path(&frame.path))
             .collect();
         frames.sort_by_key(|frame| frame.time);
@@ -278,41 +429,83 @@ fn is_frame_path(path: &str) -> bool {
     })
 }
 
-/// The radar around a place: one request for the list of frames and one
-/// for each frame's picture.
-pub fn fetch_radar(lat: f64, lon: f64) -> Result<Radar> {
-    fetch_radar_with(agent(), &Endpoints::default(), lat, lon)
+/// The newest frame of a view, and the list of the frames before it: two
+/// requests, so a view that has just been moved to has rain on it at once.
+pub fn fetch_newest(view: View) -> Result<Radar> {
+    fetch_newest_with(agent(), &Endpoints::default(), view)
 }
 
-pub(crate) fn fetch_radar_with(
+pub(crate) fn fetch_newest_with(agent: &Agent, endpoints: &Endpoints, view: View) -> Result<Radar> {
+    let mut rest = fetch_index_with(agent, endpoints)?;
+    ensure!(!rest.is_empty(), "the radar service listed no frames");
+
+    let mut failures = Vec::new();
+    while let Some(listed) = rest.pop() {
+        match fetch_frame_with(agent, &frame_url(endpoints, view, &listed), listed.time) {
+            Ok(frame) => {
+                return Ok(Radar {
+                    view,
+                    frames: vec![frame],
+                    missing: failures.len(),
+                    rest,
+                });
+            }
+            Err(error) => failures.push(error),
+        }
+        if failures.len() > FORGIVEN_FRAMES {
+            break;
+        }
+    }
+    match failures.into_iter().next() {
+        Some(first) => Err(first),
+        None => bail!("the radar service listed no frames"),
+    }
+}
+
+/// The rest of a view's loop, one request a frame. `None` when the fetch
+/// was called off, which is nobody's failure and is not reported as one.
+/// Frames that do not arrive are counted and the loop stands without them.
+pub fn fetch_rest(radar: Radar, cancel: &Cancel) -> Option<Radar> {
+    fetch_rest_with(agent(), &Endpoints::default(), radar, cancel)
+}
+
+pub(crate) fn fetch_rest_with(
     agent: &Agent,
     endpoints: &Endpoints,
-    lat: f64,
-    lon: f64,
-) -> Result<Radar> {
-    let listed = fetch_index_with(agent, endpoints)?;
-    ensure!(!listed.is_empty(), "the radar service listed no frames");
-
-    let round = |degrees: f64| (degrees / CENTER_STEP).round() * CENTER_STEP;
-    let (center_lat, center_lon) = (
-        round(lat).clamp(-MERCATOR_LIMIT, MERCATOR_LIMIT),
-        round(lon),
-    );
-
-    let frames = gather(listed.len(), |index| {
-        let frame = &listed[index];
-        let url = format!(
-            "{}{}/{FRAME_SIDE}/{ZOOM}/{center_lat:.1}/{center_lon:.1}/{COLOR_SCHEME}/0_0.png",
-            endpoints.radar_frames, frame.path
-        );
-        fetch_frame_with(agent, &url, frame.time)
-    })?;
-    Ok(Radar {
-        center_lat,
-        center_lon,
-        missing: listed.len() - frames.len(),
-        frames,
+    radar: Radar,
+    cancel: &Cancel,
+) -> Option<Radar> {
+    let Radar {
+        view,
+        frames: newest,
+        missing,
+        rest,
+    } = radar;
+    // A fetch called off fails every frame from then on, so `gather`
+    // gives up within two of them without knowing why.
+    let earlier = gather(rest.len(), |index| {
+        ensure!(!cancel.is_cancelled(), "called off");
+        let listed = &rest[index];
+        fetch_frame_with(agent, &frame_url(endpoints, view, listed), listed.time)
     })
+    .unwrap_or_default();
+    if cancel.is_cancelled() {
+        return None;
+    }
+    Some(Radar {
+        view,
+        missing: missing + rest.len() - earlier.len(),
+        frames: earlier.into_iter().chain(newest).collect(),
+        rest: Vec::new(),
+    })
+}
+
+fn frame_url(endpoints: &Endpoints, view: View, listed: &Listed) -> String {
+    let (lat, lon) = view.center();
+    format!(
+        "{}{}/{FRAME_SIDE}/{}/{lat:.1}/{lon:.1}/{COLOR_SCHEME}/0_0.png",
+        endpoints.radar_frames, listed.path, view.zoom
+    )
 }
 
 /// A missing frame is a stutter in the loop and not a reason to show
@@ -344,7 +537,7 @@ fn gather(count: usize, mut fetch: impl FnMut(usize) -> Result<Frame>) -> Result
     }
 }
 
-fn fetch_index_with(agent: &Agent, endpoints: &Endpoints) -> Result<Vec<FrameDto>> {
+fn fetch_index_with(agent: &Agent, endpoints: &Endpoints) -> Result<Vec<Listed>> {
     let url = &endpoints.radar_index;
     let mut response = agent
         .get(url)
@@ -566,20 +759,82 @@ mod tests {
         assert!(close(top, 0.0) && close(bottom, 256.0), "{top}, {bottom}");
     }
 
-    /// Fiji's coast east of the antimeridian is a few pixels from a centre
-    /// west of it, not a world's width away.
+    /// RainViewer's pictures stop at the antimeridian, so a view beside it
+    /// is moved in until its frame ends there. Fiji is then off centre and
+    /// all of its frame is map.
     #[test]
-    fn the_antimeridian_is_crossed_the_short_way() {
-        let radar = Radar::fixture(-17.0, 179.5, Vec::new());
-        let (x, _) = radar.pixel_of(-17.0, -179.5);
+    fn a_view_stops_at_the_antimeridian_and_the_poles() {
+        let close = |a: f64, b: f64| (a - b).abs() < 0.06;
+
+        let fiji = Radar::fixture(-17.0, 179.5, Vec::new());
+        let (_, _, _, east) = fiji.bounds();
+        assert!(close(east, 180.0), "{east}");
+        let (x, _) = fiji.pixel_of(-17.0, 179.5);
         assert!((128.0..256.0).contains(&x), "{x}");
+
+        let polar = Radar::fixture(89.0, 0.0, Vec::new());
+        let (_, _, north, _) = polar.bounds();
+        assert!((84.9..85.2).contains(&north), "{north}");
+        let (x, y) = polar.pixel_of(89.0, 0.0);
+        assert!(x.is_finite() && y.is_finite());
+
+        let nowhere = View::at(f64::NAN, f64::INFINITY, 3);
+        let (lat, lon) = nowhere.center();
+        assert!(lat.is_finite() && lon.is_finite());
+    }
+
+    /// Zoom 0 is the whole world in one frame, so there is one view of it
+    /// wherever it was asked for, and each zoom in halves what is spanned.
+    #[test]
+    fn zooming_out_ends_at_one_view_of_the_world() {
+        let world = View::at(52.5, 13.4, 0);
+        assert_eq!(world, View::at(-33.9, 151.2, 0));
+        assert_eq!(world.center(), (0.0, 0.0));
+        let (south, west, north, east) = Radar::awaited(world).bounds();
+        assert!((west, east) == (-180.0, 180.0), "{west}..{east}");
+        assert!(south < -85.0 && north > 85.0);
+
+        for zoom in 1..=MAX_ZOOM {
+            let (_, west, _, east) = Radar::awaited(View::at(10.0, 20.0, zoom)).bounds();
+            let span = 360.0 / f64::from(1u32 << zoom);
+            assert!((east - west - span).abs() < 1e-9, "{zoom}: {west}..{east}");
+        }
+        assert_eq!(View::at(10.0, 20.0, 99).zoom(), MAX_ZOOM);
     }
 
     #[test]
-    fn a_polar_place_is_asked_for_at_the_edge_of_the_projection() {
-        let radar = Radar::fixture(89.0, 0.0, Vec::new());
-        let (x, y) = radar.pixel_of(89.0, 0.0);
-        assert!(x.is_finite() && y.is_finite());
+    fn a_step_moves_a_quarter_frame_and_stops_at_the_edge() {
+        let start = View::at(40.0, -90.0, 5);
+        let (lat, lon) = start.center();
+
+        let east = start.panned(1, 0);
+        assert_eq!(east.center().0, lat);
+        assert!((east.center().1 - lon - 11.25 / 4.0).abs() < 0.06);
+        let south = start.panned(0, 1);
+        assert_eq!(south.center().1, lon);
+        assert!(south.center().0 < lat);
+
+        assert_eq!(east.panned(-1, 0), start, "there and back");
+        assert_eq!(south.panned(0, -1), start);
+
+        let mut edge = start;
+        for _ in 0..200 {
+            edge = edge.panned(1, -1);
+        }
+        assert_eq!(edge.panned(1, -1), edge, "nowhere further to go");
+        let (_, _, north, east) = Radar::awaited(edge).bounds();
+        assert!((east - 180.0).abs() < 0.06 && (85.0..85.2).contains(&north));
+
+        let world = View::at(0.0, 0.0, 0);
+        assert_eq!(world.panned(1, 1), world);
+    }
+
+    #[test]
+    fn the_span_on_the_ground_shrinks_with_zoom_and_with_latitude() {
+        let km = |lat, zoom| View::at(lat, 0.0, zoom).kilometres_across();
+        assert!((km(0.0, 0) - 40_075.0).abs() < 1.0);
+        assert!((km(52.0, 6) - 385.0).abs() < 5.0, "{}", km(52.0, 6));
+        assert!(km(52.0, 7) < km(52.0, 6) && km(60.0, 6) < km(30.0, 6));
     }
 
     fn png_response() -> Vec<u8> {
@@ -624,7 +879,8 @@ mod tests {
         );
         let (endpoints, hits, log) = serving_response(response.into_bytes());
 
-        let failed = fetch_radar_with(&test_agent(), &endpoints, 52.52, 13.405).unwrap_err();
+        let view = View::at(52.52, 13.405, HOME_ZOOM);
+        let failed = fetch_newest_with(&test_agent(), &endpoints, view).unwrap_err();
 
         let shown = format!("{failed:#}");
         assert!(shown.contains(&endpoints.radar_frames), "{shown}");
@@ -647,17 +903,78 @@ mod tests {
         );
         let (endpoints, hits, _) = serving_response(response.into_bytes());
 
-        let failed = fetch_radar_with(&test_agent(), &endpoints, 52.5, 13.4).unwrap_err();
+        let view = View::at(52.5, 13.4, HOME_ZOOM);
+        let failed = fetch_newest_with(&test_agent(), &endpoints, view).unwrap_err();
 
         assert!(failed.to_string().contains("no frames"), "{failed:#}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The rest of a loop is asked for at the view's own zoom and centre,
+    /// and lands before the newest frame, oldest first.
+    #[test]
+    fn the_rest_of_a_loop_is_fetched_around_its_newest_frame() {
+        let (endpoints, hits, log) = serving_response(png_response());
+        let view = View::at(-33.9, 151.2, 3);
+        let newest = Frame::fixture(9_000, Level::None, |_, _| false);
+        let begun = Radar::fixture_begun(view, newest, 3);
+        assert!(!begun.is_whole());
+
+        let radar = fetch_rest_with(&test_agent(), &endpoints, begun, &Cancel::default())
+            .expect("not called off");
+
+        assert!(radar.is_whole());
+        assert_eq!(radar.view(), view);
+        assert_eq!(radar.missing, 0);
+        let times: Vec<i64> = radar.frames.iter().map(|frame| frame.time).collect();
+        assert_eq!(times, [0, 1, 2, 9_000]);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let asked = log.lock().unwrap().join("\n");
+        let (lat, lon) = view.center();
+        assert!(
+            asked.contains(&format!("/v2/radar/2/256/3/{lat:.1}/{lon:.1}/2/0_0.png")),
+            "{asked}"
+        );
+    }
+
+    /// A fetch that is called off asks for nothing and answers nothing.
+    #[test]
+    fn a_fetch_called_off_makes_no_requests() {
+        let (endpoints, hits, _) = serving_response(png_response());
+        let newest = Frame::fixture(9_000, Level::None, |_, _| false);
+        let begun = Radar::fixture_begun(View::at(0.0, 0.0, 2), newest, 12);
+        let cancel = Cancel::default();
+        cancel.cancel();
+
+        assert!(fetch_rest_with(&test_agent(), &endpoints, begun, &cancel).is_none());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Frames that will not come are counted, and the frame in hand is
+    /// still a radar.
+    #[test]
+    fn a_loop_whose_earlier_frames_fail_keeps_its_newest_and_counts_them() {
+        let (endpoints, _, _) = serving_response(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        );
+        let newest = Frame::fixture(9_000, Level::None, |_, _| false);
+        let begun = Radar::fixture_begun(View::at(0.0, 0.0, 2), newest, 12);
+
+        let radar = fetch_rest_with(&test_agent(), &endpoints, begun, &Cancel::default())
+            .expect("not called off");
+
+        assert!(radar.is_whole());
+        assert_eq!((radar.frames.len(), radar.missing), (1, 12));
     }
 
     /// The whole path against the real service, at a test point.
     #[test]
     #[ignore]
     fn real_radar_arrives_as_two_hours_of_frames() {
-        let radar = fetch_radar(52.52, 13.41).expect("radar");
+        let begun = fetch_newest(View::at(52.52, 13.41, HOME_ZOOM)).expect("radar");
+        assert_eq!(begun.frames.len(), 1);
+        let radar = fetch_rest(begun, &Cancel::default()).expect("not called off");
         println!("frames: {}", radar.frames.len());
         assert!(radar.frames.len() >= 10);
         assert!(radar.frames.windows(2).all(|p| p[0].time < p[1].time));

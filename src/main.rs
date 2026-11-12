@@ -1023,6 +1023,10 @@ fn run(
         if app.advance_radar(Instant::now()) {
             dirty = true;
         }
+        if let Some(request) = app.settle_radar(Instant::now()) {
+            dispatch(&workers, &mut app, request)?;
+            dirty = true;
+        }
 
         // Only the spinner and the search cursor change on their own. With
         // neither on screen there is nothing to redraw until input or a worker
